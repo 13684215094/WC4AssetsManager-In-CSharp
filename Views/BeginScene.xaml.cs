@@ -33,6 +33,16 @@ public partial class BeginScene : UserControl
     private Button _countryButton = null!;
     private Button _checkDataButton = null!;
 
+    private Button _recommendBtn = null!;
+    private Button _navPrevButton = null!;
+    private Button _navNextButton = null!;
+    private int _navOffset;
+    private int _navVisibleCount = int.MaxValue;
+    private double _navTextWidth;
+    private bool _recalculating;
+    private bool _navAnimating;
+    private Grid _bottomBar = null!;
+
     private Grid _campaignGroup = null!;
     private Grid _conquestGroup = null!;
     private Grid _mapGroup = null!;
@@ -177,11 +187,11 @@ public partial class BeginScene : UserControl
         _mainGrid.Children.Add(mainContent);
 
         // Bottom navigation bar
-        var bottomBar = new Grid();
-        Grid.SetRow(bottomBar, 2);
-        bottomBar.Margin = new Thickness(50, 0, 20, 0);
+        _bottomBar = new Grid();
+        Grid.SetRow(_bottomBar, 2);
+        _bottomBar.Margin = new Thickness(50, 0, 20, 0);
 
-        _navPanel = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        _navPanel = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, RenderTransform = new TranslateTransform() };
 
         // 创建主按钮
         _campaignButton = CreateNavButton(ConfigManager.Instance.GetText("CampaignButtonText", "战役"), CampaignButton_Click);
@@ -198,10 +208,10 @@ public partial class BeginScene : UserControl
         _conquestGroup = CreateButtonGroup(_conquestButton, _newConquestButton);
         _mapGroup = CreateButtonGroup(_mapButton, _newMapButton);
 
-        _assetButton = CreateNavButton("资源管理器", AssetButton_Click);
-        _generalButton = CreateNavButton("将领编辑", GeneralButton_Click);
-        _countryButton = CreateNavButton("国家编辑", CountryButton_Click);
-        _checkDataButton = CreateNavButton("检查数据", CheckDataButton_Click);
+        _assetButton = CreateNavButton(ConfigManager.Instance.GetText("AssetBrowserButtonText", "资源管理器"), AssetButton_Click);
+        _generalButton = CreateNavButton(ConfigManager.Instance.GetText("GeneralButtonText", "将领编辑"), GeneralButton_Click);
+        _countryButton = CreateNavButton(ConfigManager.Instance.GetText("CountryButtonText", "国家编辑"), CountryButton_Click);
+        _checkDataButton = CreateNavButton(ConfigManager.Instance.GetText("CheckDataButtonText", "检查数据"), CheckDataButton_Click);
         _settingsButton = CreateNavButton(ConfigManager.Instance.GetText("SettingsButtonText", "设置"), SettingsButton_Click);
 
         _navPanel.Children.Add(_campaignGroup);
@@ -212,16 +222,50 @@ public partial class BeginScene : UserControl
         _navPanel.Children.Add(_countryButton);
         _navPanel.Children.Add(_checkDataButton);
         _navPanel.Children.Add(_settingsButton);
+        _navPanel.Children.Add(CreateNavButton(ConfigManager.Instance.GetText("InGameTechButtonText", "局内科技"), InGameTechButton_Click));
+        _navPanel.Children.Add(CreateNavButton(ConfigManager.Instance.GetText("EventEditorButtonText", "集团军事件编辑"), EventEditorButton_Click));
+        _navPanel.Children.Add(CreateNavButton(ConfigManager.Instance.GetText("EventBuffButtonText", "事件的效果"), EventBuffButton_Click));
+        _navPanel.Children.Add(CreateNavButton(ConfigManager.Instance.GetText("ConquerEventButtonText", "征服事件"), ConquerEventButton_Click));
+        _navPanel.Children.Add(CreateNavButton(ConfigManager.Instance.GetText("SkillButtonText", "技能编辑"), SkillButton_Click));
+        _navPanel.Children.Add(CreateNavButton(ConfigManager.Instance.GetText("ArmyBuffButtonText", "军队Buff"), ArmyBuffButton_Click));
+        _navPanel.Children.Add(CreateNavButton(ConfigManager.Instance.GetText("ArmyButtonText", "兵种编辑"), ArmyButton_Click));
+        _navPanel.Children.Add(CreateNavButton(ConfigManager.Instance.GetText("BuildingButtonText", "建筑与设施"), BuildingButton_Click));
+        _navPanel.Children.Add(CreateNavButton(ConfigManager.Instance.GetText("ArmyGroupButtonText", "集团军与援军"), ArmyGroupButton_Click));
+        _navPanel.Children.Add(CreateNavButton(ConfigManager.Instance.GetText("LayoutButtonText", "布局编辑器"), LayoutButton_Click));
 
-        var recommendBtn = CreateCircleButton("👍", RecommendButton_Click);
-        recommendBtn.Width = 75;
-        recommendBtn.Height = 75;
-        recommendBtn.HorizontalAlignment = HorizontalAlignment.Right;
-        recommendBtn.VerticalAlignment = VerticalAlignment.Center;
-        if (recommendBtn.Content is TextBlock rtb) rtb.FontSize = 36;
-        bottomBar.Children.Add(_navPanel);
-        bottomBar.Children.Add(recommendBtn);
-        _mainGrid.Children.Add(bottomBar);
+        // 统一导航按钮宽度：取最长文本的期望宽度，保证全部按钮等宽且能容纳 setting 键值文本
+        double navWidth = 0;
+        foreach (UIElement child in _navPanel.Children)
+            if (child is FrameworkElement fe)
+            {
+                fe.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+                navWidth = Math.Max(navWidth, Math.Ceiling(fe.DesiredSize.Width));
+            }
+        _navTextWidth = navWidth;
+        foreach (UIElement child in _navPanel.Children)
+            if (child is FrameworkElement fe) fe.Width = navWidth;
+
+        _recommendBtn = CreateCircleButton("👍", RecommendButton_Click);
+        _recommendBtn.Width = 75;
+        _recommendBtn.Height = 75;
+        _recommendBtn.HorizontalAlignment = HorizontalAlignment.Right;
+        _recommendBtn.VerticalAlignment = VerticalAlignment.Center;
+        if (_recommendBtn.Content is TextBlock rtb) rtb.FontSize = 36;
+
+        _navPrevButton = CreatePagerButton("◀", NavPrev_Click);
+        _navNextButton = CreatePagerButton("▶", NavNext_Click);
+
+        var navBarRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        navBarRow.Children.Add(_navPrevButton);
+        navBarRow.Children.Add(_navPanel);
+        navBarRow.Children.Add(_navNextButton);
+
+        _bottomBar.Children.Add(navBarRow);
+        _bottomBar.Children.Add(_recommendBtn);
+        _mainGrid.Children.Add(_bottomBar);
+
+        Loaded += (_, _) => Dispatcher.BeginInvoke(() => RecalculateNav(), DispatcherPriority.Loaded);
+        _bottomBar.SizeChanged += (_, _) => RecalculateNav();
 
         Content = _mainGrid;
     }
@@ -275,7 +319,7 @@ public partial class BeginScene : UserControl
 
         var group = new Grid
         {
-            Margin = new Thickness(0, 0, 25, 0),
+            Margin = new Thickness(0, 0, 8, 0),
             VerticalAlignment = VerticalAlignment.Center,
             HorizontalAlignment = HorizontalAlignment.Center
         };
@@ -365,8 +409,7 @@ public partial class BeginScene : UserControl
 
     private void Grid_MouseLeftButtonDown(object? sender, MouseButtonEventArgs e)
     {
-        if (e.ClickCount == 2) _window.ToggleMaximize();
-        else if (e.LeftButton == MouseButtonState.Pressed) _window.DragMove();
+        if (e.LeftButton == MouseButtonState.Pressed) _window.DragMove();
     }
 
     private void StartWordCloudRotation(TextBlock textBlock)
@@ -494,7 +537,7 @@ public partial class BeginScene : UserControl
         var btn = new Button
         {
             Content = tb, BorderThickness = new Thickness(0), FontSize = 16,
-            Margin = new Thickness(0, 0, 25, 0), Cursor = Cursors.Hand,
+            Margin = new Thickness(0, 0, 8, 0), Cursor = Cursors.Hand,
             Padding = new Thickness(20, 10, 20, 10),
             Template = CreateNavButtonTemplate()
         };
@@ -827,4 +870,212 @@ public partial class BeginScene : UserControl
     private void CheckDataButton_Click(object sender, RoutedEventArgs e) { }
     private void SettingsButton_Click(object sender, RoutedEventArgs e) { }
     private void RecommendButton_Click(object sender, RoutedEventArgs e) { }
+
+    private void EventEditorButton_Click(object sender, RoutedEventArgs e)
+    {
+        var scene = new ArmyGroupEventEditScene(_window);
+        _window.SetCurrentScene(scene);
+    }
+    private void EventBuffButton_Click(object sender, RoutedEventArgs e)
+    {
+        var scene = new EventBuffEditScene(_window);
+        _window.SetCurrentScene(scene);
+    }
+
+    private void ConquerEventButton_Click(object sender, RoutedEventArgs e)
+    {
+        var scene = new ConquerEventEditScene(_window);
+        _window.SetCurrentScene(scene);
+    }
+
+    private void InGameTechButton_Click(object sender, RoutedEventArgs e)
+    {
+        // 局内科技复用科技树画布编辑器（CountryTechEditScene）。
+        // 注：该场景当前读取 CountryTechSettings.json（国家科技）。
+        // 若局内科技需编辑 TechnologySettings.json，其字段 schema 不同
+        // （Level / NeedID / Position[col,row] / CostGold...），需另建解析器与场景。
+        var scene = new CountryTechEditScene(_window);
+        _window.SetCurrentScene(scene);
+    }
+
+    private void SkillButton_Click(object sender, RoutedEventArgs e)
+    {
+        var scene = new SkillEditScene(_window);
+        _window.SetCurrentScene(scene);
+    }
+
+    private void ArmyBuffButton_Click(object sender, RoutedEventArgs e)
+    {
+        var scene = new ArmyBuffEditScene(_window);
+        _window.SetCurrentScene(scene);
+    }
+
+    private void ArmyButton_Click(object sender, RoutedEventArgs e)
+    {
+        var scene = new ArmyEditScene(_window);
+        _window.SetCurrentScene(scene);
+    }
+
+    private void BuildingButton_Click(object sender, RoutedEventArgs e)
+    {
+        var scene = new BuildingFacilityEditScene(_window);
+        _window.SetCurrentScene(scene);
+    }
+
+    private void ArmyGroupButton_Click(object sender, RoutedEventArgs e)
+    {
+        var scene = new ArmyGroupEditScene(_window);
+        _window.SetCurrentScene(scene);
+    }
+
+    private void LayoutButton_Click(object sender, RoutedEventArgs e)
+    {
+        var scene = new LayoutEditScene(_window);
+        _window.SetCurrentScene(scene);
+    }
+
+    // ============================================================= 导航栏翻页 =============================================================
+    private Button CreatePagerButton(string text, RoutedEventHandler handler)
+    {
+        var tb = new TextBlock
+        {
+            Text = text,
+            Foreground = Brushes.White,
+            FontSize = 18,
+            FontWeight = FontWeights.Bold,
+            Effect = new DropShadowEffect { BlurRadius = 4, ShadowDepth = 2, Opacity = 0.8, Color = Colors.Black }
+        };
+
+        var btn = new Button
+        {
+            Content = tb,
+            BorderThickness = new Thickness(0),
+            FontSize = 18,
+            Margin = new Thickness(0, 0, 10, 0),
+            Cursor = Cursors.Hand,
+            Padding = new Thickness(12, 10, 12, 10),
+            Template = CreateNavButtonTemplate()
+        };
+
+        btn.MouseEnter += (s, e) =>
+        {
+            tb.Foreground = Brushes.Black;
+            tb.Effect = null;
+        };
+        btn.MouseLeave += (s, e) =>
+        {
+            tb.Foreground = Brushes.White;
+            tb.Effect = new DropShadowEffect { BlurRadius = 4, ShadowDepth = 2, Opacity = 0.8, Color = Colors.Black };
+        };
+        btn.Click += handler;
+        return btn;
+    }
+
+    private void NavPrev_Click(object sender, RoutedEventArgs e) => AnimateNavPage(_navOffset - 1);
+
+    private void NavNext_Click(object sender, RoutedEventArgs e) => AnimateNavPage(_navOffset + 1);
+
+    // 翻页滑动动画：整排按钮向点击方向滑出，切换后反向滑入
+    private void AnimateNavPage(int targetOffset)
+    {
+        int total = _navPanel.Children.Count;
+        targetOffset = Math.Max(0, Math.Min(targetOffset, Math.Max(0, total - _navVisibleCount)));
+        if (_navAnimating || targetOffset == _navOffset) return;
+        bool forward = targetOffset > _navOffset;
+        _navAnimating = true;
+
+        var tt = (TranslateTransform)_navPanel.RenderTransform!;
+        double slide = forward ? -70 : 70;
+        var easeIn = new QuadraticEase { EasingMode = EasingMode.EaseIn };
+        var easeOut = new QuadraticEase { EasingMode = EasingMode.EaseOut };
+
+        var outX = new DoubleAnimation(0, slide, TimeSpan.FromMilliseconds(130)) { EasingFunction = easeIn };
+        outX.Completed += (_, _) =>
+        {
+            _navOffset = targetOffset;
+            ApplyNavVisibility();
+
+            var inX = new DoubleAnimation(-slide, 0, TimeSpan.FromMilliseconds(190)) { EasingFunction = easeOut };
+            inX.Completed += (_, _) =>
+            {
+                tt.BeginAnimation(TranslateTransform.XProperty, null);
+                _navAnimating = false;
+            };
+            tt.BeginAnimation(TranslateTransform.XProperty, inX);
+        };
+        tt.BeginAnimation(TranslateTransform.XProperty, outX);
+    }
+
+    private void RecalculateNav()
+    {
+        if (_recalculating || _navPrevButton == null || _navNextButton == null || _recommendBtn == null) return;
+        _recalculating = true;
+        try
+        {
+            int total = _navPanel.Children.Count;
+            if (total == 0) { UpdatePagerState(); return; }
+
+            // 先全部显示，再测量各自期望宽度（包含 Margin）
+            foreach (UIElement c in _navPanel.Children) c.Visibility = Visibility.Visible;
+            _navPanel.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+
+            double inner = _bottomBar.ActualWidth;
+            double used = _navPrevButton.ActualWidth + _navNextButton.ActualWidth + _recommendBtn.ActualWidth + 40;
+            double avail = inner - used;
+            if (avail <= 0) avail = inner * 0.6;
+
+            // 不改变导航栏总宽，确保至少装下 5 个按钮：扣除外边距后按 5 等分
+            int want = Math.Min(5, total);
+            double totalMargin = 0;
+            foreach (UIElement c in _navPanel.Children)
+                if (c is FrameworkElement fe) totalMargin += fe.Margin.Left + fe.Margin.Right;
+            double targetW = Math.Min(_navTextWidth, Math.Floor((avail - totalMargin) / want));
+            if (targetW > 0)
+            {
+                foreach (UIElement c in _navPanel.Children)
+                    if (c is FrameworkElement fe) fe.Width = targetW;
+                _navPanel.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            }
+
+            double acc = 0;
+            int count = 0;
+            for (int i = 0; i < total; i++)
+            {
+                var child = _navPanel.Children[i];
+                double w = child is FrameworkElement fe ? fe.DesiredSize.Width : 0;
+                if (count == 0 || acc + w <= avail) { acc += w; count++; }
+                else break;
+            }
+
+            _navVisibleCount = Math.Max(1, count);
+            if (_navOffset > total - _navVisibleCount) _navOffset = Math.Max(0, total - _navVisibleCount);
+            if (_navOffset < 0) _navOffset = 0;
+            ApplyNavVisibility();
+        }
+        finally
+        {
+            _recalculating = false;
+        }
+    }
+
+    private void ApplyNavVisibility()
+    {
+        int total = _navPanel.Children.Count;
+        for (int i = 0; i < total; i++)
+        {
+            _navPanel.Children[i].Visibility = (i >= _navOffset && i < _navOffset + _navVisibleCount) ? Visibility.Visible : Visibility.Collapsed;
+        }
+        UpdatePagerState();
+    }
+
+    private void UpdatePagerState()
+    {
+        int total = _navPanel.Children.Count;
+        bool canPrev = _navOffset > 0;
+        bool canNext = _navOffset + _navVisibleCount < total;
+        _navPrevButton.IsEnabled = canPrev;
+        _navNextButton.IsEnabled = canNext;
+        _navPrevButton.Opacity = canPrev ? 1 : 0.3;
+        _navNextButton.Opacity = canNext ? 1 : 0.3;
+    }
 }

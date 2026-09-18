@@ -5,6 +5,7 @@
 !LICENSE
 !*.json
 !*.csproj
+!*.xaml
 !WC4MapEditor.Cli/
 !WC4MapEditor.Cli/**
 !WC4MapEditor.Core/

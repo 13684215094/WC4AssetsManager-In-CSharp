@@ -55,16 +55,16 @@
     "CategoryId": 101,
     "Categorys": 0,
     "Type": 103,
-    "ResearchLv": 2,
+    "ResearchLv": 1,
     "CostMoney": 96,
     "CostGear": 48,
     "CostAtomic": 24,
-    "Position": -2,
+    "Position": -3,
     "Chance": 0,
     "Value": 5,
     "Lines": [
-      0,
-      -100
+      100,
+      0
     ],
     "Lines2": [],
     "CostMerit": 2
@@ -99,18 +99,16 @@
     "CategoryId": 101,
     "Categorys": 0,
     "Type": 105,
-    "ResearchLv": 3,
+    "ResearchLv": 1,
     "CostMoney": 168,
     "CostGear": 84,
     "CostAtomic": 42,
-    "Position": -4,
+    "Position": -7,
     "Chance": 15,
     "Value": 0,
     "Lines": [
-      0,
-      -100,
-      200,
-      -100
+      400,
+      0
     ],
     "Lines2": [],
     "CostMerit": 3
@@ -118,25 +116,25 @@
   {
     "Id": 10106,
     "NeedId": [
-      10103
+      10109
     ],
     "CategoryId": 101,
     "Categorys": 0,
     "Type": 106,
-    "ResearchLv": 3,
+    "ResearchLv": 7,
     "CostMoney": 168,
     "CostGear": 84,
     "CostAtomic": 42,
-    "Position": -3,
+    "Position": -2,
     "Chance": 20,
     "Value": 0,
     "Lines": [
       0,
-      -50,
-      100,
-      -50,
-      100,
-      -100
+      -250,
+      200,
+      -250,
+      200,
+      -500
     ],
     "Lines2": [],
     "CostMerit": 3
@@ -144,23 +142,21 @@
   {
     "Id": 10107,
     "NeedId": [
-      10104
+      10109
     ],
     "CategoryId": 101,
     "Categorys": 0,
     "Type": 107,
-    "ResearchLv": 3,
+    "ResearchLv": 9,
     "CostMoney": 168,
     "CostGear": 84,
     "CostAtomic": 42,
-    "Position": 1,
+    "Position": 0,
     "Chance": 0,
     "Value": 0,
     "Lines": [
       0,
-      -100,
-      100,
-      -100
+      -700
     ],
     "Lines2": [],
     "CostMerit": 2
@@ -168,12 +164,12 @@
   {
     "Id": 10108,
     "NeedId": [
-      10106
+      10109
     ],
     "CategoryId": 101,
     "Categorys": 0,
     "Type": 108,
-    "ResearchLv": 4,
+    "ResearchLv": 6,
     "CostMoney": 168,
     "CostGear": 84,
     "CostAtomic": 42,
@@ -182,7 +178,11 @@
     "Value": 0,
     "Lines": [
       0,
-      -100
+      -200,
+      300,
+      -200,
+      300,
+      -400
     ],
     "Lines2": [],
     "CostMerit": 3
@@ -190,25 +190,25 @@
   {
     "Id": 10109,
     "NeedId": [
-      10103
+      10102
     ],
     "CategoryId": 101,
     "Categorys": 0,
     "Type": 109,
-    "ResearchLv": 4,
+    "ResearchLv": 2,
     "CostMoney": 168,
     "CostGear": 84,
     "CostAtomic": 42,
-    "Position": -1,
+    "Position": 0,
     "Chance": 20,
     "Value": 0,
     "Lines": [
       0,
-      -150,
-      -100,
-      -150,
-      -100,
-      -200
+      -50,
+      200,
+      -50,
+      200,
+      -100
     ],
     "Lines2": [],
     "CostMerit": 3
@@ -216,12 +216,12 @@
   {
     "Id": 10110,
     "NeedId": [
-      10104
+      10109
     ],
     "CategoryId": 101,
     "Categorys": 0,
     "Type": 110,
-    "ResearchLv": 4,
+    "ResearchLv": 11,
     "CostMoney": 168,
     "CostGear": 84,
     "CostAtomic": 42,
@@ -230,7 +230,11 @@
     "Value": 0,
     "Lines": [
       0,
-      -200
+      -450,
+      -200,
+      -450,
+      -200,
+      -900
     ],
     "Lines2": [],
     "CostMerit": 3
@@ -238,7 +242,7 @@
   {
     "Id": 10111,
     "NeedId": [
-      10108
+      10109
     ],
     "CategoryId": 101,
     "Categorys": 0,
@@ -252,9 +256,11 @@
     "Value": 0,
     "Lines": [
       0,
-      -100,
-      100,
-      -100
+      -150,
+      400,
+      -150,
+      400,
+      -300
     ],
     "Lines2": [],
     "CostMerit": 6
@@ -262,21 +268,25 @@
   {
     "Id": 10112,
     "NeedId": [
-      10110
+      10109
     ],
     "CategoryId": 101,
     "Categorys": 0,
     "Type": 112,
-    "ResearchLv": 5,
+    "ResearchLv": 10,
     "CostMoney": 240,
     "CostGear": 120,
     "CostAtomic": 60,
-    "Position": 2,
+    "Position": 1,
     "Chance": 100,
     "Value": 3,
     "Lines": [
       0,
-      -100
+      -400,
+      -100,
+      -400,
+      -100,
+      -800
     ],
     "Lines2": [],
     "CostMerit": 4
@@ -284,12 +294,12 @@
   {
     "Id": 10113,
     "NeedId": [
-      10110
+      10109
     ],
     "CategoryId": 101,
     "Categorys": 0,
     "Type": 113,
-    "ResearchLv": 5,
+    "ResearchLv": 12,
     "CostMoney": 240,
     "CostGear": 120,
     "CostAtomic": 60,
@@ -298,9 +308,11 @@
     "Value": 0,
     "Lines": [
       0,
-      -100,
-      -100,
-      -100
+      -500,
+      -300,
+      -500,
+      -300,
+      -1000
     ],
     "Lines2": [],
     "CostMerit": 3
@@ -313,7 +325,7 @@
     "CategoryId": 101,
     "Categorys": 0,
     "Type": 114,
-    "ResearchLv": 6,
+    "ResearchLv": 8,
     "CostMoney": 240,
     "CostGear": 120,
     "CostAtomic": 60,
@@ -322,7 +334,11 @@
     "Value": 0,
     "Lines": [
       0,
-      -200
+      -300,
+      100,
+      -300,
+      100,
+      -600
     ],
     "Lines2": [],
     "CostMerit": 5
@@ -1567,8 +1583,10 @@
     "Lines": [
       0,
       -100,
-      200,
-      -100
+      100,
+      -100,
+      100,
+      -200
     ],
     "Lines2": [],
     "CostMerit": 3
@@ -1590,11 +1608,7 @@
     "Value": 0,
     "Lines": [
       0,
-      -50,
-      100,
-      -50,
-      100,
-      -100
+      -200
     ],
     "Lines2": [],
     "CostMerit": 3
@@ -1664,7 +1678,11 @@
     "Value": 0,
     "Lines": [
       0,
-      -100
+      150,
+      100,
+      150,
+      100,
+      300
     ],
     "Lines2": [],
     "CostMerit": 3
@@ -1687,10 +1705,10 @@
     "Lines": [
       0,
       -150,
-      -100,
+      -200,
       -150,
-      -100,
-      -200
+      -200,
+      -300
     ],
     "Lines2": [],
     "CostMerit": 3
@@ -1734,9 +1752,11 @@
     "Value": 0,
     "Lines": [
       0,
-      -100,
+      50,
       100,
-      -100
+      50,
+      100,
+      100
     ],
     "Lines2": [],
     "CostMerit": 6
@@ -1758,7 +1778,7 @@
     "Value": 3,
     "Lines": [
       0,
-      -100
+      600
     ],
     "Lines2": [],
     "CostMerit": 4
@@ -1780,9 +1800,11 @@
     "Value": 0,
     "Lines": [
       0,
+      300,
       -100,
+      300,
       -100,
-      -100
+      600
     ],
     "Lines2": [],
     "CostMerit": 3
@@ -1826,7 +1848,11 @@
     "Value": 0,
     "Lines": [
       0,
-      -200
+      -200,
+      100,
+      -200,
+      100,
+      -400
     ],
     "Lines2": [],
     "CostMerit": 5
@@ -1848,7 +1874,11 @@
     "Value": 0,
     "Lines": [
       0,
-      -100
+      200,
+      -100,
+      200,
+      -100,
+      400
     ],
     "Lines2": [],
     "CostMerit": 4
@@ -6014,5 +6044,31 @@
     ],
     "Lines2": [],
     "CostMerit": 6
+  },
+  {
+    "Id": 10115,
+    "NeedId": [
+      10104
+    ],
+    "CategoryId": 101,
+    "Categorys": 0,
+    "Type": 202,
+    "ResearchLv": 3,
+    "CostMoney": 100,
+    "CostGear": 50,
+    "CostAtomic": 25,
+    "Position": 6,
+    "Chance": 100,
+    "Value": 0,
+    "Lines": [
+      0,
+      -50,
+      -400,
+      -50,
+      -400,
+      -100
+    ],
+    "Lines2": [],
+    "CostMerit": 1
   }
 ]
