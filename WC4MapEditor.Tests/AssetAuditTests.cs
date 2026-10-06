@@ -219,7 +219,7 @@ internal static class AssetAuditTests
         public string Root { get; } = Path.Combine(Directory.GetCurrentDirectory(), "tmp", "tests", Guid.NewGuid().ToString("N"));
         public string Assets(string name)
         {
-            string path = Path.Combine(Root, name);
+            string path = Path.GetFullPath(Path.Combine(Root, name));
             Directory.CreateDirectory(Path.Combine(path, "json"));
             return path;
         }

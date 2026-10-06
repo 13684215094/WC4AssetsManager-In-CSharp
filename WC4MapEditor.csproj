@@ -57,6 +57,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <None Update="Resource\**\*;setting.txt;Maps\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
     <!-- Lua 示例脚本随程序输出，方便用 lua scripts/lua-example.lua 直接试 -->
     <None Update="scripts\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

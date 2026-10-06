@@ -79,7 +79,11 @@ public sealed class AssetAuditReport
     {
         var dir = new DirectoryInfo(path);
         string physical = dir.Parent == null ? dir.FullName : Path.Combine(PhysicalDirectory(dir.Parent.FullName), dir.Name);
-        return new DirectoryInfo(physical).ResolveLinkTarget(true)?.FullName ?? physical;
+        var physicalDir = new DirectoryInfo(physical);
+        // Windows volume roots cannot be passed to ResolveLinkTarget.
+        return (physicalDir.Attributes & FileAttributes.ReparsePoint) != 0
+            ? physicalDir.ResolveLinkTarget(true)?.FullName ?? physical
+            : physical;
     }
 }
 

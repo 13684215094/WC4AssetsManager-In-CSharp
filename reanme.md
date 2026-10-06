@@ -5,9 +5,9 @@
 - 指定上游：`https://github.com/2132937983/WC4AssetsManager-In-CSharp.git`，`6.0` 分支
 - 对照资料：`/home/j60100428/game`
 
-> 文件名按本次要求保留为 `reanme.md`。第 1-7 节和附录记录更新前的只读审计快照；第 8 节记录首次整合；第 9-10 节记录 2026-10-06 的远端核对、压缩与内容差异。第 11 节是当前的仓库选择建议。前文数字以审计当时的 Git 对象和工作树为准，不能当成当前未提交修改统计。
+> 文件名按本次要求保留为 `reanme.md`。第 1-7 节和附录记录更新前的只读审计快照；第 8 节记录首次整合；第 9-10 节记录 2026-10-06 的远端核对、压缩与内容差异；第 11-13 节记录随后遇到的网络及权限限制；第 14 节记录网络恢复后的实际同步。前文数字以各节审计当时的 Git 对象和工作树为准，不能当成当前未提交修改统计。
 
-> 当前结论（2026-10-06）：本地 `6.0 @ 51c8486` 已在上游 `7d31340` 上整合源码和 fork 资源；建议以此作为继续开发的基线。fork 的 10 个提交不应笼统称为用户的私有提交，详见第 11 节。此次网络 DNS 不可用，实时远端状态尚待网络恢复后复核。
+> 当前结论（2026-10-06）：本地 `6.0` 已在上游 `7d31340` 上整合源码和 fork 资源，整合提交为 `51c8486`。通过本机代理实时确认上游仍为 `7d31340`、fork 仍为 `00fba1e`；`git pull --rebase upstream 6.0` 已成功，分支无须重放。fork 的 10 个提交不应笼统称为用户的私有提交，详见第 11 节。
 
 ## 1. 核心结论
 
@@ -508,3 +508,11 @@ fork 旧历史里的 48 个 `obj/` 路径都是 .NET/MSBuild 生成源码：`*.A
 ## 13. VPN 启动尝试与当前执行环境边界（2026-10-06）
 
 已按 `/home/j60100428/README.md` 阅读 VPN 手动管理流程，先把 `.gitignore` 和本报告的未提交差异备份到 `/tmp/wc4-before-vpn-20261006.patch`。该次 Codex 执行环境并非服务器完整的 systemd 会话：PID 1 是 `codex-linux-sandbox`，`sudo .../clash-verge-mihomo.sh start` 在 sudo 权限插件失败，直接以 root 调用同一脚本则被 `systemctl` 报 `Failed to connect to bus: Operation not permitted`。按 unit 文件的 `ExecStart` 临时直启 Mihomo 核心也无法绑定 `127.0.0.1:7897/9097/5335`，所有 `listen` 均返回 `socket: operation not permitted`，进程随后退出；没有留下代理监听或后台进程。尝试通过该端口运行 Git 得到 `Couldn't connect to server`，直接访问 GitHub 仍是 DNS 失败。已在临时 shell 执行 `proxy_off`，检查代理变量为 0；`stop` 因同一 systemd 限制无法调用，但已确认无 Mihomo 进程或端口。此次没有获得新远端对象，也没有执行成功的 `git pull --rebase`。这些错误来自当前 Codex 沙箱权限，不能据此判断服务器上的 VPN 安装或节点本身损坏。
+
+## 14. 代理恢复后的实时同步（2026-10-06）
+
+服务器上已有运行中的 Mihomo，`127.0.0.1:7897` 正在监听。本轮对每条 Git HTTPS 命令单独设置 `http.proxy=http://127.0.0.1:7897`，没有改全局 Git 代理或启动、停止 VPN 服务。`git ls-remote` 对 GitHub 两仓的 `refs/heads/6.0` 查询成功：2132937983 上游为 `7d3134091ec2c797e614cc6e39789af8a35db34a`，13684215094 fork 为 `00fba1e6cd00c98c9dcdbfef73bf6ba408b9de09`。随后分别 `git fetch --no-tags` 两仓，同名远端跟踪引用与实时结果一致。第 11-13 节记录的网络和 Git 元数据限制属于此前的执行环境，现已不再阻止本轮操作。
+
+先将已有 `.gitignore` 和报告修改保存为本地提交 `2cf53b8`，父提交仍是整合提交 `51c8486`。然后在干净工作树运行 `git -c http.proxy=http://127.0.0.1:7897 pull --rebase upstream 6.0`，Git 返回 `Current branch 6.0 is up to date.`。本次没有新上游提交或冲突，因而没有对源码、资源或游戏数据做新的合并。整合工作仍集中在 `51c8486` 一个提交；`2cf53b8` 只记录忽略规则和审计报告。旧 fork 的 48 个 `obj/` 生成路径已在整合提交中排除，157 个独有 `Resource/` 路径仍保留。
+
+本轮代码未变；环境中没有可执行的 `dotnet`，因此未重复运行 .NET 测试或构建。先前的 52 个通过测试及 Windows WPF 交叉构建结果见第 9 节，Windows GUI 仍需实机验收。没有向 `origin` 推送；fork 的历史与当前上游没有共同祖先，推送前应单独决定远端分支的迁移方式。
