@@ -83,21 +83,10 @@ public sealed class DelegateCommand : IUndoableCommand
 public sealed class MapResizeCommand : IUndoableCommand
 {
     private readonly MapData _mapData;
-    private readonly int _beforeWidth;
-    private readonly int _beforeHeight;
-    private readonly TerrainData[] _beforeTerrains;
-    private readonly Province[] _beforeProvinces;
-    private readonly List<string> _beforeBelongs;
-    private readonly EntitySnapshot _beforeEntities;
-    private readonly BTLHeader _beforeHeader;
-    private int _afterWidth;
-    private int _afterHeight;
-    private TerrainData[]? _afterTerrains;
-    private Province[]? _afterProvinces;
-    private List<string>? _afterBelongs;
-    private EntitySnapshot? _afterEntities;
-    private BTLHeader _afterHeader = default;
-    private bool _hasAfterState;
+    private readonly MapData _before;
+    private MapData? _after;
+
+    public long SnapshotBytes => _before.EstimatedStateBytes() + (_after?.EstimatedStateBytes() ?? 0);
 
     public string Description { get; }
 
@@ -105,114 +94,39 @@ public sealed class MapResizeCommand : IUndoableCommand
     {
         _mapData = mapData;
         Description = description;
-        _beforeWidth = mapData.MapWidth;
-        _beforeHeight = mapData.MapHeight;
-        _beforeTerrains = new TerrainData[mapData.MapWidth * mapData.MapHeight];
-        _beforeProvinces = new Province[mapData.MapWidth * mapData.MapHeight];
-        for (int i = 0; i < _beforeTerrains.Length; i++)
-        {
-            _beforeTerrains[i] = mapData.GetTerrainRef(i);
-            _beforeProvinces[i] = mapData.GetProvinceRef(i);
-        }
-        // 归属也必须进快照：只用 Resize 重建地形/省份的话，
-        // 撤销后归属会停留在缩放后的错位状态，撤不回来。
-        _beforeBelongs = new List<string>(mapData.Belongs);
-        // 实体坐标也会被 ResizeMap 改写（并且越界的会被删除），
-        // 只恢复地形/省份/归属的话，撤销后实体仍停在调整后的位置。
-        _beforeEntities = EntitySnapshot.Capture(mapData);
-        _beforeHeader = mapData.Header;
-        _hasAfterState = false;
+        if (mapData.EstimatedStateBytes() > MapLimits.MaxOperationBytes / 4)
+            throw new InvalidOperationException("Map and undo snapshots exceed the editor memory budget.");
+        _before = mapData.DeepClone();
     }
 
     public void CaptureAfterState()
     {
-        _afterWidth = _mapData.MapWidth;
-        _afterHeight = _mapData.MapHeight;
-        _afterTerrains = new TerrainData[_mapData.MapWidth * _mapData.MapHeight];
-        _afterProvinces = new Province[_mapData.MapWidth * _mapData.MapHeight];
-        for (int i = 0; i < _afterTerrains.Length; i++)
-        {
-            _afterTerrains[i] = _mapData.GetTerrainRef(i);
-            _afterProvinces[i] = _mapData.GetProvinceRef(i);
-        }
-        _afterBelongs = new List<string>(_mapData.Belongs);
-        _afterEntities = EntitySnapshot.Capture(_mapData);
-        _afterHeader = _mapData.Header;
-        _hasAfterState = true;
+        long beforeBytes = _before.EstimatedStateBytes();
+        if (beforeBytes > MapLimits.MaxOperationBytes ||
+            _mapData.EstimatedStateBytes() > (MapLimits.MaxOperationBytes - beforeBytes) / 3)
+            throw new InvalidOperationException("Map and undo snapshots exceed the editor memory budget.");
+        _after = _mapData.DeepClone();
     }
 
     public void Execute()
     {
-        if (!_hasAfterState) return;
-        RestoreState(_afterWidth, _afterHeight, _afterTerrains!, _afterProvinces!, _afterBelongs!, _afterEntities!, _afterHeader);
+        if (_after == null) return;
+        RestoreState(_after);
     }
 
     public void Undo()
     {
-        RestoreState(_beforeWidth, _beforeHeight, _beforeTerrains, _beforeProvinces, _beforeBelongs, _beforeEntities, _beforeHeader);
+        RestoreState(_before);
     }
 
-    private void RestoreState(
-        int width, int height,
-        TerrainData[] terrains, Province[] provinces, List<string> belongs,
-        EntitySnapshot entities, BTLHeader header)
+    public void Rollback() => _mapData.CopyFrom(_before);
+
+    private void RestoreState(MapData snapshot)
     {
-        _mapData.Resize(width, height);
-        for (int i = 0; i < terrains.Length; i++)
-        {
-            _mapData.GetTerrainRef(i) = terrains[i];
-            _mapData.GetProvinceRef(i) = provinces[i];
-        }
-        _mapData.Belongs = new List<string>(belongs);
-        entities.RestoreTo(_mapData);
-        _mapData.Header = header;
+        string currentPath = _mapData.FilePath;
+        _mapData.CopyFrom(snapshot);
+        _mapData.FilePath = currentPath;
         _mapData.IsModified = true;
-    }
-
-    /// <summary>
-    /// 实体集合快照，用于尺寸调整的撤销/重做。
-    /// <para>
-    /// 这些模型全部是值类型（struct），所以 <c>ToList()</c> 本身就是一份完整副本，
-    /// 不需要额外深拷贝。
-    /// </para>
-    /// </summary>
-    private sealed class EntitySnapshot
-    {
-        public List<Building> Buildings { get; init; } = [];
-        public List<Trap> Traps { get; init; } = [];
-        public List<Army> Armies { get; init; } = [];
-        public List<Army_3> ArmiesV3 { get; init; } = [];
-        public List<Reinforcement> Reinforcements { get; init; } = [];
-        public List<Reinforcement_3> ReinforcementsV3 { get; init; } = [];
-        public List<AirForce> AirForces { get; init; } = [];
-        public List<Capital> Capitals { get; init; } = [];
-        public List<UnitPlacement> UnitPlaces { get; init; } = [];
-
-        public static EntitySnapshot Capture(MapData mapData) => new()
-        {
-            Buildings = mapData.Buildings.ToList(),
-            Traps = mapData.Traps.ToList(),
-            Armies = mapData.Armies.ToList(),
-            ArmiesV3 = mapData.ArmiesV3.ToList(),
-            Reinforcements = mapData.Reinforcements.ToList(),
-            ReinforcementsV3 = mapData.ReinforcementsV3.ToList(),
-            AirForces = mapData.AirForces.ToList(),
-            Capitals = mapData.Capitals.ToList(),
-            UnitPlaces = mapData.UnitPlaces.ToList()
-        };
-
-        public void RestoreTo(MapData mapData)
-        {
-            mapData.Buildings = [.. Buildings];
-            mapData.Traps = [.. Traps];
-            mapData.Armies = [.. Armies];
-            mapData.ArmiesV3 = [.. ArmiesV3];
-            mapData.Reinforcements = [.. Reinforcements];
-            mapData.ReinforcementsV3 = [.. ReinforcementsV3];
-            mapData.AirForces = [.. AirForces];
-            mapData.Capitals = [.. Capitals];
-            mapData.UnitPlaces = [.. UnitPlaces];
-        }
     }
 }
 

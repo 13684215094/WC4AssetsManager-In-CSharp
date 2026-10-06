@@ -12,7 +12,7 @@
     "marchMax": 3,
     "hpMin": 1,
     "hpMax": 3,
-    "skillPool": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+    "skillPool": [1181, 1231, 1331, 1351, 1421],
     "skillLevelMin": 1,
     "skillLevelMax": 5,
     "skillCount": 3
@@ -30,7 +30,7 @@
     "marchMax": 4,
     "hpMin": 2,
     "hpMax": 4,
-    "skillPool": [11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+    "skillPool": [1191, 1241, 1341, 1361, 1421],
     "skillLevelMin": 1,
     "skillLevelMax": 5,
     "skillCount": 3
@@ -48,7 +48,7 @@
     "marchMax": 3,
     "hpMin": 1,
     "hpMax": 3,
-    "skillPool": [21, 22, 23, 24, 25, 26, 27, 28, 29, 30],
+    "skillPool": [1201, 1251, 1371, 1381, 1421],
     "skillLevelMin": 1,
     "skillLevelMax": 5,
     "skillCount": 3
@@ -66,7 +66,7 @@
     "marchMax": 4,
     "hpMin": 2,
     "hpMax": 4,
-    "skillPool": [31, 32, 33, 34, 35, 36, 37, 38, 39, 40],
+    "skillPool": [1171, 1211, 1271, 1401, 1421],
     "skillLevelMin": 1,
     "skillLevelMax": 5,
     "skillCount": 3
@@ -84,7 +84,7 @@
     "marchMax": 5,
     "hpMin": 1,
     "hpMax": 3,
-    "skillPool": [41, 42, 43, 44, 45, 46, 47, 48, 49, 50],
+    "skillPool": [1111, 1121, 1131, 1221, 1411],
     "skillLevelMin": 1,
     "skillLevelMax": 5,
     "skillCount": 3

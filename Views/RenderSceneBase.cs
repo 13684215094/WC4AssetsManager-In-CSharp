@@ -3042,10 +3042,11 @@ public abstract class RenderSceneBase : UserControl, IDisposable
                 return;
             }
 
-            _editModeManager.RecordMapResizeChange($"缩放地图 (比例={scale:F2})", () => terrain.ScaleMap(scale));
+            var result = _editModeManager.RecordMapResizeChange($"缩放地图 (比例={scale:F2})", () => terrain.ScaleMap(scale));
+            _debugConsole.WriteLine(result.Message ?? "");
+            if (!result.Success) return;
             _editModeManager_DataModifiedFromUndo();
             _skElement.InvalidateVisual();
-            _debugConsole.WriteLine($"地图缩放完成，比例={scale:F2}");
         }, "按比例缩放地图", "<比例0.1-10.0>");
 
         cm.RegisterCommand("resize_map", args =>
@@ -3072,10 +3073,11 @@ public abstract class RenderSceneBase : UserControl, IDisposable
 
             bool useOcean = args.Length > 2 && args[2].Equals("ocean", StringComparison.OrdinalIgnoreCase);
 
-            _editModeManager.RecordMapResizeChange($"调整地图大小 ({direction}, {amount})", () => terrain.ResizeMap(direction, amount, useOcean));
+            var result = _editModeManager.RecordMapResizeChange($"调整地图大小 ({direction}, {amount})", () => terrain.ResizeMap(direction, amount, useOcean));
+            _debugConsole.WriteLine(result.Message ?? "");
+            if (!result.Success) return;
             _editModeManager_DataModifiedFromUndo();
             _skElement.InvalidateVisual();
-            _debugConsole.WriteLine($"地图大小调整完成，方向={direction}，量={amount}");
         }, "调整地图大小", "<direction> <amount> [ocean]");
 
         cm.RegisterCommand("geo_add_ref", args =>

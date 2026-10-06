@@ -50,6 +50,8 @@ public struct Army_3
     public byte Ribbon2;
     public byte Ribbon3;
     public int LegionId;
+    public int ReservedTail1;
+    public short ReservedTail2;
 
     /// <summary>
     /// 从字节数组解析部队数据 v3
@@ -101,7 +103,9 @@ public struct Army_3
             Ribbon1 = data[offset + 51],
             Ribbon2 = data[offset + 52],
             Ribbon3 = data[offset + 53],
-            LegionId = BitConverter.ToInt32(data[(offset + 54)..])
+            LegionId = BitConverter.ToInt32(data[(offset + 54)..]),
+            ReservedTail1 = BitConverter.ToInt32(data[(offset + 58)..]),
+            ReservedTail2 = BitConverter.ToInt16(data[(offset + 62)..])
         };
     }
 
@@ -152,6 +156,8 @@ public struct Army_3
         data[offset + 52] = Ribbon2;
         data[offset + 53] = Ribbon3;
         BitConverter.TryWriteBytes(data[(offset + 54)..], LegionId);
+        BitConverter.TryWriteBytes(data[(offset + 58)..], ReservedTail1);
+        BitConverter.TryWriteBytes(data[(offset + 62)..], ReservedTail2);
     }
 
     /// <summary>
@@ -159,7 +165,7 @@ public struct Army_3
     /// </summary>
     public static Army_3 CreateDefault(int coord) => new Army_3
     {
-        Coordinate = (short)coord,
+        Coordinate = MapLimits.SignedCoordinate(coord),
         UnitType = 0,
         Level = 1,
         Organization = 1,

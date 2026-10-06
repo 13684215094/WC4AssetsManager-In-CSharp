@@ -6,6 +6,11 @@
 !*.json
 !*.csproj
 !*.xaml
+!*.md
+!*.props
+!*.targets
+!*.yml
+!app.manifest
 !WC4MapEditor.Cli/
 !WC4MapEditor.Cli/**
 !WC4MapEditor.Core/
@@ -17,3 +22,4 @@
 **/bin/
 **/obj/
 **/Lib/
+/tmp/

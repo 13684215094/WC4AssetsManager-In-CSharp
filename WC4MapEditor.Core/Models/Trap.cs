@@ -32,7 +32,7 @@ public struct Trap
     /// </summary>
     public static Trap CreateDefault(int coord) => new Trap
     {
-        Coordinate = (short)coord,
+        Coordinate = MapLimits.SignedCoordinate(coord),
         LegionId = 0,
         Organization = 1,
         Health = 100

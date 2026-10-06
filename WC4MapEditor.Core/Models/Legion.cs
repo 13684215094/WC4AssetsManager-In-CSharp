@@ -112,6 +112,7 @@ public struct Legion
             ColorR = data[offset + 0x28],
             ColorG = data[offset + 0x29],
             ColorB = data[offset + 0x2A],
+            ReservedColor = data[offset + 0x2B],
             AtomicBombCount = BitConverter.ToInt32(data[(offset + 0x2C)..]),
             HydrogenBombCount = BitConverter.ToInt32(data[(offset + 0x30)..]),
             NeutronBombCount = BitConverter.ToInt32(data[(offset + 0x34)..]),
@@ -197,6 +198,7 @@ public struct Legion
         data[offset + 0x28] = ColorR;
         data[offset + 0x29] = ColorG;
         data[offset + 0x2A] = ColorB;
+        data[offset + 0x2B] = ReservedColor;
         BitConverter.TryWriteBytes(data[(offset + 0x2C)..], AtomicBombCount);
         BitConverter.TryWriteBytes(data[(offset + 0x30)..], HydrogenBombCount);
         BitConverter.TryWriteBytes(data[(offset + 0x34)..], NeutronBombCount);

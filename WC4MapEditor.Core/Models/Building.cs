@@ -9,16 +9,7 @@ namespace WC4MapEditor.Core.Models;
 public struct Building
 {
     public int Coordinate;
-
-    /// <summary>
-    /// 城市名称 ID（对应字符串表 battle_cityname_XXX）。
-    /// <para>
-    /// 这是<b>无符号</b> 16 位值，范围 0-65535；0xFFFF(65535) 与 0 都表示"无名称"。
-    /// 与文件格式里的 2 字节字段一致（原先是 short，负值语义只用到了 -1 = 0xFFFF）。
-    /// </para>
-    /// </summary>
     public ushort Name;
-
     public byte BuildingType;
     public byte Appearance;
     public byte LandmarkBuilding;
@@ -41,7 +32,7 @@ public struct Building
     public byte AviationLevel;
     public byte MissileLevel;
     public byte NuclearLevel;
-    public int Reserved4;
+    public short Reserved4;
 
     /// <summary>
     /// 从字节数组解析建筑数据
@@ -60,9 +51,13 @@ public struct Building
             DecorativeBuilding = data[offset + 7],
             SkillUnlock = data[offset + 8],
             RewardCount = data[offset + 9],
+            Reserved1 = BitConverter.ToInt16(data[(offset + 10)..]),
             HatredValue = data[offset + 12],
             KeyPoint = data[offset + 13],
             OccupationEvent = data[offset + 14],
+            Reserved2 = data[offset + 15],
+            Reserved3 = BitConverter.ToInt32(data[(offset + 16)..]),
+            Reserved4 = BitConverter.ToInt16(data[(offset + 30)..]),
             FireIgnition = data[offset + 20],
             FireDuration = data[offset + 21],
             AirDefenseWeapon = data[offset + 22],
@@ -81,7 +76,7 @@ public struct Building
     /// </summary>
     public void ToBytes(Span<byte> data, int offset)
     {
-        BitConverter.TryWriteBytes(data[offset..], (ushort)(Coordinate & 0xFFFF));
+        BitConverter.TryWriteBytes(data[offset..], MapLimits.BuildingCoordinate(Coordinate));
         BitConverter.TryWriteBytes(data[(offset + 2)..], Name);
         data[offset + 4] = BuildingType;
         data[offset + 5] = Appearance;
@@ -89,6 +84,10 @@ public struct Building
         data[offset + 7] = DecorativeBuilding;
         data[offset + 8] = SkillUnlock;
         data[offset + 9] = RewardCount;
+        BitConverter.TryWriteBytes(data[(offset + 10)..], Reserved1);
+        data[offset + 15] = Reserved2;
+        BitConverter.TryWriteBytes(data[(offset + 16)..], Reserved3);
+        BitConverter.TryWriteBytes(data[(offset + 30)..], Reserved4);
         data[offset + 12] = HatredValue;
         data[offset + 13] = KeyPoint;
         data[offset + 14] = OccupationEvent;
@@ -109,7 +108,7 @@ public struct Building
     /// </summary>
     public static Building CreateDefault(int coord) => new Building
     {
-        Coordinate = coord,
+        Coordinate = MapLimits.BuildingCoordinate(coord),
         Name = 0xFFFF,
         BuildingType = 0,
         Appearance = 0,

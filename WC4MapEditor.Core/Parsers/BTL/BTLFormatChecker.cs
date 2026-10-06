@@ -1,8 +1,6 @@
 using System.Text;
 using WC4MapEditor.Core.Config;
 using WC4MapEditor.Core.Models;
-using WC4MapEditor.Core.Parsers.Conquest;
-using WC4MapEditor.Core.Parsers.Stage;
 
 namespace WC4MapEditor.Core.Parsers.BTL;
 
@@ -217,7 +215,13 @@ public static class BTLFormatChecker
     /// <returns>修复的层数；合法表不可用时返回 -1（未做任何修改）</returns>
     public static int FixTerrainGroups(byte[] data, IReadOnlyCollection<int>? validTerrainIds = null)
     {
-        if (data == null || data.Length < StageOffsets.Calculate(0, 0, 0).terrain) return 0;
+        if (data == null || data.Length < BTLSize.HEADER_SIZE) return 0;
+
+        var header = BTLHeader.Parse(data);
+        var layout = new BtlLayout(header);
+        if (data.Length != layout.Length)
+            throw new InvalidDataException($"BTL length {data.Length}, expected {layout.Length}.");
+        if (header.MapNumber != 0) return 0;
 
         if (validTerrainIds == null)
             validTerrainIds = GetValidTerrainIds();
@@ -225,23 +229,8 @@ public static class BTLFormatChecker
         // 没有合法表就无法判断什么是"非法"，宁可不动也不要乱改
         if (validTerrainIds.Count == 0) return -1;
 
-        var header = BTLHeader.Parse(data);
-        int tileCount = header.SelectableTileCount;
-
-        // 无地形数据的文件（如部分征服图）自然跳过
-        if (tileCount <= 0) return 0;
-
-        // 地形区起点必须用 StageOffsets 算：文件头 0x80，之后先是军团区（每个 300 字节），
-        // 地形区排在军团区之后。绝不是「文件头紧接着地形」。
-        int terrainStart = StageOffsets
-            .Calculate(header.ArmyCount, tileCount, header.BuildingCount).terrain;
-
-        // 地形区必须完整落在文件内，否则这个文件不含（完整的）地形数据。
-        // 征服地图 conquest*.btl 就是这种情况：头部里的 SelectableTileCount 是另一套
-        // 结构的遗留数字，按它去读会把军团/建筑数据当成地形乱改。
-        // 宁可什么都不做，也不能改坏无关数据。
-        long terrainEnd = (long)terrainStart + (long)tileCount * BTLSize.TERRAIN_SIZE;
-        if (terrainEnd > data.Length) return 0;
+        int tileCount = layout.Area;
+        int terrainStart = layout["terrain"].Offset;
 
         int fixedLayers = 0;
 
@@ -297,15 +286,26 @@ public static class BTLFormatChecker
         // ---------- 2. 头部字段 ----------
         var header = BTLHeader.Parse(data);
 
-        // 地形 / 省区数据的格数是 SelectableTileCount（可编辑格数），
-        // 不是 MapLength * MapWidth（地图标称面积）—— 两者不相等。
-        // 关键：征服地图（conquest*.btl）没有地形数据，SelectableTileCount 为 0，
-        // 若按标称面积去读，会一路读进军团/建筑区，把正常数据误判成损坏。
-        // 解析器的区域起点也是用 SelectableTileCount 算的，这里必须与它一致。
-        long totalTilesLong = header.SelectableTileCount;
-
-        // 标称面积只用于头部自洽性校验
-        long mapTilesLong = (long)header.MapLength * header.MapWidth;
+        BtlLayout layout;
+        try { layout = new BtlLayout(header); }
+        catch (Exception ex) when (ex is InvalidDataException or ArgumentException or OverflowException)
+        {
+            return Fail(filePath, fileSize, $"头部布局无效: {ex.Message}");
+        }
+        long totalTilesLong = layout.Area;
+        long mapTilesLong = layout.Area;
+        bool hasTerrain = header.MapNumber == 0;
+        long expectedSize = layout.Length;
+        if (fileSize != expectedSize)
+        {
+            issues.Add(new BTLIssue(BTLIssueLevel.Error, "文件结构",
+                $"文件大小 {fileSize:N0} 字节，按头部完整布局应为 {expectedSize:N0} 字节"));
+            return new BTLCheckReport
+            {
+                FilePath = filePath, FileSize = fileSize, ExpectedSize = expectedSize,
+                Header = header, Issues = issues
+            };
+        }
 
         if (header.BtlVersion <= 0 || header.BtlVersion > 99)
             issues.Add(new BTLIssue(BTLIssueLevel.Warning, "头部",
@@ -358,69 +358,14 @@ public static class BTLFormatChecker
                     $"{label}大得异常：{value:N0}（上限 {MaxCountField:N0}），头部可能已损坏"));
         }
 
-        // ---------- 2.5 判定文件布局 ----------
-        // 两种文件的唯一结构差别是「有无地形区」：
-        //   关卡 .btl ：文件头(0x80) → 军团(300/个) → 地形(16/格) → 省区(2/格)
-        //               → 归属(1/格) → 建筑(32/个) → 单位/陷阱/事件/天气…
-        //   征服 .bin ：文件头(0x80) → 军团(300/个) → 省区(2/格) → 归属(1/格)
-        //               → 建筑(32/个) → 单位/陷阱/事件/天气…        ← 没有地形区
-        // 注意军团排在【最前】，紧跟在 0x80 的文件头之后，不是排在最后。
-        var stageOffsets = StageOffsets.Calculate(
-            header.ArmyCount, header.SelectableTileCount, header.BuildingCount);
-        var conquestOffsets = ConquestOffsets.Calculate(
-            header.ArmyCount, header.SelectableTileCount, header.BuildingCount);
-
-        // 按关卡布局算出的地形区若装不进文件，就说明这是征服文件
-        long stageTerrainEnd = (long)stageOffsets.terrain
-                             + (long)header.SelectableTileCount * BTLSize.TERRAIN_SIZE;
-        bool hasTerrain = !(header.SelectableTileCount > 0 && stageTerrainEnd > fileSize);
-
-        // 后续所有区块起点都从这里取，不再各自硬算
-        int provinceStart = hasTerrain ? stageOffsets.province : conquestOffsets.province;
-        int buildingStart = hasTerrain ? stageOffsets.building : conquestOffsets.building;
-        int dataEnd       = hasTerrain ? stageOffsets.dataEnd  : conquestOffsets.dataEnd;
-
-        if (!hasTerrain && header.SelectableTileCount > 0)
-        {
-            issues.Add(new BTLIssue(BTLIssueLevel.Info, "文件结构",
-                "按征服布局解析（该文件不含地形区）"));
-        }
-
-        // ---------- 3. 按头部推算文件应有大小 ----------
-        long expectedSize = -1;
-
-        if (totalTilesLong > 0 && totalTilesLong <= int.MaxValue &&
-            header.BuildingCount >= 0 && header.TroopCount >= 0 && header.ArmyCount >= 0)
-        {
-            // dataEnd 是建筑区结束的位置，即本节能推算出的最小应有大小；
-            // 其后的单位/陷阱/事件等未计入，所以只判「截断」不判「多出」。
-            expectedSize = dataEnd;
-
-            if (fileSize < expectedSize)
-            {
-                issues.Add(new BTLIssue(BTLIssueLevel.Error, "文件结构",
-                    $"文件被截断：实际 {fileSize:N0} 字节，按头部推算至少应有 {expectedSize:N0} 字节，" +
-                    $"缺少 {expectedSize - fileSize:N0} 字节。" +
-                    "解析器会静默跳过读不到的部分，表现为「打开正常但数据缺一截」"));
-            }
-        }
-        else
-        {
-            issues.Add(new BTLIssue(BTLIssueLevel.Warning, "文件结构",
-                "头部字段异常，无法推算文件应有大小"));
-        }
+        int provinceStart = layout["provinces"].Offset;
+        int buildingStart = layout["Buildings"].Offset;
+        int dataEnd = layout["armies"].Offset;
 
         // ---------- 4. 地形 / 省区数据是否完整 ----------
         if (totalTilesLong > 0 && totalTilesLong <= int.MaxValue)
         {
             // 地形区只有关卡文件才有，征服文件直接跳过
-            if (hasTerrain && stageTerrainEnd > fileSize)
-            {
-                long readable = Math.Max(0, fileSize - stageOffsets.terrain) / BTLSize.TERRAIN_SIZE;
-                issues.Add(new BTLIssue(BTLIssueLevel.Error, "地形",
-                    $"地形区不完整：应有 {totalTilesLong:N0} 格，实际只能读到 {readable:N0} 格"));
-            }
-
             long provinceEnd = (long)provinceStart + totalTilesLong * BTLSize.PROVINCE_SIZE;
             if (provinceEnd > fileSize)
             {
@@ -459,7 +404,7 @@ public static class BTLFormatChecker
             }
             else
             {
-                long terrainStart = stageOffsets.terrain;
+                long terrainStart = layout["terrain"].Offset;
                 int badLayer1 = 0, badLayer2 = 0, badLayer3 = 0;
                 long firstBadOffset = -1;
                 var samples = new List<string>(8);
@@ -587,7 +532,7 @@ public static class BTLFormatChecker
         // 编辑器同款的 ConquestParser 对 conquest*.btl 解析出 0 个单位，
         // 而头部声称有数百个，说明那些计数是沿用关卡结构留下的遗留值。
         // 布局未确认前不报，避免假错。
-        if (hasTerrain && header.TroopCount > 0 && header.TroopCount <= MaxCountField &&
+        if (header.TroopCount > 0 && header.TroopCount <= MaxCountField &&
             mapTilesLong > 0 && mapTilesLong <= int.MaxValue)
         {
             int totalTiles = (int)mapTilesLong;
@@ -605,8 +550,10 @@ public static class BTLFormatChecker
                 long offset = armyStart + (long)i * armySize;
                 if (offset + armySize > fileSize) break;
 
-                var army = Army.FromBytes(data, (int)offset);
-                if (army.Coordinate < 0 || army.Coordinate >= totalTiles)
+                int coordinate = header.BtlVersion == 1
+                    ? Army.FromBytes(data, (int)offset).Coordinate
+                    : Army_3.FromBytes(data, (int)offset).Coordinate;
+                if (coordinate < 0 || coordinate >= totalTiles)
                 {
                     outOfRange++;
                     if (firstBadOffset < 0) firstBadOffset = offset;

@@ -1,4 +1,5 @@
 using WC4MapEditor.Core.Config;
+using WC4MapEditor.Core.Assets;
 using WC4MapEditor.Core.Models;
 
 namespace WC4MapEditor.Core.Modifiers;
@@ -24,7 +25,10 @@ public sealed class ArmyModifier : ModifierBase
         if (!IsValidCoord(col, row)) return ModifierResult.Fail("坐标超出范围");
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
 
-        short coordIndex = (short)(row * _mapData.MapWidth + col);
+        int index = checked(row * _mapData.MapWidth + col);
+        if (index > short.MaxValue)
+            return ModifierResult.Fail("该地图位置超过部队坐标上限 32767，未写入单位。");
+        short coordIndex = MapLimits.SignedCoordinate(index);
 
         Army army;
         if (parameter is Army a)
@@ -91,7 +95,10 @@ public sealed class ArmyModifier : ModifierBase
         if (!IsValidCoord(col, row) || _mapData == null) return false;
         if (data is not Army army) return false;
 
-        army.Coordinate = (short)(row * _mapData.MapWidth + col);
+        int index = checked(row * _mapData.MapWidth + col);
+        if (index > short.MaxValue)
+            return false;
+        army.Coordinate = MapLimits.SignedCoordinate(index);
         int idx = _mapData.FindArmyIndex(col, row);
         if (idx >= 0)
             _mapData.ReplaceArmy(idx, army);
@@ -634,6 +641,8 @@ public sealed class ArmyModifier : ModifierBase
     public ModifierResult GenerateArmiesByProbability(int belongValue, int probability)
     {
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
+        if (_mapData.TerrainCount > short.MaxValue + 1)
+            return ModifierResult.Fail("整图批量生成要求所有格子的部队坐标可表示（最多 32768 格），未修改地图。");
 
         var cfg = ConfigManager.Instance;
         var armyConfig = cfg.GetArmyEditConfig();
@@ -690,7 +699,7 @@ public sealed class ArmyModifier : ModifierBase
             if (actualBelongValue >= 0)
                 _mapData.SetBelongValueByIndex(hexIndex, actualBelongValue);
 
-            if (_mapData.Header.BtlVersion >= 3)
+            if (_mapData.Header.BtlVersion >= 2)
             {
                 var army3 = Army_3.CreateDefault(hexIndex);
                 army3.UnitType = (byte)unitType;
@@ -801,6 +810,8 @@ public sealed class ArmyModifier : ModifierBase
 
     public ModifierResult AutoAssignGeneralsToArmies(int targetBelongValue, int requestedGeneralCount, bool clearExisting, bool adaptToUnits)
     {
+        if (requestedGeneralCount < -1) return ModifierResult.Fail("将领数量必须为 -1 或非负整数");
+        if (requestedGeneralCount == 0) return ModifierResult.Ok("分配数量为 0，未修改单位", 0);
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
         if (_mapData.Armies.Count == 0) return ModifierResult.Fail("没有单位需要分配将领");
         if (_mapData.Legions.Count == 0) return ModifierResult.Fail("军团数据未加载，无法分配将领");
@@ -814,6 +825,19 @@ public sealed class ArmyModifier : ModifierBase
                 belongToCountryId[legion.ActionId] = legion.CountryId;
         }
 
+        HashSet<int> eligible;
+        try
+        {
+            AssetManager.Default.GetArmySettings();
+            AssetManager.Default.GetSkillSettings();
+            eligible = cfg.GetGeneralSettingsData().GroupBy(g => g.Id)
+                .Where(g => g.Count() == 1 && GeneralSkillRules.CanAssign(g.First(), AssetManager.Default))
+                .Select(g => g.Key).ToHashSet();
+            if (eligible.Count == 0) return ModifierResult.Fail("没有可安全分配的将领，请检查当前资源表和五技能槽限制");
+        }
+        catch (Exception ex) { return ModifierResult.Fail($"将领/技能数据无效，未修改单位：{ex.Message}"); }
+
+        var targetIndices = new List<int>();
         var targetArmies = new List<Army>();
         for (int i = 0; i < _mapData.Armies.Count; i++)
         {
@@ -822,6 +846,7 @@ public sealed class ArmyModifier : ModifierBase
             if (army.LegionId > 0) armyBelongValue = army.LegionId;
 
             if (targetBelongValue != -1 && armyBelongValue != targetBelongValue) continue;
+            if (clearExisting || army.General == 0) targetIndices.Add(i);
 
             if (clearExisting)
             {
@@ -837,25 +862,24 @@ public sealed class ArmyModifier : ModifierBase
         if (targetArmies.Count == 0)
             return ModifierResult.Fail($"没有找到归属值为 {targetBelongValue} 的单位");
 
+        if (targetArmies.Any(a => a.Coordinate < 0 || a.Coordinate >= _mapData.TerrainCount ||
+            _mapData.Armies.Count(other => other.Coordinate == a.Coordinate) != 1))
+            return ModifierResult.Fail("目标单位坐标越界或重复，未修改单位");
+
         if (clearExisting)
         {
-            for (int i = 0; i < _mapData.Armies.Count; i++)
+            for (int j = 0; j < targetIndices.Count; j++)
             {
+                int i = targetIndices[j];
                 var army = _mapData.Armies[i];
-                if (army.General > 0)
-                {
-                    cfg.RemoveAssignedGeneral(army.General);
-                    army.General = 0;
-                    army.Nobility = 0;
-                    army.SkillLevel1 = 1;
-                    army.SkillLevel2 = 1;
-                    army.SkillLevel3 = 1;
-                    army.SkillLevel4 = 1;
-                    army.SkillLevel5 = 1;
-                    _mapData.ReplaceArmy(i, army);
-                }
+                army.General = 0;
+                army.Rank = 0;
+                army.SkillLevel1 = army.SkillLevel2 = army.SkillLevel3 = army.SkillLevel4 = army.SkillLevel5 = 0;
+                _mapData.ReplaceArmy(i, army);
+                targetArmies[j] = army;
             }
         }
+        cfg.SyncAssignedGenerals(_mapData);
 
         var armiesByBelong = new Dictionary<int, List<Army>>();
         foreach (var army in targetArmies)
@@ -878,7 +902,8 @@ public sealed class ArmyModifier : ModifierBase
             if (!belongToCountryId.TryGetValue(belongVal, out int countryId)) continue;
 
             var availableGenerals = cfg.GetGeneralsByCountryId(countryId);
-            availableGenerals = cfg.GetAvailableGenerals(availableGenerals);
+            availableGenerals = cfg.GetAvailableGenerals(availableGenerals)
+                .Where(eligible.Contains).Distinct().ToList();
 
             if (availableGenerals.Count == 0) continue;
 
@@ -909,8 +934,8 @@ public sealed class ArmyModifier : ModifierBase
             totalAssignedCount += assignedCount;
         }
 
-        MarkModified();
-        return ModifierResult.Ok($"已成功分配 {totalAssignedCount} 个将领到单位");
+        if (totalAssignedCount > 0 || clearExisting) MarkModified();
+        return ModifierResult.Ok($"已成功分配 {totalAssignedCount} 个将领到单位", totalAssignedCount);
     }
 
     private ArmyGroups GroupArmiesBySpecialty(List<Army> armies)
@@ -941,7 +966,7 @@ public sealed class ArmyModifier : ModifierBase
         if (armies.Count == 0 || maxCount <= 0) return 0;
 
         var cfg = ConfigManager.Instance;
-        var matchingGenerals = availableGenerals.Where(g => cfg.GetGeneralSpecialty(g) == specialtyType).ToList();
+        var matchingGenerals = availableGenerals.Where(g => !cfg.IsGeneralAssigned(g) && cfg.GetGeneralSpecialty(g) == specialtyType).ToList();
         if (matchingGenerals.Count == 0) return 0;
 
         int assignedCount = 0;
@@ -957,13 +982,7 @@ public sealed class ArmyModifier : ModifierBase
             availableArmies.RemoveAt(index);
 
             var generalSettings = cfg.GetGeneralSettingsById(generalId);
-            army.General = (short)generalId;
-
-            if (generalSettings != null)
-            {
-                army.Nobility = (byte)generalSettings.MilitaryRank;
-                ApplyGeneralSkills(ref army, generalSettings);
-            }
+            GeneralSkillRules.Apply(ref army, generalSettings!, AssetManager.Default);
 
             cfg.AddAssignedGeneral(generalId);
 
@@ -986,7 +1005,7 @@ public sealed class ArmyModifier : ModifierBase
         var cfg = ConfigManager.Instance;
         int assignedCount = 0;
         var availableArmies = armies.ToList();
-        var shuffledGenerals = availableGenerals.OrderBy(_ => _random.Next()).ToList();
+        var shuffledGenerals = availableGenerals.Where(g => !cfg.IsGeneralAssigned(g)).OrderBy(_ => _random.Next()).ToList();
 
         foreach (int generalId in shuffledGenerals)
         {
@@ -1010,13 +1029,7 @@ public sealed class ArmyModifier : ModifierBase
             }
 
             var generalSettings = cfg.GetGeneralSettingsById(generalId);
-            selectedArmy.General = (short)generalId;
-
-            if (generalSettings != null)
-            {
-                selectedArmy.Nobility = (byte)generalSettings.MilitaryRank;
-                ApplyGeneralSkills(ref selectedArmy, generalSettings);
-            }
+            GeneralSkillRules.Apply(ref selectedArmy, generalSettings!, AssetManager.Default);
 
             cfg.AddAssignedGeneral(generalId);
 
@@ -1030,27 +1043,6 @@ public sealed class ArmyModifier : ModifierBase
         }
 
         return assignedCount;
-    }
-
-    private static void ApplyGeneralSkills(ref Army army, GeneralSettings settings)
-    {
-        if (settings.Skills == null) return;
-
-        for (int i = 0; i <= Math.Min(settings.Skills.Count - 1, 4); i++)
-        {
-            int skillId = settings.Skills[i];
-            int skillLevel = skillId % 10;
-            if (skillLevel == 0) skillLevel = 1;
-
-            switch (i)
-            {
-                case 0: army.SkillLevel1 = (byte)skillLevel; break;
-                case 1: army.SkillLevel2 = (byte)skillLevel; break;
-                case 2: army.SkillLevel3 = (byte)skillLevel; break;
-                case 3: army.SkillLevel4 = (byte)skillLevel; break;
-                case 4: army.SkillLevel5 = (byte)skillLevel; break;
-            }
-        }
     }
 
     private class ArmyGroups

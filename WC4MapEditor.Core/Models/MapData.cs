@@ -6,8 +6,15 @@ using System.Runtime.CompilerServices;
 
 namespace WC4MapEditor.Core.Models;
 
+public enum MapFileKind { Unknown, World, Battle }
+
 public class MapData : INotifyPropertyChanged
 {
+    public MapFileKind FileKind { get; set; }
+    public byte[] ProvincePadding { get; set; } = [];
+    public byte[] BelongPadding { get; set; } = [];
+    public byte[] OpaqueRecords { get; set; } = [];
+    public byte[] ExtraData { get; set; } = [];
     private TerrainData[] _terrains;
     private Province[] _provinces;
     private BTLHeader _header;
@@ -47,7 +54,7 @@ public class MapData : INotifyPropertyChanged
     public ObservableCollection<Building> Buildings
     {
         get => _buildings;
-        set { _buildings = value; OnPropertyChanged(); }
+        set { _buildings = value; InvalidateBuildingCoordIndex(); OnPropertyChanged(); }
     }
 
     public ObservableCollection<Army> Armies
@@ -323,6 +330,7 @@ public class MapData : INotifyPropertyChanged
 
     public MapData(int width, int height)
     {
+        MapLimits.Area(width, height);
         _header = BTLHeader.CreateDefault();
         _mapWidth = width;
         _mapHeight = height;
@@ -439,23 +447,16 @@ public class MapData : INotifyPropertyChanged
 
     public void InitializeTerrain(int width, int height)
     {
+        int terrainCount = MapLimits.Area(width, height);
+        var terrains = new TerrainData[terrainCount];
+        var provinces = new Province[terrainCount];
         _mapWidth = width;
         _mapHeight = height;
-
-        int terrainCount = width * height;
-
-        if (terrainCount <= 0)
-        {
-            _terrains = Array.Empty<TerrainData>();
-            _provinces = Array.Empty<Province>();
-            return;
-        }
-
-        _terrains = new TerrainData[terrainCount];
+        _terrains = terrains;
         for (int i = 0; i < terrainCount; i++)
             _terrains[i] = TerrainData.CreateDefault();
 
-        _provinces = new Province[terrainCount];
+        _provinces = provinces;
         for (int i = 0; i < terrainCount; i++)
             _provinces[i] = Province.CreateDefault();
     }
@@ -684,37 +685,74 @@ public class MapData : INotifyPropertyChanged
 
     public void Resize(int newWidth, int newHeight)
     {
-        int oldWidth = MapWidth;
-        int oldHeight = MapHeight;
+        MapTransform.Resize(this, newWidth, newHeight);
+    }
 
-        var newTerrains = new TerrainData[newWidth * newHeight];
-        var newProvinces = new Province[newWidth * newHeight];
+    public MapData DeepClone()
+    {
+        var copy = (MapData)MemberwiseClone();
+        copy.PropertyChanged = null;
+        copy._header = _header.DeepClone();
+        copy._terrains = (TerrainData[])_terrains.Clone();
+        copy._provinces = (Province[])_provinces.Clone();
+        copy._buildings = new(_buildings);
+        copy._armies = new(_armies);
+        copy._armiesV3 = new(_armiesV3);
+        copy._legions = new(_legions);
+        copy._traps = new(_traps);
+        copy._reinforcements = new(_reinforcements);
+        copy._reinforcementsV3 = new(_reinforcementsV3);
+        copy._capitals = new(_capitals);
+        copy._cases = new(_cases);
+        copy._weathers = new(_weathers);
+        copy._events = new(_events);
+        copy._airForces = new(_airForces);
+        copy._unitPlaces = new(_unitPlaces);
+        copy._strategyConstructions = new(_strategyConstructions);
+        copy._airSupports = new(_airSupports);
+        copy._belongs = new(_belongs);
+        copy._buildingCoordIndex = new();
+        copy.ProvincePadding = (byte[])ProvincePadding.Clone();
+        copy.BelongPadding = (byte[])BelongPadding.Clone();
+        copy.OpaqueRecords = (byte[])OpaqueRecords.Clone();
+        copy.ExtraData = (byte[])ExtraData.Clone();
+        return copy;
+    }
 
-        for (int i = 0; i < newTerrains.Length; i++)
-            newTerrains[i] = TerrainData.CreateDefault();
-        for (int i = 0; i < newProvinces.Length; i++)
-            newProvinces[i] = Province.CreateDefault();
-
-        for (int row = 0; row < Math.Min(oldHeight, newHeight); row++)
-        {
-            for (int col = 0; col < Math.Min(oldWidth, newWidth); col++)
-            {
-                int oldIndex = row * oldWidth + col;
-                int newIndex = row * newWidth + col;
-                newTerrains[newIndex] = _terrains[oldIndex];
-                newProvinces[newIndex] = _provinces[oldIndex];
-            }
-        }
-
-        _terrains = newTerrains;
-        _provinces = newProvinces;
-        MapWidth = newWidth;
-        MapHeight = newHeight;
-
-        Header.MapLength = newWidth;
-        Header.MapWidth = newHeight;
-
-        IsModified = true;
+    public void CopyFrom(MapData source)
+    {
+        var copy = source.DeepClone();
+        _terrains = copy._terrains;
+        _provinces = copy._provinces;
+        _buildings = copy._buildings;
+        _armies = copy._armies;
+        _armiesV3 = copy._armiesV3;
+        _legions = copy._legions;
+        _traps = copy._traps;
+        _reinforcements = copy._reinforcements;
+        _reinforcementsV3 = copy._reinforcementsV3;
+        _capitals = copy._capitals;
+        _cases = copy._cases;
+        _weathers = copy._weathers;
+        _events = copy._events;
+        _airForces = copy._airForces;
+        _unitPlaces = copy._unitPlaces;
+        _strategyConstructions = copy._strategyConstructions;
+        _airSupports = copy._airSupports;
+        _belongs = copy._belongs;
+        _header = copy._header;
+        _belongOffset = copy._belongOffset;
+        _mapWidth = copy._mapWidth;
+        _mapHeight = copy._mapHeight;
+        _filePath = copy._filePath;
+        _isModified = copy._isModified;
+        FileKind = copy.FileKind;
+        ProvincePadding = copy.ProvincePadding;
+        BelongPadding = copy.BelongPadding;
+        OpaqueRecords = copy.OpaqueRecords;
+        ExtraData = copy.ExtraData;
+        RebuildBuildingCoordIndex();
+        OnPropertyChanged(string.Empty);
     }
 
     public void ClearSelection()
@@ -734,14 +772,41 @@ public class MapData : INotifyPropertyChanged
 
     public double GetMemoryUsageMB()
     {
-        long bytes = 0;
-        if (_terrains != null) bytes += (long)_terrains.Length * 16;
-        if (_provinces != null) bytes += (long)_provinces.Length * 2;
-        return bytes / (1024.0 * 1024.0);
+        return EstimatedStateBytes() / (1024.0 * 1024.0);
+    }
+
+    public long EstimatedStateBytes()
+    {
+        try
+        {
+            checked
+            {
+                // Conservative managed-state estimate, including collection
+                // capacity and owner strings, not a CLR heap measurement.
+                long records = Size(_buildings) + Size(_armies) + Size(_armiesV3) + Size(_legions)
+                    + Size(_traps) + Size(_reinforcements) + Size(_reinforcementsV3) + Size(_capitals)
+                    + Size(_cases) + Size(_weathers) + Size(_events) + Size(_airForces)
+                    + Size(_unitPlaces) + Size(_strategyConstructions) + Size(_airSupports);
+                return 4096L + _terrains.LongLength * Unsafe.SizeOf<TerrainData>()
+                    + _provinces.LongLength * Unsafe.SizeOf<Province>() + records * 2
+                    + _belongs.Count * 40L + _buildings.Count * 40L
+                    + ProvincePadding.LongLength + BelongPadding.LongLength
+                    + OpaqueRecords.LongLength + ExtraData.LongLength;
+            }
+        }
+        catch (OverflowException) { return long.MaxValue; }
+
+        static long Size<T>(ICollection<T> values) where T : struct
+            => (long)values.Count * Unsafe.SizeOf<T>();
     }
 
     public void Clear()
     {
+        FileKind = MapFileKind.Unknown;
+        ProvincePadding = [];
+        BelongPadding = [];
+        OpaqueRecords = [];
+        ExtraData = [];
         _terrains = Array.Empty<TerrainData>();
         _provinces = Array.Empty<Province>();
         _buildings?.Clear();

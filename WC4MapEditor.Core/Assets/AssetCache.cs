@@ -44,6 +44,11 @@ public sealed class AssetCache
 
     private string _assetsRoot = "";
     private bool _isLoaded;
+    private long _revision;
+
+    public long Revision => Interlocked.Read(ref _revision);
+
+    public void InvalidateData() => Interlocked.Increment(ref _revision);
 
     /// <summary>已加载的 assets 根目录绝对路径。</summary>
     public string AssetsRoot
@@ -268,6 +273,7 @@ public sealed class AssetCache
 
     private void ClearInternal()
     {
+        InvalidateData();
         _entries.Clear();
         _byKind.Clear();
         _byExtension.Clear();

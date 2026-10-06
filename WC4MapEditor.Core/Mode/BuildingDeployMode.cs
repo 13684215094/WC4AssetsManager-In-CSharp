@@ -617,6 +617,11 @@ public sealed class BuildingDeployMode : IModeHandler
         if (mapData == null) return;
 
         int coord = row * mapData.MapWidth + col;
+        if (coord < 0 || coord > ushort.MaxValue)
+        {
+            context.RaiseStatusMessage?.Invoke("建筑坐标必须在 0..65535 范围内，未创建建筑。");
+            return;
+        }
 
         // 检查当前格子是否已有建筑，有则编辑现有建筑，无则创建新建筑
         var existingBuilding = mapData.GetBuildingAt(col, row);

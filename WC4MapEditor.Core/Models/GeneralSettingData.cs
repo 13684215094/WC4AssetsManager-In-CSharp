@@ -1,10 +1,12 @@
 using System.Collections.Generic;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace WC4MapEditor.Core.Models;
 
 public class GeneralSettingData
 {
+    [JsonExtensionData] public Dictionary<string, JsonElement>? ExtraFields { get; set; }
     [JsonPropertyName("Id")] public int Id { get; set; }
     [JsonPropertyName("Name")] public string Name { get; set; } = string.Empty;
     [JsonPropertyName("EName")] public string EName { get; set; } = string.Empty;

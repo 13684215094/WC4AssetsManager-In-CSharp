@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -12,6 +13,7 @@ using System.Windows.Threading;
 using Microsoft.Win32;
 using SkiaSharp;
 using WC4MapEditor.Core.Models;
+using WC4MapEditor.Core.Assets;
 using WC4MapEditor.Core.Parsers.General;
 using WC4MapEditor.Views.Dialogs;
 
@@ -34,6 +36,7 @@ public class GeneralEditScene : UserControl
 
     private GeneralSettingData? _current;
     private bool _loadingUi;
+    private bool _refreshingList;
 
     private ScrollViewer _propScroll = null!;
     private StackPanel _propPanel = null!;
@@ -61,6 +64,7 @@ public class GeneralEditScene : UserControl
         Background = new SolidColorBrush(Color.FromRgb(0x1F, 0x1F, 0x1F));
         BuildUI();
         RefreshList();
+        if (_parser.LastError != null) SetStatus(_parser.LastError);
         Loaded += (_, _) => Dispatcher.BeginInvoke(() =>
         {
             if (_parser.All.Count > 0 && _listBox.Items.Count > 0)
@@ -72,7 +76,7 @@ public class GeneralEditScene : UserControl
     private void BuildUI()
     {
         _root = new Grid();
-        _root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(50) });
+        _root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         _root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         _root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(28) });
 
@@ -88,7 +92,7 @@ public class GeneralEditScene : UserControl
             BorderThickness = new Thickness(0, 0, 0, 1)
         };
         Grid.SetRow(_topBar, 0); Grid.SetColumnSpan(_topBar, 3);
-        var topSp = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0, 12, 0) };
+        var topSp = new WrapPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 8, 12, 8) };
 
         topSp.Children.Add(MakeTopBtn("← 返回", OnBack, primary: false));
         topSp.Children.Add(new Border { Width = 1 });
@@ -96,6 +100,7 @@ public class GeneralEditScene : UserControl
         topSp.Children.Add(MakeTopBtn("❌ 删除选中", OnDelete, primary: false));
         topSp.Children.Add(MakeTopBtn("💾 保存", OnSave, primary: true));
         topSp.Children.Add(MakeTopBtn("↻ 重载", OnReload, primary: false));
+        topSp.Children.Add(MakeTopBtn("检查数据 / 查询引用", OnAudit));
         topSp.Children.Add(new Border { Width = 8 });
 
         // 随机参数按钮
@@ -168,7 +173,8 @@ public class GeneralEditScene : UserControl
             Background = Brushes.Transparent,
             Foreground = Brushes.White,
             BorderThickness = new Thickness(0),
-            FontSize = 13
+            FontSize = 13,
+            DisplayMemberPath = nameof(GeneralListEntry.Label)
         };
         _listBox.SelectionChanged += ListBox_SelectionChanged;
         _listBox.KeyDown += ListBox_KeyDown;
@@ -338,7 +344,9 @@ public class GeneralEditScene : UserControl
 
         // ---- 基本信息 ----
         AddSection("基本信息");
-        AddRow("Id", AddNum("Id", min: 1, max: 99999, changed: _ => ApplyProp()));
+        var idBox = AddNum("Id", min: 0, max: int.MaxValue, changed: _ => ApplyProp());
+        idBox.IsEnabled = false;
+        AddRow("Id", idBox);
         AddRow("名称 (Name)", AddText("Name", changed: _ => ApplyProp()));
         AddRow("英文名 (EName)", AddText("EName", changed: _ => ApplyProp()));
         AddRow("显示图 (Photo)", AddText("Photo", changed: _ => { ApplyProp(); RefreshPreviews(); }));
@@ -388,7 +396,7 @@ public class GeneralEditScene : UserControl
         AddRow("技能 IDs (Skills)", AddText("Skills", changed: _ => ApplyProp()));
         AddRow("勋章 IDs (Medals)", AddText("Medals", changed: _ => ApplyProp()));
         AddRow("技能上限 (SkillsMax)", AddNum("SkillsMax", 0, 99, _ => ApplyProp()));
-        AddRow("重置技能 (ResetSkills)", AddNum("ResetSkills", 0, 1, _ => ApplyProp()));
+        AddRow("重置技能 (ResetSkills)", AddNum("ResetSkills", 0, 99, _ => ApplyProp()));
 
         _propPanel.Children.Add(Separator());
         AddSection("头像位移 (def_portraitpos.xml)");
@@ -398,7 +406,7 @@ public class GeneralEditScene : UserControl
 
         var tip = new TextBlock
         {
-            Text = "提示：新增将领时 PortraitPos 会自动创建 posx=-30, posy=40, scale=1.0；\n删除将领时 PortraitPos 中对应项会同步删除。",
+            Text = "删除将领会保留共享头像；地图、进修、称号等关联引用不会自动迁移。",
             Foreground = Brushes.Gray,
             FontSize = 11,
             Margin = new Thickness(0, 12, 0, 0),
@@ -501,6 +509,7 @@ public class GeneralEditScene : UserControl
     // ===================================== 列表/选中 =====================================
     private void RefreshList()
     {
+        if (_listBox == null || !ApplyProp()) return;
         var query = _parser.All.AsEnumerable();
         var s = _searchBox?.Text?.Trim();
         if (!string.IsNullOrEmpty(s) && !s.StartsWith("搜索"))
@@ -512,33 +521,46 @@ public class GeneralEditScene : UserControl
         }
         // 保持 JSON 文件读取顺序（先读的放最上面），不做排序
         var list = query.ToList();
-        var previousId = (_listBox?.SelectedItem as GeneralListEntry)?.Id;
-        _listBox.Items.Clear();
-        foreach (var g in list)
+        var previous = _current;
+        _refreshingList = true;
+        try
         {
-            var entry = new GeneralListEntry(g);
-            _listBox.Items.Add(entry);
-            if (previousId.HasValue && g.Id == previousId.Value) _listBox.SelectedItem = entry;
+            _listBox.Items.Clear();
+            foreach (var g in list)
+            {
+                var entry = new GeneralListEntry(g);
+                _listBox.Items.Add(entry);
+                if (ReferenceEquals(g, previous)) _listBox.SelectedItem = entry;
+            }
         }
+        finally { _refreshingList = false; }
+        _current = (_listBox.SelectedItem as GeneralListEntry)?.Data;
+        if (_current == null) ShowEmpty();
         SetStatus($"已加载 {_parser.All.Count} 个将领配置，列表显示 {_listBox.Items.Count} 项");
     }
 
-    private sealed class GeneralListEntry
+    private sealed class GeneralListEntry : INotifyPropertyChanged
     {
-        public int Id { get; }
-        public string Name { get; }
-        public string EName { get; }
-        public GeneralListEntry(GeneralSettingData g) { Id = g.Id; Name = g.Name ?? ""; EName = g.EName ?? ""; }
-        public override string ToString() => $"[{Id}] {Name}  ({EName})";
+        public GeneralSettingData Data { get; }
+        public GeneralListEntry(GeneralSettingData g) { Data = g; }
+        public string Label => $"[{Data.Id}] {Data.Name}  ({Data.EName})";
+        public event PropertyChangedEventHandler? PropertyChanged;
+        public void Refresh() => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Label)));
     }
 
     private void ListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (_refreshingList) return;
+        if (!ApplyProp())
+        {
+            _refreshingList = true;
+            _listBox.SelectedItem = e.RemovedItems.OfType<GeneralListEntry>().FirstOrDefault();
+            _refreshingList = false;
+            return;
+        }
         var entry = _listBox.SelectedItem as GeneralListEntry;
         if (entry == null) { _current = null; ShowEmpty(); return; }
-        var g = _parser.GetById(entry.Id);
-        if (g == null) { _current = null; ShowEmpty(); return; }
-        _current = g;
+        _current = entry.Data;
         LoadUiFromCurrent();
     }
 
@@ -565,6 +587,7 @@ public class GeneralEditScene : UserControl
 
     private void ShowEmpty()
     {
+        foreach (var control in _imageLoadCtsMap.Keys.ToList()) CancelImageLoad(control);
         _loadingUi = true;
         foreach (var kv in _textBoxes) kv.Value.Text = string.Empty;
         foreach (var kv in _numBoxes) kv.Value.Value = kv.Value.MinValue;
@@ -614,12 +637,7 @@ public class GeneralEditScene : UserControl
             SetNum("AirForceMax", _current.AirForceMax);
             SetNum("MarchMax", _current.MarchMax);
 
-            // PortraitPos
-            var key = string.IsNullOrEmpty(_current.EName) ? _current.Photo : _current.EName;
-            var p = _parser.GetPortrait(key ?? "");
-            SetNum("Portrait_PosX", p?.PosX ?? -30);
-            SetNum("Portrait_PosY", p?.PosY ?? 40);
-            SetNum("Portrait_Scale", p?.Scale ?? 1.0);
+            LoadPortraitControls();
 
             RefreshPreviews();
             RefreshJsonPreview();
@@ -630,15 +648,20 @@ public class GeneralEditScene : UserControl
         }
     }
 
-    private void ApplyProp()
+    private bool ApplyProp()
     {
-        if (_loadingUi || _current == null) return;
+        if (_loadingUi || _current == null) return true;
         try
         {
-            _current.Name = GetText("Name") ?? "";
-            _current.EName = GetText("EName") ?? "";
-            _current.Photo = GetText("Photo") ?? "";
-            _current.Id = (int)GetNum("Id");
+            // Validate both lists before changing any fields on the selected row.
+            var skills = GeneralSkillRules.ParseIds(GetText("Skills"));
+            var medals = GeneralSkillRules.ParseIds(GetText("Medals"));
+            foreach (var (key, box) in _numBoxes)
+                if (!box.IsInputValid) throw new FormatException($"{key}: 数值输入无效");
+            string oldPhotoKey = GeneralSettingParser.GetPhotoKey(_current);
+            _current.Name = PreserveNull(_current.Name, GetText("Name"))!;
+            _current.EName = PreserveNull(_current.EName, GetText("EName"))!;
+            _current.Photo = PreserveNull(_current.Photo, GetText("Photo"))!;
             _current.MilitaryRank = (int)GetNum("MilitaryRank");
             _current.Hp = (int)GetNum("Hp");
             _current.InShop = (int)GetNum("InShop");
@@ -664,29 +687,36 @@ public class GeneralEditScene : UserControl
             _current.AirForceMax = (int)GetNum("AirForceMax");
             _current.MarchMax = (int)GetNum("MarchMax");
 
-            _current.Skills = ParseIntList(GetText("Skills"));
-            _current.Medals = ParseIntList(GetText("Medals"));
+            if (_current.Skills != null || skills.Count != 0) _current.Skills = skills;
+            if (_current.Medals != null || medals.Count != 0) _current.Medals = medals;
 
             // 列表项文字同步
-            if (_listBox.SelectedItem is GeneralListEntry le && le.Id == _current.Id)
+            if (_listBox.SelectedItem is GeneralListEntry le && ReferenceEquals(le.Data, _current)) le.Refresh();
+            if (oldPhotoKey != GeneralSettingParser.GetPhotoKey(_current))
             {
-                var idx = _listBox.SelectedIndex;
-                _listBox.Items[idx] = new GeneralListEntry(_current);
-                _listBox.SelectedIndex = idx;
+                LoadPortraitControls();
+                RefreshPreviews();
             }
             SetStatus($"已更新将领 {_current.EName}（未保存）");
             RefreshJsonPreview();
+            return true;
         }
         catch (Exception ex)
         {
-            Debug.WriteLine(ex);
+            SetStatus($"输入无效，尚未应用：{ex.Message}");
+            return false;
         }
     }
 
     private void ApplyPortrait()
     {
         if (_loadingUi || _current == null) return;
-        var key = string.IsNullOrEmpty(_current.EName) ? _current.Photo : _current.EName;
+        if (_numBoxes.Where(kv => kv.Key.StartsWith("Portrait_", StringComparison.Ordinal)).Any(kv => !kv.Value.IsInputValid))
+        {
+            SetStatus("头像位移/缩放输入无效，尚未应用");
+            return;
+        }
+        var key = GeneralSettingParser.GetPhotoKey(_current);
         if (string.IsNullOrEmpty(key)) return;
         var p = _parser.EnsurePortraitDefault(key);
         p.PosX = (int)GetNum("Portrait_PosX");
@@ -695,26 +725,37 @@ public class GeneralEditScene : UserControl
         SetStatus($"已更新 PortraitPos[{key}]（未保存）");
     }
 
-    private static List<int> ParseIntList(string? s)
+    private void LoadPortraitControls()
     {
-        if (string.IsNullOrWhiteSpace(s)) return new List<int>();
-        var list = new List<int>();
-        var separators = new[] { ',', ' ', ';', '\t', '\n', '\r' };
-        foreach (var part in s.Split(separators, StringSplitOptions.RemoveEmptyEntries))
+        if (_current == null) return;
+        bool loading = _loadingUi;
+        _loadingUi = true;
+        try
         {
-            if (int.TryParse(part, out int v)) list.Add(v);
+            var p = _parser.GetPortrait(GeneralSettingParser.GetPhotoKey(_current));
+            SetNum("Portrait_PosX", p?.PosX ?? -30);
+            SetNum("Portrait_PosY", p?.PosY ?? 40);
+            SetNum("Portrait_Scale", p?.Scale ?? 1.0);
         }
-        return list;
+        finally { _loadingUi = loading; }
     }
 
-    private void SetText(string key, string value)
+    private static string? PreserveNull(string? previous, string? text)
+        => previous == null && string.IsNullOrEmpty(text) ? null : text ?? "";
+
+    private void SetText(string key, string? value)
     {
         if (_textBoxes.TryGetValue(key, out var tb)) tb.Text = value ?? "";
     }
     private string? GetText(string key) => _textBoxes.TryGetValue(key, out var tb) ? tb.Text : null;
     private void SetNum(string key, double value)
     {
-        if (_numBoxes.TryGetValue(key, out var n)) n.Value = Math.Clamp(value, n.MinValue, n.MaxValue);
+        if (_numBoxes.TryGetValue(key, out var n))
+        {
+            n.MinValue = Math.Min(n.MinValue, value);
+            n.MaxValue = Math.Max(n.MaxValue, value);
+            n.Value = value;
+        }
     }
     private double GetNum(string key) => _numBoxes.TryGetValue(key, out var n) ? n.Value : 0;
 
@@ -722,7 +763,7 @@ public class GeneralEditScene : UserControl
     private void RefreshPreviews()
     {
         if (_current == null) { _headPreview.Source = null; _photoPreview.Source = null; _tacticalHeadPreview.Source = null; return; }
-        var key = string.IsNullOrEmpty(_current.Photo) ? _current.EName : _current.Photo;
+        var key = GeneralSettingParser.GetPhotoKey(_current);
         RefreshImageAsync(_headPreview, _parser.GetHeadPath(key));
         RefreshImageAsync(_photoPreview, _parser.GetGeneralPhotoPath(key));
         RefreshTacticalHeadAsync(key);
@@ -730,6 +771,8 @@ public class GeneralEditScene : UserControl
 
     private void RefreshTacticalHeadAsync(string ename)
     {
+        CancelImageLoad(_tacticalHeadPreview);
+        _tacticalHeadPreview.Source = null;
         if (string.IsNullOrEmpty(ename))
         {
             _tacticalHeadPreview.Source = null;
@@ -744,11 +787,6 @@ public class GeneralEditScene : UserControl
             return;
         }
 
-        if (_imageLoadCtsMap.TryGetValue(_tacticalHeadPreview, out var oldCts))
-        {
-            oldCts.Cancel();
-            oldCts.Dispose();
-        }
         var cts = new CancellationTokenSource();
         _imageLoadCtsMap[_tacticalHeadPreview] = cts;
         var token = cts.Token;
@@ -790,6 +828,7 @@ public class GeneralEditScene : UserControl
         }, token).ContinueWith(t =>
         {
             if (token.IsCancellationRequested) return;
+            if (!t.IsCompletedSuccessfully) { Debug.WriteLine(t.Exception); return; }
             if (t.Result is BitmapSource bmp)
             {
                 AddToCache(cacheKey, bmp);
@@ -834,6 +873,8 @@ public class GeneralEditScene : UserControl
 
     private void RefreshImageAsync(Image imageControl, string? path)
     {
+        CancelImageLoad(imageControl);
+        imageControl.Source = null;
         if (string.IsNullOrEmpty(path))
         {
             imageControl.Source = null;
@@ -846,12 +887,6 @@ public class GeneralEditScene : UserControl
             imageControl.Source = cached;
             return;
         }
-        // 取消该控件之前的加载任务，避免快速滚动时任务堆积
-        if (_imageLoadCtsMap.TryGetValue(imageControl, out var oldCts))
-        {
-            oldCts.Cancel();
-            oldCts.Dispose();
-        }
         var cts = new CancellationTokenSource();
         _imageLoadCtsMap[imageControl] = cts;
         var token = cts.Token;
@@ -860,12 +895,20 @@ public class GeneralEditScene : UserControl
         _ = Task.Run(() => TryLoadImage(path), token).ContinueWith(t =>
         {
             if (token.IsCancellationRequested) return;
+            if (!t.IsCompletedSuccessfully) { Debug.WriteLine(t.Exception); return; }
             if (t.Result is BitmapSource bmp)
             {
                 AddToCache(path, bmp);
                 imageControl.Source = bmp;
             }
         }, CancellationToken.None, TaskContinuationOptions.NotOnCanceled, TaskScheduler.FromCurrentSynchronizationContext());
+    }
+
+    private void CancelImageLoad(Image control)
+    {
+        if (!_imageLoadCtsMap.Remove(control, out var cts)) return;
+        cts.Cancel();
+        cts.Dispose();
     }
 
     private void AddToCache(string path, BitmapSource bmp)
@@ -966,7 +1009,8 @@ public class GeneralEditScene : UserControl
     private void OnPhotoPreviewClick(object sender, MouseButtonEventArgs e)
     {
         if (_current == null) return;
-        var ename = string.IsNullOrEmpty(_current.EName) ? _current.Photo : _current.EName;
+        if (!ApplyProp()) return;
+        var ename = GeneralSettingParser.GetPhotoKey(_current);
         if (string.IsNullOrEmpty(ename))
         {
             MessageBox.Show("当前将领没有 EName/Photo，无法进入图片编辑", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
@@ -978,6 +1022,7 @@ public class GeneralEditScene : UserControl
 
     private async void OnAdd(object sender, RoutedEventArgs e)
     {
+        if (!ApplyProp()) return;
         using var enameDlg = new SingleInputDialog(_window)
         {
             Title = "新增将领",
@@ -989,12 +1034,6 @@ public class GeneralEditScene : UserControl
         var ename = await enameDlg.ShowAsync();
         if (string.IsNullOrWhiteSpace(ename)) return;
 
-        if (_parser.GetByEName(ename) != null)
-        {
-            MessageBox.Show($"已存在 EName={ename} 的将领，不能重复添加", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
-            return;
-        }
-
         using var nameDlg = new SingleInputDialog(_window)
         {
             Title = "新增将领",
@@ -1003,32 +1042,53 @@ public class GeneralEditScene : UserControl
         };
         var cname = await nameDlg.ShowAsync() ?? ename;
 
-        var (g, p) = _parser.AddNewGeneral(cname, ename);
-        RefreshList();
-        foreach (GeneralListEntry item in _listBox.Items)
-            if (item.Id == g.Id) { _listBox.SelectedItem = item; break; }
-        SetStatus($"新增将领 {g.Name}({g.EName}) ID={g.Id}，PortraitPos 默认: posx={p.PosX} posy={p.PosY} scale={p.Scale}");
+        try
+        {
+            var (g, p) = _parser.AddNewGeneral(cname, ename);
+            _searchBox.Text = "";
+            RefreshList();
+            foreach (GeneralListEntry item in _listBox.Items)
+                if (ReferenceEquals(item.Data, g)) { _listBox.SelectedItem = item; break; }
+            SetStatus($"新增将领 {g.Name}({g.EName}) ID={g.Id}，PortraitPos: posx={p.PosX} posy={p.PosY} scale={p.Scale}");
+        }
+        catch (Exception ex) { MessageBox.Show(ex.Message, "新增失败", MessageBoxButton.OK, MessageBoxImage.Error); }
     }
 
     private void OnDelete(object sender, RoutedEventArgs e)
     {
         if (_current == null) { MessageBox.Show("请先在左侧选中一个将领", "提示", MessageBoxButton.OK, MessageBoxImage.Information); return; }
-        var res = MessageBox.Show($"确定要删除将领 [{_current.Id}] {_current.Name}({_current.EName})？\n同时将删除 def_portraitpos.xml 中的对应项。",
+        var res = MessageBox.Show($"确定要删除将领 [{_current.Id}] {_current.Name}({_current.EName})？\n保留共享头像。地图、进修、称号等关联引用需要另外检查。",
             "删除将领", MessageBoxButton.YesNo, MessageBoxImage.Warning);
         if (res != MessageBoxResult.Yes) return;
         int id = _current.Id;
         string ename = _current.EName;
-        if (_parser.DeleteGeneral(id))
+        if (_parser.DeleteGeneral(_current))
         {
-            RefreshList();
             _current = null;
+            RefreshList();
             ShowEmpty();
             SetStatus($"已删除将领 ID={id} EName={ename}（未保存）");
         }
     }
 
+    private void OnAudit(object sender, RoutedEventArgs e)
+    {
+        if (!ApplyProp()) return;
+        try
+        {
+            var root = Directory.GetParent(System.IO.Path.GetDirectoryName(_parser.ConfigPath)!)!.FullName;
+            new AssetAuditWindow(_window, root, _current?.Id, _parser.GetSnapshot()).ShowDialog();
+        }
+        catch (Exception ex) { MessageBox.Show(ex.Message, "数据检查失败", MessageBoxButton.OK, MessageBoxImage.Error); }
+    }
+
     private void OnSave(object sender, RoutedEventArgs e)
     {
+        if (!ApplyProp() || _numBoxes.Values.Any(n => !n.IsInputValid))
+        {
+            MessageBox.Show("属性输入无效，请修正后保存。", "保存已阻止", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
         var ok = _parser.SaveAll();
         if (ok)
         {
@@ -1038,7 +1098,7 @@ public class GeneralEditScene : UserControl
         }
         else
         {
-            MessageBox.Show("保存失败，请检查文件权限或查看 Debug 输出", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show(_parser.LastError ?? "保存失败", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
 
@@ -1048,9 +1108,15 @@ public class GeneralEditScene : UserControl
             "重载", MessageBoxButton.YesNo, MessageBoxImage.Question);
         if (res != MessageBoxResult.Yes) return;
         _parser.LoadAll();
+        _current = null;
+        foreach (var cts in _imageLoadCtsMap.Values) { cts.Cancel(); cts.Dispose(); }
+        _imageLoadCtsMap.Clear();
+        _imageCache.Clear();
+        _imageCacheOrder.Clear();
+        _imageCacheNodes.Clear();
         RefreshList();
         ShowEmpty();
-        SetStatus("已从磁盘重新加载");
+        SetStatus(_parser.LastError ?? "已从磁盘重新加载");
     }
 
     private void SetStatus(string s)
@@ -1063,6 +1129,7 @@ public class GeneralEditScene : UserControl
     private void ApplyRandomTemplate(int templateId)
     {
         if (_current == null) { MessageBox.Show("请先在左侧选中一个将领", "提示", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+        if (!ApplyProp()) return;
 
         var templates = ConfigManager.Instance.GetGeneralRandomTemplates();
         var template = templates.FirstOrDefault(t => t.Id == templateId);
@@ -1076,6 +1143,11 @@ public class GeneralEditScene : UserControl
         _loadingUi = true; // 批量修改期间禁止触发 ApplyProp
         try
         {
+            if (new[] { template.InfantryDivisor, template.ArtilleryDivisor, template.ArmorDivisor,
+                template.NavyDivisor, template.AirForceDivisor }.Any(v => !double.IsFinite(v) || v <= 0))
+                throw new InvalidDataException("模板属性除数必须是正数。");
+            var skills = GeneralSkillRules.RandomizeLevels(AssetManager.Default,
+                GeneralSkillRules.ParseIds(GetText("Skills")), template.SkillLevelMin, template.SkillLevelMax, template.SkillCount);
             // 基础属性
             SetField("Evaluate", template.Evaluate);
             SetField("Sequence", random.Next(template.SequenceMin, template.SequenceMax + 1));
@@ -1098,37 +1170,27 @@ public class GeneralEditScene : UserControl
                 airBox.Value = (int)(airBox.Value / template.AirForceDivisor);
 
             // 技能等级随机化
-            RandomizeSkillLevels(template.SkillLevelMin, template.SkillLevelMax, template.SkillCount);
+            SetText("Skills", string.Join(", ", skills));
+        }
+        catch (Exception ex)
+        {
+            LoadUiFromCurrent();
+            SetStatus($"模板未应用：{ex.Message}");
+            return;
         }
         finally
         {
             _loadingUi = false;
         }
 
-        ApplyProp();
-        SetStatus($"已应用随机模板: {template.Name}");
-    }
-
-    private void RandomizeSkillLevels(int minLevel, int maxLevel, int count)
-    {
-        var random = new Random();
-        for (int i = 0; i < count; i++)
-        {
-            var key = $"Skill{i}";
-            if (_numBoxes.TryGetValue(key, out var box) && box.Value > 0)
-            {
-                int skillId = (int)box.Value;
-                int baseId = (skillId / 10) * 10;
-                int newLevel = random.Next(minLevel, maxLevel + 1);
-                box.Value = baseId + newLevel;
-            }
-        }
+        if (ApplyProp()) SetStatus($"已应用随机模板: {template.Name}");
     }
 
     // ===================================== 兵种专长模板 =====================================
     private void ApplySpecialtyTemplate(string specialtyKey)
     {
         if (_current == null) { MessageBox.Show("请先在左侧选中一个将领", "提示", MessageBoxButton.OK, MessageBoxImage.Information); return; }
+        if (!ApplyProp()) return;
 
         var templates = ConfigManager.Instance.GetGeneralSpecialtyTemplates();
         var template = templates.FirstOrDefault(t => t.Key.Equals(specialtyKey, StringComparison.OrdinalIgnoreCase));
@@ -1142,6 +1204,11 @@ public class GeneralEditScene : UserControl
         _loadingUi = true; // 批量修改期间禁止触发 ApplyProp
         try
         {
+            var pool = template.SkillPool.Select(id => AssetManager.Default.GetSkill(id)
+                ?? throw new InvalidDataException($"技能池 ID 不存在：{id}"))
+                .DistinctBy(s => s.Type).OrderBy(_ => random.Next()).Take(template.SkillCount).Select(s => s.Id).ToList();
+            var skills = GeneralSkillRules.RandomizeLevels(AssetManager.Default, pool,
+                template.SkillLevelMin, template.SkillLevelMax, template.SkillCount);
             // 设置主属性
             if (!string.IsNullOrEmpty(template.MainStat) && _numBoxes.TryGetValue(template.MainStat, out var mainBox))
                 mainBox.Value = template.MainStatValue;
@@ -1157,36 +1224,20 @@ public class GeneralEditScene : UserControl
             SetField("Hp", random.Next(template.HpMin, template.HpMax + 1));
 
             // 设置技能（从技能池中随机选择）
-            if (template.SkillPool.Count > 0)
-            {
-                var shuffled = template.SkillPool.OrderBy(_ => random.Next()).ToList();
-                int skillCount = Math.Min(template.SkillCount, shuffled.Count);
-                for (int i = 0; i < skillCount; i++)
-                {
-                    var key = $"Skill{i}";
-                    if (_numBoxes.TryGetValue(key, out var box))
-                    {
-                        int baseId = (shuffled[i] / 10) * 10;
-                        int level = random.Next(template.SkillLevelMin, template.SkillLevelMax + 1);
-                        box.Value = baseId + level;
-                    }
-                }
-                // 清空剩余技能槽
-                for (int i = skillCount; i < 5; i++)
-                {
-                    var key = $"Skill{i}";
-                    if (_numBoxes.TryGetValue(key, out var box))
-                        box.Value = 0;
-                }
-            }
+            if (template.SkillPool.Count > 0) SetText("Skills", string.Join(", ", skills));
+        }
+        catch (Exception ex)
+        {
+            LoadUiFromCurrent();
+            SetStatus($"模板未应用：{ex.Message}");
+            return;
         }
         finally
         {
             _loadingUi = false;
         }
 
-        ApplyProp();
-        SetStatus($"已应用兵种专长模板: {template.Name}");
+        if (ApplyProp()) SetStatus($"已应用兵种专长模板: {template.Name}");
     }
 
     private void SetField(string key, int value)
@@ -1206,6 +1257,7 @@ public class NumericUpDown : UserControl
     public double MinValue { get; set; } = 0;
     public double MaxValue { get; set; } = 100;
     public double Increment { get; set; } = 1;
+    public bool IsInputValid { get; private set; } = true;
 
     public event EventHandler<double>? ValueChanged;
 
@@ -1214,8 +1266,9 @@ public class NumericUpDown : UserControl
         get => _value;
         set
         {
+            if (!double.IsFinite(value)) throw new ArgumentOutOfRangeException(nameof(value));
             var v = Math.Clamp(value, MinValue, MaxValue);
-            if (Math.Abs(v - _value) < 1e-12) return;
+            if (Math.Abs(v - _value) < 1e-12) { UpdateTextBox(); return; }
             _value = v;
             UpdateTextBox();
             ValueChanged?.Invoke(this, _value);
@@ -1242,7 +1295,7 @@ public class NumericUpDown : UserControl
             VerticalContentAlignment = VerticalAlignment.Center
         };
         _textBox.TextChanged += TextBox_TextChanged;
-        _textBox.LostKeyboardFocus += (_, _) => UpdateTextBox();
+        _textBox.LostKeyboardFocus += (_, _) => { if (IsInputValid) UpdateTextBox(); };
 
         var rightPanel = new StackPanel { Orientation = Orientation.Vertical };
         var up = MakeBtn("▲", (_, _) => Value += Increment);
@@ -1263,10 +1316,14 @@ public class NumericUpDown : UserControl
     private void TextBox_TextChanged(object sender, TextChangedEventArgs e)
     {
         if (_updating) return;
-        if (double.TryParse(_textBox.Text, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var v))
+        IsInputValid = double.TryParse(_textBox.Text, System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out var v) && double.IsFinite(v) &&
+            v >= MinValue && v <= MaxValue && (Increment != Math.Truncate(Increment) || v == Math.Truncate(v));
+        _textBox.BorderBrush = IsInputValid ? new SolidColorBrush(Color.FromRgb(0x55, 0x55, 0x55)) : Brushes.IndianRed;
+        if (IsInputValid)
         {
             var old = _value;
-            _value = Math.Clamp(v, MinValue, MaxValue);
+            _value = v;
             if (Math.Abs(old - _value) > 1e-12) ValueChanged?.Invoke(this, _value);
         }
     }
@@ -1276,6 +1333,8 @@ public class NumericUpDown : UserControl
         _updating = true;
         string format = Math.Abs(Increment - Math.Truncate(Increment)) < 1e-12 ? "F0" : "0.0##";
         _textBox.Text = _value.ToString(format, System.Globalization.CultureInfo.InvariantCulture);
+        IsInputValid = true;
+        _textBox.BorderBrush = new SolidColorBrush(Color.FromRgb(0x55, 0x55, 0x55));
         _updating = false;
     }
 

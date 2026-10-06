@@ -94,18 +94,18 @@ public partial class AssetBrowserScene : UserControl
         var contentArea = new Grid();
         Grid.SetColumn(contentArea, 2);
 
-        contentArea.RowDefinitions.Add(new RowDefinition { Height = new GridLength(40) });
+        contentArea.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         contentArea.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
         // Top bar
         var topBar = new Grid { Background = new SolidColorBrush(Color.FromRgb(35, 35, 45)), Margin = new Thickness(0, 0, 0, 1) };
         Grid.SetRow(topBar, 0);
 
-        var topPanel = new StackPanel
+        var topPanel = new WrapPanel
         {
             Orientation = Orientation.Horizontal,
             VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(12, 0, 12, 0)
+            Margin = new Thickness(12, 7, 12, 7)
         };
 
         _searchBox = new TextBox
@@ -169,6 +169,20 @@ public partial class AssetBrowserScene : UserControl
         };
         refreshBtn.Click += (s, e) => RefreshAssets();
         topPanel.Children.Add(refreshBtn);
+
+        var chooseRoot = new Button { Content = "选择目录", Height = 26, Margin = new Thickness(8, 0, 0, 0) };
+        chooseRoot.Click += (_, _) =>
+        {
+            var picker = new OpenFolderDialog { Title = "选择 assets 目录" };
+            if (picker.ShowDialog(_window) == true) RefreshAssets(picker.FolderName);
+        };
+        topPanel.Children.Add(chooseRoot);
+        var audit = new Button { Content = "数据检查", Height = 26, Margin = new Thickness(8, 0, 0, 0) };
+        audit.Click += (_, _) =>
+        {
+            if (_manager.IsLoaded) new AssetAuditWindow(_window, _manager.AssetsRoot).ShowDialog();
+        };
+        topPanel.Children.Add(audit);
 
         var backBtn = new Button
         {
@@ -275,7 +289,7 @@ public partial class AssetBrowserScene : UserControl
     {
         try
         {
-            _manager.ScanDefault(forceReload: true);
+            if (!_manager.IsLoaded) _manager.ScanDefault();
             PopulateCategories();
             PopulateExtensions();
             UpdateStatus($"已加载 {_manager.Count} 个文件");
@@ -565,18 +579,19 @@ public partial class AssetBrowserScene : UserControl
         return null;
     }
 
-    private void RefreshAssets()
+    private void RefreshAssets(string? selectedRoot = null)
     {
         try
         {
-            _manager.ScanDefault(forceReload: true);
+            string root = selectedRoot ?? (_manager.IsLoaded ? _manager.AssetsRoot : AssetManager.GetDefaultAssetsPath());
+            _manager.Scan(root, forceReload: true);
             _entries.Clear();
             _extFilter.Items.Clear();
             _extFilter.Items.Add("全部");
             _extFilter.SelectedIndex = 0;
             PopulateCategories();
             PopulateExtensions();
-            UpdateStatus($"已刷新，共 {_manager.Count} 个文件");
+            UpdateStatus($"已刷新，共 {_manager.Count} 个文件：{_manager.AssetsRoot}");
         }
         catch (Exception ex)
         {

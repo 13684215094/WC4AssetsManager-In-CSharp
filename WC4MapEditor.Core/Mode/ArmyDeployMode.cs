@@ -825,8 +825,14 @@ public sealed class ArmyDeployMode : IModeHandler
 
         int coord = row * mapData.MapWidth + col;
 
+        if (coord < 0 || coord > short.MaxValue)
+        {
+            context.RaiseStatusMessage?.Invoke("部队坐标必须在 0..32767 范围内，未创建单位。");
+            return;
+        }
+
         // 根据地图版本选择v1或v3单位
-        bool isV3 = mapData.Header.BtlVersion >= 3;
+        bool isV3 = mapData.Header.BtlVersion >= 2;
 
         if (isV3)
         {

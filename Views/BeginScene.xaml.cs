@@ -785,8 +785,8 @@ public partial class BeginScene : UserControl
 
         try
         {
-            var parts = sizeStr.Trim().Split('x', 'X', '*', ' ');
-            if (parts.Length < 2)
+            var parts = sizeStr.Trim().Split(['x', 'X', '*', ' '], StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length != 2)
             {
                 MessageBox.Show("请输入正确的尺寸格式（如：100x100）", "输入错误", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
@@ -795,11 +795,7 @@ public partial class BeginScene : UserControl
             int width = int.Parse(parts[0].Trim());
             int height = int.Parse(parts[1].Trim());
 
-            if (width < 10 || width > 500 || height < 10 || height > 500)
-            {
-                MessageBox.Show("地图尺寸必须在 10-500 之间", "输入错误", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
+            MapLimits.Area(width, height);
 
             var mapData = WorldParser.CreateNew(width, height);
             var tempPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"NewMap_{width}x{height}_{DateTime.Now:yyyyMMddHHmmss}.bin");
@@ -819,7 +815,7 @@ public partial class BeginScene : UserControl
                 };
                 if (saveDialog.ShowDialog() == true)
                 {
-                    File.Copy(tempPath, saveDialog.FileName, true);
+                    WorldParser.SaveToFile(mapData, saveDialog.FileName);
                     MessageBox.Show($"地图文件已保存到:\n{saveDialog.FileName}", "成功", MessageBoxButton.OK, MessageBoxImage.Information);
                     var openResult = MessageBox.Show("是否立即打开编辑？", "打开编辑", MessageBoxButton.YesNo, MessageBoxImage.Question);
                     if (openResult == MessageBoxResult.Yes)

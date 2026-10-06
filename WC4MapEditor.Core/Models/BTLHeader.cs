@@ -4,6 +4,7 @@ namespace WC4MapEditor.Core.Models;
 
 public class BTLHeader
 {
+    public BTLHeader DeepClone() => (BTLHeader)MemberwiseClone();
     public int BtlVersion { get; set; }
     public int MapNumber { get; set; }
     public int MapClipX { get; set; }
@@ -155,5 +156,5 @@ public class BTLHeader
         AirSupportCount = 0
     };
 
-    public int TotalTiles => MapWidth * MapLength;
+    public int TotalTiles => MapLimits.Area(MapLength, MapWidth);
 }

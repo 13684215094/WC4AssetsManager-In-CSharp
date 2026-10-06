@@ -12,7 +12,7 @@ public static class BTLArmyModule
     private const int ArmySizeV3 = 64;
 
     public static int GetArmySize(int btlVersion)
-        => btlVersion >= 3 ? ArmySizeV3 : ArmySizeV1;
+        => btlVersion >= 2 ? ArmySizeV3 : ArmySizeV1;
 
     public static (List<Army> v1, List<Army_3> v3) Parse(byte[] data, int startOffset, int count, int btlVersion)
     {
@@ -27,7 +27,7 @@ public static class BTLArmyModule
             int startPos = startOffset + (i * armySize);
             if (startPos + armySize > data.Length) break;
 
-            if (btlVersion >= 3)
+            if (btlVersion >= 2)
             {
                 var army = Army_3.FromBytes(data, startPos);
                 armiesV3.Add(army);

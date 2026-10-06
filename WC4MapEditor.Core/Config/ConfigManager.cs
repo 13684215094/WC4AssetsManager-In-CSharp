@@ -76,26 +76,27 @@ public sealed class ConfigManager
     }
 
     private string DetectResourcePath()
+        => FindRuntimePath("Resource");
+
+    private static string FindRuntimePath(string name)
     {
         string baseDir = AppDomain.CurrentDomain.BaseDirectory;
-
-        string localPath = IOPath.Combine(baseDir, "Resource");
-        if (Directory.Exists(localPath)) return localPath;
-
-        string parentPath = IOPath.GetFullPath(IOPath.Combine(baseDir, "..", "..", "..", "Resource"));
-        if (Directory.Exists(parentPath)) return parentPath;
-
-        return localPath;
+        // Release assets live beside the executable; development outputs can
+        // be deeper (tmp/bin/project/configuration/framework/runtime).
+        var directory = new DirectoryInfo(baseDir);
+        for (int depth = 0; directory != null && depth < 8; depth++, directory = directory.Parent)
+        {
+            string candidate = IOPath.Combine(directory.FullName, name);
+            if (Directory.Exists(candidate) || File.Exists(candidate)) return candidate;
+        }
+        return IOPath.Combine(baseDir, name);
     }
 
     private void LoadSettingFile()
     {
         try
         {
-            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
-            string configPath = IOPath.Combine(baseDir, "setting.txt");
-            if (!File.Exists(configPath))
-                configPath = IOPath.GetFullPath(IOPath.Combine(baseDir, "..", "..", "..", "setting.txt"));
+            string configPath = FindRuntimePath("setting.txt");
 
             if (!File.Exists(configPath))
             {
@@ -634,6 +635,9 @@ public sealed class ConfigManager
     public int GetMaxFormation(int unitType)
     {
         if (!_isInitialized) Initialize();
+        var variants = Assets.AssetManager.Default.GetArmySettings().Where(a => a.Army == unitType).ToList();
+        // Without country/era context, do not exceed any matching variant's limit.
+        if (variants.Count != 0) return Math.Clamp(variants.Min(a => a.MaxFormation), 0, byte.MaxValue);
         var config = _maxFormationData?.FirstOrDefault(m => m.Id == unitType);
         return config?.MaxFormation ?? 0;
     }
@@ -657,9 +661,6 @@ public sealed class ConfigManager
         var settings = GetGeneralSettingsById(generalId);
         if (settings == null) return null;
 
-        var templates = GetGeneralSpecialtyTemplates();
-        if (templates.Count == 0) return null;
-
         var maxStat = new List<(string Specialty, int Value)>
         {
             ("Infantry", settings.Infantry),
@@ -675,6 +676,13 @@ public sealed class ConfigManager
     public string? GetUnitSpecialtyType(int unitType)
     {
         if (!_isInitialized) Initialize();
+        var army = Assets.AssetManager.Default.GetArmy(unitType);
+        if (army != null)
+            return army.Type switch
+            {
+                1 => "Infantry", 2 => "Armor", 3 => "Artillery", 4 => "Navy",
+                5 or 13 => "AirForce", _ => null
+            };
         var armyConfig = GetArmyEditConfig();
 
         if (armyConfig.Infantry.Contains(unitType)) return "Infantry";
@@ -695,6 +703,16 @@ public sealed class ConfigManager
     public bool IsGeneralAssigned(int generalId) => _assignedGenerals.Contains(generalId);
 
     public void ClearAssignedGenerals() => _assignedGenerals.Clear();
+
+    public void SyncAssignedGenerals(MapData map)
+    {
+        _assignedGenerals.Clear();
+        foreach (int id in map.Armies.Select(a => (int)a.General)
+            .Concat(map.ArmiesV3.Select(a => (int)a.General))
+            .Concat(map.Reinforcements.Select(a => a.General))
+            .Concat(map.ReinforcementsV3.Select(a => a.General)).Where(id => id > 0))
+            _assignedGenerals.Add(id);
+    }
 
     public List<int> GetAvailableGenerals(List<int> generalIds)
     {

@@ -78,6 +78,9 @@ public struct Army
             KeyPoint = data[offset + 28],
             Policy = data[offset + 29],
             OccupationEvent = data[offset + 30],
+            Reserved1 = data[offset + 31],
+            Reserved2 = BitConverter.ToInt16(data[(offset + 32)..]),
+            Reserved3 = BitConverter.ToInt16(data[(offset + 36)..]),
             Plan = BitConverter.ToInt16(data[(offset + 34)..]),
             ChangeRound = BitConverter.ToInt16(data[(offset + 38)..]),
             Morale = data[offset + 40],
@@ -118,10 +121,10 @@ public struct Army
         data[offset + 28] = KeyPoint;
         data[offset + 29] = Policy;
         data[offset + 30] = OccupationEvent;
-        data[offset + 31] = 0;
-        BitConverter.TryWriteBytes(data[(offset + 32)..], (short)0);
+        data[offset + 31] = Reserved1;
+        BitConverter.TryWriteBytes(data[(offset + 32)..], Reserved2);
         BitConverter.TryWriteBytes(data[(offset + 34)..], Plan);
-        BitConverter.TryWriteBytes(data[(offset + 36)..], (short)0);
+        BitConverter.TryWriteBytes(data[(offset + 36)..], Reserved3);
         BitConverter.TryWriteBytes(data[(offset + 38)..], ChangeRound);
         data[offset + 40] = Morale;
         data[offset + 41] = Duration;
@@ -135,7 +138,7 @@ public struct Army
     /// </summary>
     public static Army CreateDefault(int coord) => new Army
     {
-        Coordinate = (short)coord,
+        Coordinate = MapLimits.SignedCoordinate(coord),
         UnitType = 0,
         Level = 1,
         Organization = 1,
@@ -220,13 +223,6 @@ public struct Army
     /// <summary>
     /// 获取兵种名称
     /// </summary>
-    public readonly string GetUnitTypeName() => UnitType switch
-    {
-        0 => "步兵",
-        1 => "骑兵",
-        2 => "弓箭手",
-        4 => "海军",
-        5 => "空军",
-        _ => $"未知({UnitType})"
-    };
+    public readonly string GetUnitTypeName()
+        => Assets.AssetManager.Default.GetArmy(UnitType)?.Name ?? $"未知({UnitType})";
 }

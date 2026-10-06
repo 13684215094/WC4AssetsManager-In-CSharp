@@ -25,6 +25,8 @@ public sealed class BuildingModifier : ModifierBase
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
 
         int coordIndex = row * _mapData.MapWidth + col;
+        if (coordIndex > ushort.MaxValue)
+            return ModifierResult.Fail("该地图位置超过建筑坐标上限 65535，未写入建筑。");
 
         Building building;
         if (parameter is Building b)
@@ -47,8 +49,6 @@ public sealed class BuildingModifier : ModifierBase
         }
 
         MarkModified();
-        if (coordIndex > 65535)
-            return ModifierResult.Ok($"已放置建筑 ({col}, {row}) [警告:坐标序号{coordIndex}超出65535,保存时将截断]");
         return ModifierResult.Ok($"已放置建筑 ({col}, {row})");
     }
 
@@ -85,7 +85,10 @@ public sealed class BuildingModifier : ModifierBase
         if (!IsValidCoord(col, row) || _mapData == null) return false;
         if (data is not Building building) return false;
 
-        building.Coordinate = row * _mapData.MapWidth + col;
+        int index = checked(row * _mapData.MapWidth + col);
+        if (index > ushort.MaxValue)
+            return false;
+        building.Coordinate = index;
         int idx = _mapData.FindBuildingIndex(col, row);
         if (idx >= 0)
             _mapData.ReplaceBuilding(idx, building);

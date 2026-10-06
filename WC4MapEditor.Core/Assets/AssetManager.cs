@@ -32,27 +32,19 @@ public sealed class AssetManager
     private static string ResolveDefaultAssetsPath()
     {
         string? baseDir = AppContext.BaseDirectory;
-        // 从执行目录向上查找 Resource/WC4DATA/assets
-        // CLI 输出目录结构: <solution>/WC4MapEditor.Cli/bin/Debug/<tfm>/
-        // 需要 4 层 .. 回到 solution 根目录
-        string candidate = Path.GetFullPath(Path.Combine(
-            baseDir ?? "", "..", "..", "..", "..", "Resource", "WC4DATA", "assets"));
-        if (Directory.Exists(candidate)) return candidate;
-
-        // 兜底：逐级向上搜索（最多 5 层）
-        string? current = baseDir;
-        for (int i = 0; i < 5 && !string.IsNullOrEmpty(current); i++)
+        string candidate = Path.Combine(baseDir, "Resource", "WC4DATA", "assets");
+        var current = new DirectoryInfo(baseDir);
+        for (int i = 0; i < 8 && current != null; i++, current = current.Parent)
         {
-            candidate = Path.Combine(current, "Resource", "WC4DATA", "assets");
-            if (Directory.Exists(candidate)) return candidate;
-            current = Path.GetDirectoryName(current);
+            string test = Path.Combine(current.FullName, "Resource", "WC4DATA", "assets");
+            if (Directory.Exists(test)) return test;
         }
         return candidate;
     }
 
     public AssetManager() : this(AssetCache.Instance) { }
 
-    internal AssetManager(AssetCache cache)
+    public AssetManager(AssetCache cache)
     {
         _cache = cache;
     }
@@ -62,6 +54,8 @@ public sealed class AssetManager
 
     /// <summary>是否已完成扫描。</summary>
     public bool IsLoaded => _cache.IsLoaded;
+    public long Revision => _cache.Revision;
+    public void InvalidateData() => _cache.InvalidateData();
 
     /// <summary>缓存中的文件总数。</summary>
     public int Count => _cache.Count;
@@ -130,7 +124,7 @@ public sealed class AssetManager
     public string ReadText(AssetEntry entry, Encoding? encoding = null)
     {
         encoding ??= Encoding.UTF8;
-        return encoding.GetString(ReadBytes(entry));
+        return encoding.GetString(ReadBytes(entry)).TrimStart('\uFEFF');
     }
 
     /// <summary>打开指定条目的只读文件流。</summary>
@@ -183,10 +177,52 @@ public sealed class AssetManager
 
     private List<ConquerCountryConfig>? _conquerCountrySettings;
     private List<GeneralSettings>? _generalSettings;
-    private Dictionary<string, string>? _stringTable;
+    private List<SkillSettings>? _skillSettings;
+    private List<ArmySettings>? _armySettings;
+    private readonly Dictionary<string, Dictionary<string, string>> _stringTables = new(StringComparer.OrdinalIgnoreCase);
+    private long _dataRevision = -1;
+
+    private void EnsureCurrentData()
+    {
+        long revision = Revision;
+        if (_dataRevision == revision) return;
+        _conquerCountrySettings = null;
+        _generalSettings = null;
+        _skillSettings = null;
+        _armySettings = null;
+        _stringTables.Clear();
+        _dataRevision = revision;
+    }
+
+    private List<T> ReadSettings<T>(string name)
+    {
+        var entry = Find($"json/{name}.json");
+        if (entry == null) return [];
+        var rows = JsonSerializer.Deserialize<List<T>>(ReadText(entry))
+            ?? throw new InvalidDataException($"{name}.json must contain an array, not null.");
+        if (rows.Any(row => row is null)) throw new InvalidDataException($"{name}.json contains a null record.");
+        return rows;
+    }
+
+    public List<SkillSettings> GetSkillSettings()
+    {
+        EnsureCurrentData();
+        return _skillSettings ??= ReadSettings<SkillSettings>("SkillSettings");
+    }
+
+    public List<ArmySettings> GetArmySettings()
+    {
+        EnsureCurrentData();
+        return _armySettings ??= ReadSettings<ArmySettings>("ArmySettings");
+    }
+
+    public SkillSettings? GetSkill(int id) => GetSkillSettings().FirstOrDefault(s => s.Id == id);
+
+    public ArmySettings? GetArmy(int army) => GetArmySettings().FirstOrDefault(a => a.Army == army);
 
     public List<ConquerCountryConfig> GetConquerCountrySettings()
     {
+        EnsureCurrentData();
         if (_conquerCountrySettings != null) return _conquerCountrySettings;
         var entry = Find("json/ConquerCountrySettings.json");
         if (entry != null)
@@ -203,6 +239,7 @@ public sealed class AssetManager
 
     public List<GeneralSettings> GetGeneralSettings()
     {
+        EnsureCurrentData();
         if (_generalSettings != null) return _generalSettings;
         var entry = Find("json/GeneralSettings.json");
         if (entry != null)
@@ -219,18 +256,20 @@ public sealed class AssetManager
 
     public Dictionary<string, string> GetStringTable(string locale = "tw")
     {
-        if (_stringTable != null) return _stringTable;
+        EnsureCurrentData();
+        if (_stringTables.TryGetValue(locale, out var cached)) return cached;
         var entry = Find($"stringtable_{locale}.ini");
         if (entry != null)
         {
             try
             {
-                _stringTable = ParseIniFile(ReadText(entry));
-                Debug.WriteLine($"[AssetManager] 加载了 {_stringTable.Count} 个字符串表条目 (locale={locale})");
+                var table = ParseIniFile(ReadText(entry));
+                _stringTables[locale] = table;
+                return table;
             }
             catch (Exception ex) { Debug.WriteLine($"[AssetManager] 加载 stringtable_{locale}.ini 失败: {ex.Message}"); }
         }
-        return _stringTable ?? [];
+        return [];
     }
 
     public string GetStringTableValue(string key, string defaultValue = "", string locale = "tw")

@@ -22,7 +22,10 @@ public sealed class TrapModifier : ModifierBase
         if (!IsValidCoord(col, row)) return ModifierResult.Fail("坐标超出范围");
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
 
-        short coordIndex = (short)(row * _mapData.MapWidth + col);
+        int index = checked(row * _mapData.MapWidth + col);
+        if (index > short.MaxValue)
+            return ModifierResult.Fail("该地图位置超过陷阱坐标上限 32767，未写入陷阱。");
+        short coordIndex = MapLimits.SignedCoordinate(index);
 
         Trap trap;
         if (parameter is Trap t)
@@ -79,7 +82,10 @@ public sealed class TrapModifier : ModifierBase
         if (!IsValidCoord(col, row) || _mapData == null) return false;
         if (data is not Trap trap) return false;
 
-        trap.Coordinate = (short)(row * _mapData.MapWidth + col);
+        int index = checked(row * _mapData.MapWidth + col);
+        if (index > short.MaxValue)
+            return false;
+        trap.Coordinate = MapLimits.SignedCoordinate(index);
         int idx = _mapData.FindTrapIndex(col, row);
         if (idx >= 0)
             _mapData.ReplaceTrap(idx, trap);
@@ -145,6 +151,8 @@ public sealed class TrapModifier : ModifierBase
     {
         if (!IsValidCoord(col, row)) return ModifierResult.Fail("坐标超出范围");
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
+        if (row * _mapData.MapWidth + col > short.MaxValue)
+            return ModifierResult.Fail("陷阱坐标超过 32767，未修改地图。");
 
         int idx = _mapData.FindTrapIndex(col, row);
         Trap trap;
@@ -154,7 +162,7 @@ public sealed class TrapModifier : ModifierBase
         }
         else
         {
-            trap = Trap.CreateDefault((short)(row * _mapData.MapWidth + col));
+            trap = Trap.CreateDefault(row * _mapData.MapWidth + col);
         }
 
         trap.Organization = (byte)_random.Next(1, 11);
@@ -240,6 +248,8 @@ public sealed class TrapModifier : ModifierBase
     public ModifierResult BatchGenerateTraps(int probability)
     {
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
+        if (_mapData.TerrainCount > short.MaxValue + 1)
+            return ModifierResult.Fail("整图陷阱生成最多支持 32768 格，未修改地图。");
         if (probability < 0 || probability > 100) return ModifierResult.Fail("概率必须在0-100之间");
 
         int generatedCount = 0;
@@ -256,7 +266,7 @@ public sealed class TrapModifier : ModifierBase
                 int hexIndex = row * _mapData.MapWidth + col;
                 if (existingCoords.Contains(hexIndex)) continue;
 
-                var trap = Trap.CreateDefault((short)hexIndex);
+                var trap = Trap.CreateDefault(hexIndex);
                 trap.Organization = (byte)_random.Next(1, 6);
                 trap.LegionId = (short)_random.Next(0, 256);
                 trap.Health = (byte)_random.Next(50, 101);
@@ -278,6 +288,8 @@ public sealed class TrapModifier : ModifierBase
     public ModifierResult GenerateTrapsByBelong(int belongValue, int probability)
     {
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
+        if (_mapData.TerrainCount > short.MaxValue + 1)
+            return ModifierResult.Fail("整图陷阱生成最多支持 32768 格，未修改地图。");
         if (probability < 0 || probability > 100) return ModifierResult.Fail("概率必须在0-100之间");
 
         int totalTrapsCreated;
@@ -318,7 +330,7 @@ public sealed class TrapModifier : ModifierBase
                 if (existingCoords.Contains(hexIndex)) continue;
                 if (_random.Next(0, 100) >= probability) continue;
 
-                var trap = Trap.CreateDefault((short)hexIndex);
+                var trap = Trap.CreateDefault(hexIndex);
                 trap.LegionId = (short)belongValue;
                 trap.Organization = (byte)_random.Next(1, 6);
                 trap.Health = (byte)_random.Next(50, 101);
@@ -343,6 +355,8 @@ public sealed class TrapModifier : ModifierBase
     public ModifierResult GenerateTrapsFree(int probability)
     {
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
+        if (_mapData.TerrainCount > short.MaxValue + 1)
+            return ModifierResult.Fail("整图陷阱生成最多支持 32768 格，未修改地图。");
         if (probability < 0 || probability > 100) return ModifierResult.Fail("概率必须在0-100之间");
 
         int generatedCount = 0;
@@ -391,7 +405,7 @@ public sealed class TrapModifier : ModifierBase
 
                 if (legionId < 0 || legionId >= 0xFF) continue;
 
-                var newTrap = Trap.CreateDefault((short)hexIndex);
+                var newTrap = Trap.CreateDefault(hexIndex);
                 newTrap.LegionId = (short)legionId;
                 newTrap.Organization = (byte)_random.Next(1, 6);
                 newTrap.Health = (byte)_random.Next(50, 101);
@@ -413,8 +427,10 @@ public sealed class TrapModifier : ModifierBase
     public ModifierResult GenerateTrapsByProvince(int probability)
     {
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
+        if (_mapData.TerrainCount > short.MaxValue + 1)
+            return ModifierResult.Fail("整图陷阱生成最多支持 32768 格，未修改地图。");
         if (probability < 0 || probability > 100) return ModifierResult.Fail("概率必须在0-100之间");
-        if (_mapData.Provinces == null || _mapData.Provinces.Count == 0)
+        if (_mapData.TerrainCount == 0)
             return ModifierResult.Fail("没有省区数据");
 
         int generatedCount = 0;
@@ -423,9 +439,9 @@ public sealed class TrapModifier : ModifierBase
             existingCoords.Add(trap.Coordinate);
 
         var provinceMap = new Dictionary<int, List<int>>();
-        for (int i = 0; i < _mapData.Provinces.Count; i++)
+        for (int i = 0; i < _mapData.TerrainCount; i++)
         {
-            int pv = _mapData.Provinces[i].ProvinceValue;
+            int pv = _mapData.GetProvince(i).ProvinceValue;
             if (!provinceMap.ContainsKey(pv))
                 provinceMap[pv] = new List<int>();
             provinceMap[pv].Add(i);
@@ -440,7 +456,7 @@ public sealed class TrapModifier : ModifierBase
 
             if (!existingCoords.Contains(selectedIndex))
             {
-                var trap = Trap.CreateDefault((short)selectedIndex);
+                var trap = Trap.CreateDefault(selectedIndex);
                 trap.Organization = (byte)_random.Next(1, 6);
                 trap.LegionId = (short)_random.Next(0, 256);
                 trap.Health = (byte)_random.Next(50, 101);

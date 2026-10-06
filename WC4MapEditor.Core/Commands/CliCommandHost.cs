@@ -3,6 +3,7 @@ using WC4MapEditor.Core.Config;
 using WC4MapEditor.Core.Models;
 using WC4MapEditor.Core.Modifiers;
 using WC4MapEditor.Core.Parsers.BTL;
+using WC4MapEditor.Core.Parsers;
 using WC4MapEditor.Core.Services;
 
 namespace WC4MapEditor.Core.Commands;
@@ -364,12 +365,14 @@ public sealed class CliCommandHost : ICommandHost
                 }
 
                 int coordIndex = row * mapData.MapWidth + col;
+                if (coordIndex > ushort.MaxValue)
+                {
+                    _output.WriteLine("建筑坐标超过 65535，未添加建筑。");
+                    return;
+                }
                 var b = Building.CreateDefault(coordIndex);
                 b.BuildingType = (byte)buildingType;
                 b.Name = name;
-
-                if (coordIndex > 65535)
-                    _output.WriteLine($"[警告] 坐标序号 {coordIndex} 超出文件格式上限 65535，保存时将被截断为 {coordIndex & 0xFFFF}，游戏可能无法正确识别此建筑");
 
                 var result = building.Apply(col, row, b);
                 _output.WriteLine(result.Message ?? $"已在 ({col},{row}) 添加建筑，类型={buildingType}({b.GetBuildingTypeName()})");
@@ -401,12 +404,14 @@ public sealed class CliCommandHost : ICommandHost
 
                 int col = idx % mapData.MapWidth;
                 int row = idx / mapData.MapWidth;
+                if (idx > ushort.MaxValue)
+                {
+                    _output.WriteLine("建筑坐标超过 65535，未添加建筑。");
+                    return;
+                }
                 var b = Building.CreateDefault(idx);
                 b.BuildingType = (byte)buildingType;
                 b.Name = name;
-
-                if (idx > 65535)
-                    _output.WriteLine($"[警告] 坐标序号 {idx} 超出文件格式上限 65535，保存时将被截断为 {idx & 0xFFFF}，游戏可能无法正确识别此建筑");
 
                 var result = building.Apply(col, row, b);
                 _output.WriteLine(result.Message ?? $"已在索引{idx} ({col},{row}) 添加建筑，类型={buildingType}({b.GetBuildingTypeName()})");
@@ -1382,7 +1387,9 @@ public sealed class CliCommandHost : ICommandHost
                 int terrainFixed = BTLFormatChecker.FixTerrainGroups(data);
                 if (terrainFixed > 0) count += terrainFixed;
 
-                File.WriteAllBytes(path, data);
+                string backup = path + ".bak";
+                File.Copy(path, backup, overwrite: false);
+                AtomicFile.Write(path, data);
 
                 _output.WriteLine($"已修复 {count} 处，结果已写回：{path}");
                 if (terrainFixed < 0)

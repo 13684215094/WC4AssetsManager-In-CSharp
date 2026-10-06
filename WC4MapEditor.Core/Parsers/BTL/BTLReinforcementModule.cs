@@ -12,7 +12,7 @@ public static class BTLReinforcementModule
     private const int ReinforcementSizeV3 = 104;
 
     public static int GetReinforcementSize(int btlVersion)
-        => btlVersion >= 3 ? ReinforcementSizeV3 : ReinforcementSizeV1;
+        => btlVersion >= 2 ? ReinforcementSizeV3 : ReinforcementSizeV1;
 
     public static (List<Reinforcement> v1, List<Reinforcement_3> v3) Parse(byte[] data, int startOffset, int count, int btlVersion)
     {
@@ -27,7 +27,7 @@ public static class BTLReinforcementModule
             int startPos = startOffset + (i * reinforcementSize);
             if (startPos + reinforcementSize > data.Length) break;
 
-            if (btlVersion >= 3)
+            if (btlVersion >= 2)
             {
                 var r = Reinforcement_3.FromBytes(data, startPos);
                 reinforcementsV3.Add(r);

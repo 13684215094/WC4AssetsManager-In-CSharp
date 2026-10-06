@@ -127,14 +127,9 @@ public sealed class TerrainModifier : ModifierBase, IBrushTarget
         if (!IsValidCoord(col, row)) return ModifierResult.Fail("坐标超出范围");
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
 
-        // 只重置当前编辑层。原实现整格替换为 CreateDefault()，
-        // 会让 Delete 把三层地形一起清掉，与"按层编辑"的预期不符。
-        ref var terrain = ref _mapData.GetTerrainRef(col, row);
-        SetTileTypeByLayer(ref terrain, _editLayer, 0);
-        SetDecorationTypeByLayer(ref terrain, _editLayer, 0);
-
+        _mapData.GetTerrainRef(col, row) = TerrainData.CreateDefault();
         MarkModified();
-        return ModifierResult.Ok($"已重置第{_editLayer}层地形 ({col}, {row})");
+        return ModifierResult.Ok($"已重置地形 ({col}, {row})");
     }
 
     public override bool CanApply(int col, int row) => IsValidCoord(col, row);
@@ -584,26 +579,18 @@ public sealed class TerrainModifier : ModifierBase, IBrushTarget
         foreach (var (col, row) in targets)
         {
             ref var terrain = ref _mapData.GetTerrainRef(col, row);
-
-            // 按当前编辑层判断与写入（原实现写死第一层，切到第 2/3 层后绿化仍然改第一层）
-            if (GetTileTypeByLayer(terrain, _editLayer) == 0)
+            if (terrain.TileType1 == 0)
             {
                 flatCount++;
                 if (rand.NextDouble() < probability)
                 {
                     int newType = greenTerrainTypes[rand.Next(greenTerrainTypes.Length)];
-                    SetTileTypeByLayer(ref terrain, _editLayer, (byte)newType);
-
-                    // 原实现在第一层变陆地时会把第二层重置为默认值（0x3F / 0xFF），
-                    // 这里保留该行为，但只在编辑第一层时执行，避免动到别的层。
-                    if (_editLayer == 1)
-                    {
-                        terrain.TileType2 = 0x3F;
-                        terrain.DecorationType2 = 0xFF;
-                    }
+                    terrain.TileType1 = (byte)newType;
+                    terrain.TileType2 = 0x3F;
+                    terrain.DecorationType2 = 0xFF;
 
                     int variantCount = ConfigManager.Instance.GetTerrainVariantCount(newType);
-                    SetDecorationTypeByLayer(ref terrain, _editLayer, variantCount > 0 ? (byte)rand.Next(variantCount) : (byte)0);
+                    terrain.DecorationType1 = variantCount > 0 ? (byte)rand.Next(variantCount) : (byte)0;
                     convertedCount++;
                 }
             }
@@ -611,7 +598,7 @@ public sealed class TerrainModifier : ModifierBase, IBrushTarget
 
         if (convertedCount > 0) MarkModified();
         double rate = flatCount > 0 ? (convertedCount * 100.0 / flatCount) : 0;
-        return ModifierResult.Ok($"绿化第{_editLayer}层: {convertedCount}/{flatCount} 个平地 (转换率: {rate:F1}%)");
+        return ModifierResult.Ok($"绿化: {convertedCount}/{flatCount} 个平地 (转换率: {rate:F1}%)");
     }
 
     public ModifierResult RandomizeFlatTerrain(int probability, IEnumerable<(int col, int row)>? targetHexes = null)
@@ -1131,698 +1118,42 @@ public sealed class TerrainModifier : ModifierBase, IBrushTarget
 
     #endregion
 
-    #region G键 - 按比例缩放地图
-
     public ModifierResult ScaleMap(double scale)
     {
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
-
-        scale = Math.Clamp(scale, 0.1, 10.0);
-        if (Math.Abs(scale - 1.0) < 0.001) return ModifierResult.Ok("缩放比例为1.0，无需调整");
-
-        int oldWidth = _mapData.MapWidth;
-        int oldHeight = _mapData.MapHeight;
-
-        int newWidth = Math.Max(1, (int)(oldWidth * scale));
-        int newHeight = Math.Max(1, (int)(oldHeight * scale));
-
-        // ---- 六边形感知的缩放映射 ----
-        //
-        // 地图是 flat-top 六边形，且奇数列整体下移半格（与渲染层的
-        // (col % 2) * hexSpacingY / 2 一致）。因此几何坐标是
-        //     x = col * 0.75            （单位 hexW）
-        //     y = row + (col % 2) * 0.5 （单位 hexH）
-        // 只按 row * scale 缩放属于"方形矩阵"重采样，忽略了这半格偏移，
-        // 放大后奇偶列交界处的地块就会错开半格。
-
-        // 旧格 → 新格（实体搬运、归属生成、省会序号重算共用）
-        int MapCol(int oldCol) => Math.Clamp((int)(oldCol * scale), 0, newWidth - 1);
-
-        int MapRow(int oldCol, int oldRow)
+        try
         {
-            double y = (oldRow + (oldCol & 1) * 0.5) * scale;
-            int nr = (int)Math.Floor(y - (MapCol(oldCol) & 1) * 0.5 + 0.5);
-            return Math.Clamp(nr, 0, newHeight - 1);
+            MapTransform.Scale(_mapData, scale);
+            return ModifierResult.Ok($"地图尺寸：{_mapData.MapWidth}x{_mapData.MapHeight}");
         }
-
-        // 新格 → 旧格（地形/省份重采样）
-        (int Col, int Row) FindSource(int newCol, int newRow)
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or InvalidDataException or OverflowException)
         {
-            int c = Math.Clamp((int)Math.Floor(newCol / scale), 0, oldWidth - 1);
-            double y = (newRow + (newCol & 1) * 0.5) / scale;
-            int r = (int)Math.Floor(y - (c & 1) * 0.5 + 0.5);
-            return (c, Math.Clamp(r, 0, oldHeight - 1));
-        }
-
-        // Belongs 是紧凑索引（征服地图只覆盖 MapClip 裁剪区），且 MapData.Resize
-        // 不会重建它。必须按"地图坐标 → 归属索引"先把每个格子的归属抽出来，
-        // 稍后按同样的步长重采样；直接拿旧数组按下标取会越界，表现为归属不全。
-        var oldBelongByMapIndex = new string[oldWidth * oldHeight];
-        for (int row = 0; row < oldHeight; row++)
-        {
-            for (int col = 0; col < oldWidth; col++)
-            {
-                int bIdx = _mapData.GetBelongIndex(col, row);
-                oldBelongByMapIndex[row * oldWidth + col] =
-                    (bIdx >= 0 && bIdx < _mapData.Belongs.Count) ? _mapData.Belongs[bIdx] : "FF";
-            }
-        }
-
-        var tempTerrains = new Dictionary<(int, int), TerrainData>();
-        var tempProvinces = new Dictionary<(int, int), Province>();
-
-        for (int newRow = 0; newRow < newHeight; newRow++)
-        {
-            for (int newCol = 0; newCol < newWidth; newCol++)
-            {
-                var (oldCol, oldRow) = FindSource(newCol, newRow);
-
-                tempTerrains[(newCol, newRow)] = _mapData.GetTerrainRef(oldCol, oldRow);
-                tempProvinces[(newCol, newRow)] = _mapData.GetProvinceRef(oldCol, oldRow);
-            }
-        }
-
-        _mapData.Resize(newWidth, newHeight);
-
-        for (int row = 0; row < newHeight; row++)
-        {
-            for (int col = 0; col < newWidth; col++)
-            {
-                ref var terrain = ref _mapData.GetTerrainRef(col, row);
-                terrain = TerrainData.CreateDefault();
-                terrain.TileType1 = 0;
-                terrain.DecorationType1 = 0;
-                _mapData.GetProvinceRef(col, row) = Province.CreateDefault();
-            }
-        }
-
-        foreach (var kvp in tempTerrains)
-            _mapData.GetTerrainRef(kvp.Key.Item1, kvp.Key.Item2) = kvp.Value;
-        foreach (var kvp in tempProvinces)
-            _mapData.GetProvinceRef(kvp.Key.Item1, kvp.Key.Item2) = kvp.Value;
-
-        // 同 ResizeMap：ProvinceValue 是省会格子的线性序号，缩放后必须按同一比例重算，
-        // 否则省区会指向错误格子。换算公式与下方建筑/陷阱/单位保持一致。
-        for (int row = 0; row < newHeight; row++)
-        {
-            for (int col = 0; col < newWidth; col++)
-            {
-                ref var province = ref _mapData.GetProvinceRef(col, row);
-                ushort capitalIndex = province.ProvinceValue;
-
-                if (capitalIndex == 0 || capitalIndex == 0xFFFF) continue;
-
-                int capitalCol = MapCol(capitalIndex % oldWidth);
-                int capitalRow = MapRow(capitalIndex % oldWidth, capitalIndex / oldWidth);
-
-                province.ProvinceValue = (ushort)(capitalRow * newWidth + capitalCol);
-            }
-        }
-
-        // 缩放必须只有"一个"映射函数：所有实体（建筑/陷阱/单位/…）都按 旧格 → 新格
-        // 落位，归属也必须按同一方向生成，两者才严格一致。
-        //
-        // 原来归属走的是反方向 floor(newCol * stepX)（新 → 旧），建筑走
-        // floor(oldCol * scale)（旧 → 新）。floor 取整不可逆，两个方向并不互逆：
-        // 例如 scale=0.7、旧宽 10（新宽 7）时，旧列 3 的建筑落到新列 floor(2.1)=2，
-        // 而新列 2 的归属却取自旧列 floor(2 * 1.4286)=2 —— 不是 3。
-        // 于是建筑落到了"归属来自另一个旧格"的位置；旧列 2 若恰好没有归属，
-        // 这个原本有归属的建筑看起来就丢了归属。
-        var newBelongs = new string[newWidth * newHeight];
-        Array.Fill(newBelongs, "FF");
-        for (int oldRow = 0; oldRow < oldHeight; oldRow++)
-        {
-            for (int oldCol = 0; oldCol < oldWidth; oldCol++)
-            {
-                int target = MapRow(oldCol, oldRow) * newWidth + MapCol(oldCol);
-                string value = oldBelongByMapIndex[oldRow * oldWidth + oldCol];
-
-                // 缩小/放大时会出现多个旧格映射到同一新格：优先保留有归属的值
-                if (newBelongs[target] == "FF" || value != "FF")
-                    newBelongs[target] = value;
-            }
-        }
-
-        _mapData.Belongs.Clear();
-        _mapData.Belongs.AddRange(newBelongs);
-
-        var buildingsToUpdate = _mapData.Buildings.ToList();
-        _mapData.Buildings.Clear();
-        for (int bi = 0; bi < buildingsToUpdate.Count; bi++)
-        {
-            var building = buildingsToUpdate[bi];
-            var coord = HexCoord.FromIndex(building.Coordinate, oldWidth);
-            building.Coordinate = MapRow(coord.Col, coord.Row) * newWidth + MapCol(coord.Col);
-            _mapData.Buildings.Add(building);
-        }
-
-        var trapsToUpdate = _mapData.Traps.ToList();
-        _mapData.Traps.Clear();
-        for (int ti = 0; ti < trapsToUpdate.Count; ti++)
-        {
-            var trap = trapsToUpdate[ti];
-            var coord = HexCoord.FromIndex(trap.Coordinate, oldWidth);
-            trap.Coordinate = (short)(MapRow(coord.Col, coord.Row) * newWidth + MapCol(coord.Col));
-            _mapData.Traps.Add(trap);
-        }
-
-        for (int i = _mapData.Armies.Count - 1; i >= 0; i--)
-        {
-            var army = _mapData.Armies[i];
-            var coord = HexCoord.FromIndex(army.Coordinate, oldWidth);
-            army.Coordinate = (short)(MapRow(coord.Col, coord.Row) * newWidth + MapCol(coord.Col));
-            _mapData.Armies[i] = army;   // Army 是结构体，必须写回
-        }
-
-        // 其余带格子坐标的实体：单位(v3)、援军(v1/v3)、空军、首都、单位部署
-        RemapRemainingEntityCoordinates(oldWidth, newWidth, newHeight, scale);
-
-        // 以建筑位置为省会修补省区数据（对齐 VB UpdateProvincesForBuildings）
-        UpdateProvincesFromBuildings(newWidth, newHeight);
-
-        _mapData.Header.MapLength = newWidth;
-        _mapData.Header.MapWidth = newHeight;
-
-        // 同 ResizeMap：尺寸变了，原裁剪区不再适用。清零让索引规则退化为
-        // row * MapWidth + col，与上面按全尺寸顺序重建的 Belongs 对齐。
-        _mapData.Header.MapClipX = 0;
-        _mapData.Header.MapClipY = 0;
-
-        MarkModified();
-        return ModifierResult.Ok($"地图已缩放：{oldWidth}x{oldHeight} -> {newWidth}x{newHeight} (比例 {scale:F2})");
-    }
-
-    /// <summary>
-    /// 缩放后重映射其余带格子坐标的实体：单位(v3)、援军(v1/v3)、空军、首都、单位部署。
-    /// <para>
-    /// 这些集合在原实现里被漏掉了 —— 缩放后它们的坐标仍指向旧地图的格子编号，
-    /// 会落到完全错误的位置。此处与建筑/陷阱/单位用同一套换算。
-    /// </para>
-    /// </summary>
-    private void RemapRemainingEntityCoordinates(int oldWidth, int newWidth, int newHeight, double scale)
-    {
-        if (_mapData == null) return;
-
-        // 单位 v3
-        var armiesV3 = _mapData.ArmiesV3.ToList();
-        _mapData.ArmiesV3.Clear();
-        foreach (var army in armiesV3)
-        {
-            var updated = army;
-            updated.Coordinate = (short)ScaleIndex(army.Coordinate, oldWidth, newWidth, newHeight, scale);
-            _mapData.ArmiesV3.Add(updated);
-        }
-
-        // 援军 v1
-        var reinforcements = _mapData.Reinforcements.ToList();
-        _mapData.Reinforcements.Clear();
-        foreach (var item in reinforcements)
-        {
-            var updated = item;
-            updated.Coordinate = ScaleIndex(item.Coordinate, oldWidth, newWidth, newHeight, scale);
-            _mapData.Reinforcements.Add(updated);
-        }
-
-        // 援军 v3
-        var reinforcementsV3 = _mapData.ReinforcementsV3.ToList();
-        _mapData.ReinforcementsV3.Clear();
-        foreach (var item in reinforcementsV3)
-        {
-            var updated = item;
-            updated.Coordinate = ScaleIndex(item.Coordinate, oldWidth, newWidth, newHeight, scale);
-            _mapData.ReinforcementsV3.Add(updated);
-        }
-
-        // 空军
-        var airForces = _mapData.AirForces.ToList();
-        _mapData.AirForces.Clear();
-        foreach (var air in airForces)
-        {
-            var updated = air;
-            updated.Coordinate = ScaleIndex(air.Coordinate, oldWidth, newWidth, newHeight, scale);
-            _mapData.AirForces.Add(updated);
-        }
-
-        // 首都
-        var capitals = _mapData.Capitals.ToList();
-        _mapData.Capitals.Clear();
-        foreach (var capital in capitals)
-        {
-            var updated = capital;
-            updated.Coordinate = ScaleIndex(capital.Coordinate, oldWidth, newWidth, newHeight, scale);
-            _mapData.Capitals.Add(updated);
-        }
-
-        // 单位部署
-        var unitPlaces = _mapData.UnitPlaces.ToList();
-        _mapData.UnitPlaces.Clear();
-        foreach (var place in unitPlaces)
-        {
-            var updated = place;
-            updated.Coordinate = ScaleIndex(place.Coordinate, oldWidth, newWidth, newHeight, scale);
-            _mapData.UnitPlaces.Add(updated);
+            return ModifierResult.Fail(ex.Message);
         }
     }
-
-    /// <summary>把旧地图上的格子索引换算为新地图索引（结果夹进新地图范围）。</summary>
-    /// <remarks>
-    /// 六边形感知：地图是 flat-top 六边形且奇数列下移半格，几何纵坐标是
-    /// <c>row + (col % 2) * 0.5</c>。所以行号不能按 <c>row * scale</c> 直接换算，
-    /// 必须先把几何纵坐标缩放、再按新列的奇偶偏移还原，否则奇偶列交界处会错开半格。
-    /// </remarks>
-    private static int ScaleIndex(int oldIndex, int oldWidth, int newWidth, int newHeight, double scale)
-    {
-        if (oldWidth <= 0 || newWidth <= 0) return 0;
-
-        var coord = HexCoord.FromIndex(oldIndex, oldWidth);
-        int newCol = Math.Clamp((int)(coord.Col * scale), 0, newWidth - 1);
-
-        double y = (coord.Row + (coord.Col & 1) * 0.5) * scale;
-        int newRow = Math.Clamp((int)Math.Floor(y - (newCol & 1) * 0.5 + 0.5), 0, newHeight - 1);
-
-        return newRow * newWidth + newCol;
-    }
-
-    /// <summary>
-    /// 尺寸调整（整体平移）后重映射其余带格子坐标的实体：
-    /// 单位 v3、援军 v1/v3、空军、首都、单位部署。
-    /// <para>
-    /// 与 <see cref="RemapRemainingEntityCoordinates"/>（按比例缩放）不同，这里的坐标变化是
-    /// "加偏移"而不是"乘比例"，所以不能共用那个函数 —— 那也正是 ResizeMap 当初漏掉它们的原因。
-    /// </para>
-    /// <para>平移后落到新地图范围外的实体直接丢弃，与建筑/陷阱/军队的处理保持一致。</para>
-    /// </summary>
-    private void TranslateRemainingEntityCoordinates(
-        int oldWidth, int newWidth, int newHeight, int offsetCol, int offsetRow)
-    {
-        if (_mapData == null) return;
-
-        // 单位 v3
-        var armiesV3 = _mapData.ArmiesV3.ToList();
-        _mapData.ArmiesV3.Clear();
-        foreach (var army in armiesV3)
-        {
-            if (!TryTranslateIndex(army.Coordinate, oldWidth, newWidth, newHeight, offsetCol, offsetRow, out int index))
-                continue;
-
-            var updated = army;
-            updated.Coordinate = (short)index;
-            _mapData.ArmiesV3.Add(updated);
-        }
-
-        // 援军 v1
-        var reinforcements = _mapData.Reinforcements.ToList();
-        _mapData.Reinforcements.Clear();
-        foreach (var item in reinforcements)
-        {
-            if (!TryTranslateIndex(item.Coordinate, oldWidth, newWidth, newHeight, offsetCol, offsetRow, out int index))
-                continue;
-
-            var updated = item;
-            updated.Coordinate = index;
-            _mapData.Reinforcements.Add(updated);
-        }
-
-        // 援军 v3
-        var reinforcementsV3 = _mapData.ReinforcementsV3.ToList();
-        _mapData.ReinforcementsV3.Clear();
-        foreach (var item in reinforcementsV3)
-        {
-            if (!TryTranslateIndex(item.Coordinate, oldWidth, newWidth, newHeight, offsetCol, offsetRow, out int index))
-                continue;
-
-            var updated = item;
-            updated.Coordinate = index;
-            _mapData.ReinforcementsV3.Add(updated);
-        }
-
-        // 空军
-        var airForces = _mapData.AirForces.ToList();
-        _mapData.AirForces.Clear();
-        foreach (var air in airForces)
-        {
-            if (!TryTranslateIndex(air.Coordinate, oldWidth, newWidth, newHeight, offsetCol, offsetRow, out int index))
-                continue;
-
-            var updated = air;
-            updated.Coordinate = index;
-            _mapData.AirForces.Add(updated);
-        }
-
-        // 首都
-        var capitals = _mapData.Capitals.ToList();
-        _mapData.Capitals.Clear();
-        foreach (var capital in capitals)
-        {
-            if (!TryTranslateIndex(capital.Coordinate, oldWidth, newWidth, newHeight, offsetCol, offsetRow, out int index))
-                continue;
-
-            var updated = capital;
-            updated.Coordinate = index;
-            _mapData.Capitals.Add(updated);
-        }
-
-        // 单位部署
-        var unitPlaces = _mapData.UnitPlaces.ToList();
-        _mapData.UnitPlaces.Clear();
-        foreach (var place in unitPlaces)
-        {
-            if (!TryTranslateIndex(place.Coordinate, oldWidth, newWidth, newHeight, offsetCol, offsetRow, out int index))
-                continue;
-
-            var updated = place;
-            updated.Coordinate = index;
-            _mapData.UnitPlaces.Add(updated);
-        }
-    }
-
-    /// <summary>
-    /// 把旧格索引按 (offsetCol, offsetRow) 平移到新地图；落在新范围外返回 false。
-    /// </summary>
-    private static bool TryTranslateIndex(
-        int oldIndex, int oldWidth, int newWidth, int newHeight,
-        int offsetCol, int offsetRow, out int newIndex)
-    {
-        newIndex = 0;
-        if (oldWidth <= 0) return false;
-
-        int newCol = oldIndex % oldWidth + offsetCol;
-        int newRow = oldIndex / oldWidth + offsetRow;
-
-        if (newCol < 0 || newCol >= newWidth || newRow < 0 || newRow >= newHeight)
-            return false;
-
-        newIndex = newRow * newWidth + newCol;
-        return true;
-    }
-
-    /// <summary>
-    /// 缩放后以建筑位置为省会修补省区数据（对齐 VB UpdateProvincesForBuildings）：
-    /// 建筑所在格若省区为空（0 或 0xFFFF），就把它设成以该建筑索引为省会值的省区；
-    /// 再从这些省会用 BFS 向四周扩散，填补同样为空的相邻陆地格子（跳过海洋）。
-    /// </summary>
-    private void UpdateProvincesFromBuildings(int mapWidth, int mapHeight)
-    {
-        if (_mapData == null) return;
-
-        int total = mapWidth * mapHeight;
-
-        // 第一步：把"建筑所在且省区为空"的格子设成省会
-        var capitalIndices = new List<int>();
-        foreach (var building in _mapData.Buildings)
-        {
-            int index = building.Coordinate;
-            if (index < 0 || index >= total) continue;
-
-            ref var province = ref _mapData.GetProvinceRef(index);
-            if (province.ProvinceValue != 0 && province.ProvinceValue != 0xFFFF) continue;
-
-            province.ProvinceValue = (ushort)(index <= 0xFFFF ? index : index % 0x10000);
-            capitalIndices.Add(index);
-        }
-
-        if (capitalIndices.Count == 0) return;
-
-        // 第二步：多源 BFS 向相邻空白陆地格扩散
-        var visited = new bool[total];
-        var queue = new Queue<int>();
-        var neighbors = new List<int>(6);
-
-        foreach (int capitalIndex in capitalIndices)
-        {
-            ushort fillValue = (ushort)(capitalIndex <= 0xFFFF ? capitalIndex : capitalIndex % 0x10000);
-
-            queue.Clear();
-            queue.Enqueue(capitalIndex);
-            visited[capitalIndex] = true;
-
-            while (queue.Count > 0)
-            {
-                int current = queue.Dequeue();
-                int col = current % mapWidth;
-                int row = current / mapWidth;
-
-                CollectHexNeighbors(col, row, mapWidth, mapHeight, neighbors);
-                foreach (int neighbor in neighbors)
-                {
-                    if (visited[neighbor]) continue;
-                    visited[neighbor] = true;
-
-                    ref var province = ref _mapData.GetProvinceRef(neighbor);
-                    if (province.ProvinceValue != 0 && province.ProvinceValue != 0xFFFF) continue;
-
-                    // 海洋不参与省区填充
-                    if (_mapData.GetTerrainRef(neighbor).TileType1 == 1) continue;
-
-                    province.ProvinceValue = fillValue;
-                    queue.Enqueue(neighbor);
-                }
-            }
-        }
-    }
-
-    /// <summary>
-    /// 收集六边形邻居（奇数列下移，与渲染层的 <c>(col % 2) * hexSpacingY / 2</c> 偏移一致）。
-    /// </summary>
-    private static void CollectHexNeighbors(int col, int row, int mapWidth, int mapHeight, List<int> output)
-    {
-        output.Clear();
-
-        void Add(int c, int r)
-        {
-            if (c < 0 || c >= mapWidth || r < 0 || r >= mapHeight) return;
-            output.Add(r * mapWidth + c);
-        }
-
-        Add(col - 1, row);
-        Add(col + 1, row);
-        Add(col, row - 1);
-        Add(col, row + 1);
-
-        if ((col & 1) == 1)
-        {
-            Add(col - 1, row + 1);
-            Add(col + 1, row + 1);
-        }
-        else
-        {
-            Add(col - 1, row - 1);
-            Add(col + 1, row - 1);
-        }
-    }
-
-    #endregion
-
-    #region I/J/K/L键 - 调整地图大小
 
     public ModifierResult ResizeMap(string direction, int amount, bool useOcean)
     {
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
-
-        int oldWidth = _mapData.MapWidth;
-        int oldHeight = _mapData.MapHeight;
-        int newWidth = oldWidth;
-        int newHeight = oldHeight;
-        int offsetCol = 0;
-        int offsetRow = 0;
-
-        switch (direction)
+        try
         {
-            case "up":
-                newHeight = oldHeight + amount;
-                offsetRow = amount;
-                break;
-            case "down":
-                newHeight = oldHeight + amount;
-                break;
-            case "left":
-                newWidth = oldWidth + amount;
-                offsetCol = amount;
-                break;
-            case "right":
-                newWidth = oldWidth + amount;
-                break;
-        }
-
-        if (newWidth <= 0 || newHeight <= 0)
-            return ModifierResult.Fail("地图尺寸不能小于等于0");
-
-        // 归属数组是紧凑索引（征服地图只覆盖 MapClip 裁剪区），必须在 Resize 之前
-        // 按"地图坐标 → 归属索引"把每个格子的归属先抽出来。直接拿旧数组按下标取
-        // 会越界，结果被当成"无归属"，表现就是归属不全。
-        var oldBelongByMapIndex = new string[oldWidth * oldHeight];
-        for (int row = 0; row < oldHeight; row++)
-        {
-            for (int col = 0; col < oldWidth; col++)
+            int width = _mapData.MapWidth, height = _mapData.MapHeight, x = 0, y = 0;
+            switch (direction.ToLowerInvariant())
             {
-                int bIdx = _mapData.GetBelongIndex(col, row);
-                oldBelongByMapIndex[row * oldWidth + col] =
-                    (bIdx >= 0 && bIdx < _mapData.Belongs.Count) ? _mapData.Belongs[bIdx] : "FF";
+                case "up": height = checked(height + amount); y = amount; break;
+                case "down": height = checked(height + amount); break;
+                case "left": width = checked(width + amount); x = amount; break;
+                case "right": width = checked(width + amount); break;
+                default: return ModifierResult.Fail("Unknown resize direction.");
             }
+            MapTransform.Resize(_mapData, width, height, x, y, useOcean);
+            return ModifierResult.Ok($"地图尺寸：{width}x{height}");
         }
-
-        var tempTerrains = new Dictionary<(int, int), TerrainData>();
-        var tempProvinces = new Dictionary<(int, int), Province>();
-
-        for (int oldRow = 0; oldRow < oldHeight; oldRow++)
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or InvalidDataException or OverflowException)
         {
-            for (int oldCol = 0; oldCol < oldWidth; oldCol++)
-            {
-                int newCol = oldCol + offsetCol;
-                int newRow = oldRow + offsetRow;
-
-                if (newCol >= 0 && newCol < newWidth && newRow >= 0 && newRow < newHeight)
-                {
-                    tempTerrains[(newCol, newRow)] = _mapData.GetTerrainRef(oldCol, oldRow);
-                    tempProvinces[(newCol, newRow)] = _mapData.GetProvinceRef(oldCol, oldRow);
-                }
-            }
+            return ModifierResult.Fail(ex.Message);
         }
-
-        _mapData.Resize(newWidth, newHeight);
-
-        for (int row = 0; row < newHeight; row++)
-        {
-            for (int col = 0; col < newWidth; col++)
-            {
-                ref var terrain = ref _mapData.GetTerrainRef(col, row);
-                terrain = TerrainData.CreateDefault();
-                terrain.TileType1 = useOcean ? (byte)1 : (byte)0;
-                terrain.DecorationType1 = 0;
-                _mapData.GetProvinceRef(col, row) = Province.CreateDefault();
-            }
-        }
-
-        foreach (var kvp in tempTerrains)
-            _mapData.GetTerrainRef(kvp.Key.Item1, kvp.Key.Item2) = kvp.Value;
-        foreach (var kvp in tempProvinces)
-            _mapData.GetProvinceRef(kvp.Key.Item1, kvp.Key.Item2) = kvp.Value;
-
-        // ProvinceValue 存的是「省会格子的线性序号」(row * 宽度 + col)，地图尺寸一变就整体错位。
-        // 上面只搬移了 Province 本身，这里必须按 旧索引 -> 新索引 重算，
-        // 否则省区绘制、以及按省会归属放置建筑/单位都会指向错误的格子。
-        for (int row = 0; row < newHeight; row++)
-        {
-            for (int col = 0; col < newWidth; col++)
-            {
-                ref var province = ref _mapData.GetProvinceRef(col, row);
-                ushort capitalIndex = province.ProvinceValue;
-
-                // 0 与 0xFFFF 都表示该格不隶属于任何省区
-                if (capitalIndex == 0 || capitalIndex == 0xFFFF) continue;
-
-                int capitalCol = capitalIndex % oldWidth + offsetCol;
-                int capitalRow = capitalIndex / oldWidth + offsetRow;
-
-                if (capitalCol < 0 || capitalCol >= newWidth || capitalRow < 0 || capitalRow >= newHeight)
-                {
-                    // 省会格被裁到地图之外，该省区随之失效
-                    province.ProvinceValue = 0xFFFF;
-                    continue;
-                }
-
-                province.ProvinceValue = (ushort)(capitalRow * newWidth + capitalCol);
-            }
-        }
-
-        if (offsetCol != 0 || offsetRow != 0)
-        {
-            var buildingsToUpdate = _mapData.Buildings.ToList();
-            _mapData.Buildings.Clear();
-            for (int bi = 0; bi < buildingsToUpdate.Count; bi++)
-            {
-                var building = buildingsToUpdate[bi];
-                var coord = HexCoord.FromIndex(building.Coordinate, oldWidth);
-                int newCol = coord.Col + offsetCol;
-                int newRow = coord.Row + offsetRow;
-                if (newCol >= 0 && newCol < newWidth && newRow >= 0 && newRow < newHeight)
-                {
-                    building.Coordinate = newRow * newWidth + newCol;
-                    _mapData.Buildings.Add(building);
-                }
-            }
-        }
-        else
-        {
-            for (int i = _mapData.Buildings.Count - 1; i >= 0; i--)
-            {
-                var building = _mapData.Buildings[i];
-                var coord = HexCoord.FromIndex(building.Coordinate, oldWidth);
-                if (coord.Col >= newWidth || coord.Row >= newHeight)
-                    _mapData.Buildings.RemoveAt(i);
-                else
-                    building.Coordinate = coord.Row * newWidth + coord.Col;
-            }
-        }
-
-        var trapsToUpdate = _mapData.Traps.ToList();
-        _mapData.Traps.Clear();
-        for (int ti = 0; ti < trapsToUpdate.Count; ti++)
-        {
-            var trap = trapsToUpdate[ti];
-            var coord = HexCoord.FromIndex(trap.Coordinate, oldWidth);
-            int newCol = coord.Col + offsetCol;
-            int newRow = coord.Row + offsetRow;
-            if (newCol >= 0 && newCol < newWidth && newRow >= 0 && newRow < newHeight)
-            {
-                trap.Coordinate = (short)(newRow * newWidth + newCol);
-                _mapData.Traps.Add(trap);
-            }
-        }
-
-        for (int i = _mapData.Armies.Count - 1; i >= 0; i--)
-        {
-            var army = _mapData.Armies[i];
-            var coord = HexCoord.FromIndex(army.Coordinate, oldWidth);
-            int newCol = coord.Col + offsetCol;
-            int newRow = coord.Row + offsetRow;
-            if (newCol < 0 || newCol >= newWidth || newRow < 0 || newRow >= newHeight)
-                _mapData.Armies.RemoveAt(i);
-            else
-            {
-                army.Coordinate = (short)(newRow * newWidth + newCol);
-                _mapData.Armies[i] = army;   // Army 是结构体，必须写回
-            }
-        }
-
-        // 其余带格子坐标的实体：单位(v3)、援军(v1/v3)、空军、首都、单位部署。
-        // 与 ScaleMap 同理，这里漏掉的话它们仍按旧地图编号解释，会落到完全错误的位置。
-        TranslateRemainingEntityCoordinates(oldWidth, newWidth, newHeight, offsetCol, offsetRow);
-
-        // Belongs 是逐格索引的字符串表，MapData.Resize 不会重建它。
-        // 不重建就会整体错位：地图收缩、或向上/向左扩展时内容被搬移，
-        // 归属却停在原处，偏差正好等于偏移量。
-        // 这里按 旧索引 -> 新索引 重采样（与 ScaleMap 的做法一致）。
-        _mapData.Belongs.Clear();
-        for (int row = 0; row < newHeight; row++)
-        {
-            for (int col = 0; col < newWidth; col++)
-            {
-                int oldCol = col - offsetCol;
-                int oldRow = row - offsetRow;
-
-                if (oldCol >= 0 && oldCol < oldWidth && oldRow >= 0 && oldRow < oldHeight)
-                    _mapData.Belongs.Add(oldBelongByMapIndex[oldRow * oldWidth + oldCol]);
-                else
-                    _mapData.Belongs.Add("FF");   // 新扩展出来的格子：无归属
-            }
-        }
-
-        _mapData.Header.MapLength = newWidth;
-        _mapData.Header.MapWidth = newHeight;
-
-        // 尺寸变了之后原来的裁剪区不再适用。清零可让"地图坐标 → 归属索引"
-        // 退化成 row * MapWidth + col，与上面按全尺寸顺序重建的 Belongs 对齐。
-        _mapData.Header.MapClipX = 0;
-        _mapData.Header.MapClipY = 0;
-
-        MarkModified();
-        string dirText = direction switch { "up" => "向上", "down" => "向下", "left" => "向左", "right" => "向右", _ => direction };
-        string actionText = amount > 0 ? "扩展" : "收缩";
-        return ModifierResult.Ok($"地图已调整：{dirText} 方向 {actionText} {Math.Abs(amount)} 格，新尺寸 {newWidth}x{newHeight}");
     }
-
-    #endregion
 
     #region T键 - 连接建筑
 

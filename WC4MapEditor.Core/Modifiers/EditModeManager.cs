@@ -978,18 +978,31 @@ public sealed class EditModeManager
         _undoManager.Record(new DelegateCommand(description, execute, undo));
     }
 
-    public void RecordMapResizeChange(string description, Action applyChange)
+    public ModifierResult RecordMapResizeChange(string description, Func<ModifierResult> applyChange)
     {
-        if (_mapData == null || _undoManager == null)
+        if (_mapData == null) return ModifierResult.Fail("No map is loaded.");
+        MapResizeCommand? command = null;
+        try
         {
-            applyChange();
-            return;
+            command = new MapResizeCommand(_mapData, description);
+            var result = applyChange();
+            if (!result.Success)
+            {
+                command.Rollback();
+                return result;
+            }
+            if (_undoManager != null && result.AffectedCount > 0)
+            {
+                command.CaptureAfterState();
+                _undoManager.Record(command);
+            }
+            return result;
         }
-
-        var command = new MapResizeCommand(_mapData, description);
-        applyChange();
-        command.CaptureAfterState();
-        _undoManager.Record(command);
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or InvalidDataException or OverflowException)
+        {
+            command?.Rollback();
+            return ModifierResult.Fail(ex.Message);
+        }
     }
 
     #endregion

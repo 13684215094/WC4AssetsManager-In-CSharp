@@ -151,6 +151,7 @@ public class Program
     private static Command BuildAssetCommand()
     {
         var cmd = new Command("asset", "资源管理操作");
+        cmd.Subcommands.Add(BuildAssetAuditCommand());
 
         var scanPathArg = new Argument<string?>("path") { Description = "assets 根目录（默认自动探测）" };
         scanPathArg.Arity = ArgumentArity.ZeroOrOne;
@@ -214,6 +215,36 @@ public class Program
         });
         cmd.Subcommands.Add(queryCmd);
 
+        return cmd;
+    }
+
+    private static Command BuildAssetAuditCommand()
+    {
+        var cmd = new Command("audit", "只读检查数据关联及将领引用");
+        var root = new Argument<string>("path") { Description = "assets 目录或包含 assets 的游戏目录" };
+        var baseRoot = new Option<string?>("--base") { Description = "覆盖包对应的完整基础 assets" };
+        var maps = new Option<bool>("--include-maps") { Description = "扫描 stage 下 BTL 已部署部队引用（不含未确认的增援字段）" };
+        var general = new Option<int?>("--general") { Description = "显示指定将领的反向引用" };
+        var output = new Option<string?>("--output", "-o") { Description = "导出完整 JSON 报告（输入目录外的新文件）" };
+        cmd.Arguments.Add(root);
+        cmd.Options.Add(baseRoot); cmd.Options.Add(maps); cmd.Options.Add(general); cmd.Options.Add(output);
+        cmd.SetAction(result =>
+        {
+            try
+            {
+                int? id = result.GetValue(general);
+                if (id < 0) throw new ArgumentOutOfRangeException("general", "General ID must be non-negative.");
+                var report = new AssetRelationshipAnalyzer().Analyze(result.GetValue(root)!, result.GetValue(baseRoot), result.GetValue(maps));
+                Console.Write(report.ToText(id));
+                if (result.GetValue(output) is string destination) report.Save(destination);
+                return report.Errors == 0 ? 0 : 1;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Audit failed: {ex.Message}");
+                return 2;
+            }
+        });
         return cmd;
     }
 
@@ -404,7 +435,7 @@ public class Program
                     Console.WriteLine($"      ... 及其他 {unitGroups.Count() - 5} 种类型");
             }
 
-            if (parser.BtlVersion >= 3 && parser.ArmiesV3.Count > 0)
+            if (parser.BtlVersion >= 2 && parser.ArmiesV3.Count > 0)
             {
                 Console.WriteLine($"  部队V3:  {parser.ArmiesV3.Count} 个");
             }
@@ -436,7 +467,7 @@ public class Program
                 result.StrategyConstructions = parser.GetStrategyConstructionData().Select(ExportStrategicConstruction).ToList();
                 result.AirSupports = parser.GetAirSupportData().Select(ExportAirSupport).ToList();
 
-                if (parser.BtlVersion >= 3)
+                if (parser.BtlVersion >= 2)
                 {
                     result.ArmiesV3 = parser.ArmiesV3.Select(ExportArmyV3).ToList();
                     result.ReinforcementsV3 = parser.ReinforcementsV3.Select(ExportReinforcementV3).ToList();
@@ -561,7 +592,7 @@ public class Program
                     Console.WriteLine($"      ... 及其他 {unitGroups.Count() - 5} 种类型");
             }
 
-            if (parser.BtlVersion >= 3 && parser.ArmiesV3.Count > 0)
+            if (parser.BtlVersion >= 2 && parser.ArmiesV3.Count > 0)
             {
                 Console.WriteLine($"  部队V3:  {parser.ArmiesV3.Count} 个");
             }
@@ -592,7 +623,7 @@ public class Program
                 result.StrategyConstructions = parser.GetStrategyConstructionData().Select(ExportStrategicConstruction).ToList();
                 result.AirSupports = parser.GetAirSupportData().Select(ExportAirSupport).ToList();
 
-                if (parser.BtlVersion >= 3)
+                if (parser.BtlVersion >= 2)
                 {
                     result.ArmiesV3 = parser.ArmiesV3.Select(ExportArmyV3).ToList();
                     result.ReinforcementsV3 = parser.ReinforcementsV3.Select(ExportReinforcementV3).ToList();
@@ -738,9 +769,9 @@ public class Program
             {
                 Console.WriteLine("  [详细模式] 加载地形数据...");
                 int terrainCount = mapData.TerrainCount;
-                var terrains = new List<TerrainExport>(Math.Min(terrainCount, 10000));
+                var terrains = new List<TerrainExport>(terrainCount);
 
-                for (int i = 0; i < terrainCount && i < 10000; i++)
+                for (int i = 0; i < terrainCount; i++)
                 {
                     var terrainData = mapData.GetTerrain(i);
                     var province = mapData.GetProvince(i);
@@ -765,16 +796,16 @@ public class Program
                         TextureOffsetX3 = terrainData.TextureOffsetX3,
                         TextureOffsetY3 = terrainData.TextureOffsetY3,
                         RiverValue = terrainData.RiverValue,
-                        CountryId = province.CountryId
+                        Reserved1 = terrainData.Reserved1,
+                        Reserved2 = terrainData.Reserved2,
+                        Reserved3 = terrainData.Reserved3,
+                        CountryId = province.CountryId,
+                        ProvinceValue = province.ProvinceValue
                     });
                 }
 
                 result.Terrains = terrains;
 
-                if (terrainCount > 10000)
-                {
-                    Console.WriteLine($"  警告: 地形数量({terrainCount})超过10000，仅导出前10000个");
-                }
             }
 
             if (!string.IsNullOrEmpty(output))
@@ -903,13 +934,16 @@ public class Program
             DecorationType3 = terrain.DecorationType3,
             TextureOffsetX3 = terrain.TextureOffsetX3,
             TextureOffsetY3 = terrain.TextureOffsetY3,
-            RiverValue = terrain.RiverValue
+            RiverValue = terrain.RiverValue,
+            Reserved1 = terrain.Reserved1,
+            Reserved2 = terrain.Reserved2,
+            Reserved3 = terrain.Reserved3
         };
     }
 
     private static ProvinceExport ExportProvince(Province province)
     {
-        return new ProvinceExport { CountryId = province.CountryId };
+        return new ProvinceExport { CountryId = province.CountryId, ProvinceValue = province.ProvinceValue };
     }
 
     private static TrapExport ExportTrap(Trap trap)
@@ -926,7 +960,7 @@ public class Program
     {
         return new MapCaseExport
         {
-            Coordinate = (short)mapCase.TargetTile,
+            Coordinate = mapCase.TargetTile,
             CaseType = (byte)mapCase.PolicyNumber,
             TriggerRound = (byte)mapCase.TriggerRound
         };
@@ -958,7 +992,7 @@ public class Program
         {
             TriggerRound = r.SpawnRound,
             LegionId = r.OwnerCountry,
-            Coordinate = (short)r.Coordinate
+            Coordinate = r.Coordinate
         };
     }
 
@@ -968,7 +1002,7 @@ public class Program
         {
             TriggerRound = r.SpawnRound,
             LegionId = r.OwnerLegion,
-            Coordinate = (short)r.Coordinate
+            Coordinate = r.Coordinate
         };
     }
 
@@ -976,7 +1010,7 @@ public class Program
     {
         return new AirForceExport
         {
-            Coordinate = (short)af.Coordinate,
+            Coordinate = af.Coordinate,
             AirForceType = af.UnitType
         };
     }
@@ -985,21 +1019,21 @@ public class Program
     {
         return new UnitPlacementExport
         {
-            Coordinate = (short)up.Coordinate,
+            Coordinate = up.Coordinate,
             UnitType = up.Direction
         };
     }
 
     private static CapitalExport ExportCapital(Capital c)
     {
-        return new CapitalExport { Coordinate = (short)c.Coordinate };
+        return new CapitalExport { Coordinate = c.Coordinate };
     }
 
     private static StrategicConstructionExport ExportStrategicConstruction(StrategicConstruction sc)
     {
         return new StrategicConstructionExport
         {
-            Coordinate = (short)sc.LegionId,
+            Coordinate = sc.LegionId,
             ConstructionType = (byte)sc.ConstructionCode
         };
     }
@@ -1008,7 +1042,7 @@ public class Program
     {
         return new AirSupportExport
         {
-            Coordinate = (short)as_.AirForceSequence,
+            Coordinate = as_.AirForceSequence,
             SupportType = (byte)as_.TriggerRound
         };
     }
@@ -1296,7 +1330,7 @@ public class Program
     private class ArmySummaryExport
     {
         [JsonPropertyName("coordinate")]
-        public short Coordinate { get; set; }
+        public int Coordinate { get; set; }
 
         [JsonPropertyName("unit_type")]
         public byte UnitType { get; set; }
@@ -1323,7 +1357,7 @@ public class Program
     private class ArmyV3Export
     {
         [JsonPropertyName("coordinate")]
-        public short Coordinate { get; set; }
+        public int Coordinate { get; set; }
 
         [JsonPropertyName("unit_type")]
         public byte UnitType { get; set; }
@@ -1394,6 +1428,18 @@ public class Program
         [JsonPropertyName("river_value")]
         public byte RiverValue { get; set; }
 
+        [JsonPropertyName("reserved_1")]
+        public byte Reserved1 { get; set; }
+
+        [JsonPropertyName("reserved_2")]
+        public byte Reserved2 { get; set; }
+
+        [JsonPropertyName("reserved_3")]
+        public byte Reserved3 { get; set; }
+
+        [JsonPropertyName("province_value")]
+        public ushort? ProvinceValue { get; set; }
+
         [JsonPropertyName("country_id")]
         public byte? CountryId { get; set; }
     }
@@ -1402,12 +1448,15 @@ public class Program
     {
         [JsonPropertyName("country_id")]
         public byte CountryId { get; set; }
+
+        [JsonPropertyName("province_value")]
+        public ushort ProvinceValue { get; set; }
     }
 
     private class TrapExport
     {
         [JsonPropertyName("coordinate")]
-        public short Coordinate { get; set; }
+        public int Coordinate { get; set; }
 
         [JsonPropertyName("trap_type")]
         public byte TrapType { get; set; }
@@ -1419,7 +1468,7 @@ public class Program
     private class MapCaseExport
     {
         [JsonPropertyName("coordinate")]
-        public short Coordinate { get; set; }
+        public int Coordinate { get; set; }
 
         [JsonPropertyName("case_type")]
         public byte CaseType { get; set; }
@@ -1461,7 +1510,7 @@ public class Program
         public int LegionId { get; set; }
 
         [JsonPropertyName("coordinate")]
-        public short Coordinate { get; set; }
+        public int Coordinate { get; set; }
     }
 
     private class ReinforcementV3Export
@@ -1473,13 +1522,13 @@ public class Program
         public int LegionId { get; set; }
 
         [JsonPropertyName("coordinate")]
-        public short Coordinate { get; set; }
+        public int Coordinate { get; set; }
     }
 
     private class AirForceExport
     {
         [JsonPropertyName("coordinate")]
-        public short Coordinate { get; set; }
+        public int Coordinate { get; set; }
 
         [JsonPropertyName("air_force_type")]
         public int AirForceType { get; set; }
@@ -1488,7 +1537,7 @@ public class Program
     private class UnitPlacementExport
     {
         [JsonPropertyName("coordinate")]
-        public short Coordinate { get; set; }
+        public int Coordinate { get; set; }
 
         [JsonPropertyName("unit_type")]
         public byte UnitType { get; set; }
@@ -1497,13 +1546,13 @@ public class Program
     private class CapitalExport
     {
         [JsonPropertyName("coordinate")]
-        public short Coordinate { get; set; }
+        public int Coordinate { get; set; }
     }
 
     private class StrategicConstructionExport
     {
         [JsonPropertyName("coordinate")]
-        public short Coordinate { get; set; }
+        public int Coordinate { get; set; }
 
         [JsonPropertyName("construction_type")]
         public byte ConstructionType { get; set; }
@@ -1512,7 +1561,7 @@ public class Program
     private class AirSupportExport
     {
         [JsonPropertyName("coordinate")]
-        public short Coordinate { get; set; }
+        public int Coordinate { get; set; }
 
         [JsonPropertyName("support_type")]
         public byte SupportType { get; set; }

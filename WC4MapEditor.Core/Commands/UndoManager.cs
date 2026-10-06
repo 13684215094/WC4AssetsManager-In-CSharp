@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using WC4MapEditor.Core.Models;
 
 namespace WC4MapEditor.Core.Commands;
 
@@ -7,6 +8,7 @@ public sealed class UndoManager
     private readonly Stack<IUndoableCommand> _undoStack = new();
     private readonly Stack<IUndoableCommand> _redoStack = new();
     private readonly int _maxHistory;
+    private readonly long _maxResizeSnapshotBytes;
 
     public int UndoCount => _undoStack.Count;
     public int RedoCount => _redoStack.Count;
@@ -17,9 +19,11 @@ public sealed class UndoManager
 
     public event Action? StateChanged;
 
-    public UndoManager(int maxHistory = 200)
+    public UndoManager(int maxHistory = 200, long maxResizeSnapshotBytes = MapLimits.MaxOperationBytes)
     {
+        if (maxHistory < 1 || maxResizeSnapshotBytes < 0) throw new ArgumentOutOfRangeException(nameof(maxHistory));
         _maxHistory = maxHistory;
+        _maxResizeSnapshotBytes = maxResizeSnapshotBytes;
     }
 
     public void ExecuteAndRecord(IUndoableCommand command)
@@ -72,12 +76,20 @@ public sealed class UndoManager
 
     private void TrimHistory()
     {
-        if (_undoStack.Count <= _maxHistory) return;
-
         var array = _undoStack.ToArray();
+        int keep = 0;
+        long bytes = 0;
+        foreach (var command in array)
+        {
+            long size = command is MapResizeCommand resize ? resize.SnapshotBytes : 0;
+            if (keep == _maxHistory || bytes + size > _maxResizeSnapshotBytes) break;
+            bytes += size;
+            keep++;
+        }
+        if (keep == array.Length) return;
         _undoStack.Clear();
-        // array 是从栈顶到栈底的顺序，保留最新的 _maxHistory 个
-        for (int i = _maxHistory - 1; i >= 0; i--)
+        // Drop oldest history first; never keep an undo gap across a resize.
+        for (int i = keep - 1; i >= 0; i--)
             _undoStack.Push(array[i]);
     }
 

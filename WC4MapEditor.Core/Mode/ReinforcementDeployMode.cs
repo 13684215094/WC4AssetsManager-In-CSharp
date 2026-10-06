@@ -44,7 +44,7 @@ public sealed class ReinforcementDeployMode : IModeHandler
         var mapData = context.MapData;
         if (mapData == null) return Task.FromResult(false);
 
-        bool isV3 = mapData.Header.BtlVersion >= 3;
+        bool isV3 = mapData.Header.BtlVersion >= 2;
         var reinforcement = context.GetModifier<ReinforcementModifier>()!;
         var reinforcementV3 = context.GetModifier<ReinforcementV3Modifier>()!;
         var belong = context.GetModifier<BelongModifier>()!;

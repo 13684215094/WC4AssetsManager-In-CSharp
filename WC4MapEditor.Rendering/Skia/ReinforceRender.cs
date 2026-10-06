@@ -420,7 +420,7 @@ public class ReinforceRender : IDisposable
             if (generalSetting != null)
             {
                 var generalData = generalSetting.GetById((int)general);
-                string? ename = generalData?.EName;
+                string? ename = generalData == null ? null : GeneralSettingParser.GetPhotoKey(generalData);
                 if (!string.IsNullOrEmpty(ename))
                     headImage = tacticalCache.GetImage($"head_{ename}.png");
             }

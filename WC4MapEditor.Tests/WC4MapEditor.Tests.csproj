@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../WC4MapEditor.Core/WC4MapEditor.Core.csproj" />
+    <ProjectReference Include="../WC4MapEditor.Cli/WC4MapEditor.Cli.csproj" />
+  </ItemGroup>
+</Project>

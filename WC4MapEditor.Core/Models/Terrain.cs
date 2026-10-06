@@ -59,7 +59,10 @@ public struct Terrain
         DecorationType3 = data.DecorationType3,
         TextureOffsetX3 = data.TextureOffsetX3,
         TextureOffsetY3 = data.TextureOffsetY3,
-        RiverValue = data.RiverValue
+        Reserved1 = data.Reserved1,
+        Reserved2 = data.Reserved2,
+        RiverValue = data.RiverValue,
+        Reserved3 = data.Reserved3
     };
 
     /// <summary>
@@ -79,6 +82,9 @@ public struct Terrain
         DecorationType3 = DecorationType3,
         TextureOffsetX3 = TextureOffsetX3,
         TextureOffsetY3 = TextureOffsetY3,
+        Reserved1 = Reserved1,
+        Reserved2 = Reserved2,
+        Reserved3 = Reserved3,
         RiverValue = RiverValue
     };
 

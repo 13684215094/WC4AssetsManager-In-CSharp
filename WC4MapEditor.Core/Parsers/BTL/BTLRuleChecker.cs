@@ -1,6 +1,5 @@
 using WC4MapEditor.Core.Config;
 using WC4MapEditor.Core.Models;
-using WC4MapEditor.Core.Parsers.Stage;
 
 namespace WC4MapEditor.Core.Parsers.BTL;
 
@@ -68,7 +67,11 @@ public static class BTLRuleChecker
         // 在副本上修复，据此生成报告 —— 与 Fix 共用逻辑，结论必然一致
         var copy = (byte[])data.Clone();
         var log = new List<(BTLIssueLevel Level, string Category, string Message, long Offset)>();
-        Fix(copy, log);
+        try { Fix(copy, log); }
+        catch (Exception ex) when (ex is InvalidDataException or ArgumentException or OverflowException)
+        {
+            return [new BTLIssue(BTLIssueLevel.Error, "文件结构", ex.Message)];
+        }
 
         return log.Select(e => new BTLIssue(e.Level, e.Category, e.Message, e.Offset)).ToList();
     }
@@ -79,21 +82,31 @@ public static class BTLRuleChecker
     private static int Fix(byte[] data,
         List<(BTLIssueLevel Level, string Category, string Message, long Offset)>? log)
     {
-        if (data == null || data.Length < BTLSize.HEADER_SIZE) return 0;
+        if (data == null || data.Length < BTLSize.HEADER_SIZE)
+            throw new InvalidDataException("BTL header is incomplete.");
 
         var header = BTLHeader.Parse(data);
-        var off = StageOffsets.Calculate(
-            header.ArmyCount, header.SelectableTileCount, header.BuildingCount);
+        var layout = new BtlLayout(header);
+        if (data.Length != layout.Length)
+            throw new InvalidDataException($"BTL length {data.Length}, expected {layout.Length}.");
+        var off = (terrain: layout["terrain"].Offset,
+            province: layout["provinces"].Offset,
+            belong: layout["belongs"].Offset,
+            building: layout["Buildings"].Offset,
+            dataEnd: layout["armies"].Offset);
 
         var buildingIds = ConfigManager.Instance.GetBuildingTypeIds();
         var armyIds = ConfigManager.Instance.GetArmyTypeIds();
 
         int count = 0;
         count += FixBuildings(data, header, off, log, buildingIds);
-        count += FixArmies(data, header, off, log, armyIds);
+        // v2/v3 use a different 64-byte record; the v1 serializer would overwrite its fields.
+        if (header.BtlVersion == 1)
+            count += FixArmies(data, header, off, log, armyIds);
         count += FixLegions(data, header, off, log);
-        count += FixOwnerships(data, header, off, log);
-        count += FixTileCount(data, header, log);
+        // External-world maps may encode owners with a display offset.
+        if (header.MapNumber == 0)
+            count += FixOwnerships(data, header, off, log);
         count += FixDistrictsOnOcean(data, header, off, log);
 
         // 地雷只报告、不自动修：Java 是把地块上的 bmiMinesLv 置 0，
@@ -124,11 +137,12 @@ public static class BTLRuleChecker
         (int terrain, int province, int belong, int building, int dataEnd) off,
         List<(BTLIssueLevel Level, string Category, string Message, long Offset)>? log)
     {
-        if (header.SelectableTileCount <= 0) return 0;
+        int area = checked(header.MapLength * header.MapWidth);
+        if (area <= 0) return 0;
 
         int fixedCount = 0;
 
-        for (int i = 0; i < header.SelectableTileCount; i++)
+        for (int i = 0; i < area; i++)
         {
             long pos = (long)off.belong + i;
             if (pos >= data.Length) break;
@@ -158,13 +172,14 @@ public static class BTLRuleChecker
     private static byte ResolveBelongByProvince(byte[] data, BTLHeader header,
         (int terrain, int province, int belong, int building, int dataEnd) off, int coord)
     {
-        if (header.SelectableTileCount <= 0) return 0;
+        int area = checked(header.MapLength * header.MapWidth);
+        if (area <= 0) return 0;
 
         long provPos = (long)off.province + (long)coord * BTLSize.PROVINCE_SIZE;
         if (provPos + BTLSize.PROVINCE_SIZE > data.Length) return 0;
 
         int provinceId = data[provPos] | (data[provPos + 1] << 8);
-        if (provinceId == NoProvince || provinceId < 0 || provinceId >= header.SelectableTileCount)
+        if (provinceId == NoProvince || provinceId >= area)
             return 0;
 
         // 省会的归属：省区 ID 即省会坐标
@@ -186,9 +201,10 @@ public static class BTLRuleChecker
         (int terrain, int province, int belong, int building, int dataEnd) off,
         List<(BTLIssueLevel Level, string Category, string Message, long Offset)>? log)
     {
-        if (header.SelectableTileCount <= 0) return;
+        int area = checked(header.MapLength * header.MapWidth);
+        if (area <= 0) return;
 
-        for (int i = 0; i < header.SelectableTileCount; i++)
+        for (int i = 0; i < area; i++)
         {
             long provPos = (long)off.province + (long)i * BTLSize.PROVINCE_SIZE;
             if (provPos + BTLSize.PROVINCE_SIZE > data.Length) break;
@@ -293,7 +309,7 @@ public static class BTLRuleChecker
                     b.BuildingType = SeaBuildingType;
                     changed = true;
                 }
-                else if (!isOcean && b.BuildingType > 30)
+                else if (header.MapNumber == 0 && !isOcean && b.BuildingType > 30)
                 {
                     Report(log, BTLIssueLevel.Error, "建筑",
                         $"建筑 #{i}（坐标 {b.Coordinate}）在陆地上却是海上类型 {b.BuildingType}", pos);
@@ -514,38 +530,17 @@ public static class BTLRuleChecker
     }
 
     /// <summary>
-    /// 地块总数一致性：头部声明的格数应为 地图长 × 地图宽。
-    /// 不一致时修正头部字段（各区块长度本就按声明值解析，改头部即对齐）。
-    /// </summary>
-    private static int FixTileCount(byte[] data, BTLHeader header,
-        List<(BTLIssueLevel Level, string Category, string Message, long Offset)>? log)
-    {
-        long real = (long)header.MapLength * header.MapWidth;
-        if (real <= 0 || real == header.SelectableTileCount) return 0;
-
-        Report(log, BTLIssueLevel.Error, "头部",
-            $"地块总数不一致：头部声明 {header.SelectableTileCount}，实际地图 {header.MapLength}×{header.MapWidth} = {real}",
-            TileCountHeaderOffset);
-
-        // 头部里地块总数的偏移与 StageOffsets 一致（0x58）
-        WriteInt32(data, TileCountHeaderOffset, (int)real);
-        return 1;
-    }
-
-    /// <summary>头部中「地块总数」字段的字节偏移（与 StageOffsets/解析器一致）</summary>
-    private const int TileCountHeaderOffset = 0x58;
-
-    /// <summary>
     /// 海洋行政区划：海洋地块的区划值必须为 65535（FF FF）。
     /// </summary>
     private static int FixDistrictsOnOcean(byte[] data, BTLHeader header,
         (int terrain, int province, int belong, int building, int dataEnd) off,
         List<(BTLIssueLevel Level, string Category, string Message, long Offset)>? log)
     {
-        if (header.SelectableTileCount <= 0) return 0;
+        int area = checked(header.MapLength * header.MapWidth);
+        if (area <= 0) return 0;
         int fixedCount = 0;
 
-        for (int i = 0; i < header.SelectableTileCount; i++)
+        for (int i = 0; i < area; i++)
         {
             if (!IsOceanAt(data, header, off, i)) continue;
 
@@ -564,15 +559,6 @@ public static class BTLRuleChecker
         }
 
         return fixedCount;
-    }
-
-    private static void WriteInt32(byte[] data, int offset, int value)
-    {
-        if (offset + 4 > data.Length) return;
-        data[offset] = (byte)(value & 0xFF);
-        data[offset + 1] = (byte)((value >> 8) & 0xFF);
-        data[offset + 2] = (byte)((value >> 16) & 0xFF);
-        data[offset + 3] = (byte)((value >> 24) & 0xFF);
     }
 
     // ---------- 首都（MapData 层）----------
@@ -710,7 +696,8 @@ public static class BTLRuleChecker
     private static bool IsOceanAt(byte[] data, BTLHeader header,
         (int terrain, int province, int belong, int building, int dataEnd) off, int coord)
     {
-        if (header.SelectableTileCount <= 0 || coord < 0 || coord >= header.SelectableTileCount)
+        if (header.MapNumber != 0 || coord < 0 ||
+            coord >= (long)header.MapLength * header.MapWidth)
             return false;
 
         long pos = (long)off.terrain + coord * BTLSize.TERRAIN_SIZE;

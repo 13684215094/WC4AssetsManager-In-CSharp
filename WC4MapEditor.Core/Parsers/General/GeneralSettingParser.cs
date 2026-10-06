@@ -3,10 +3,9 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Globalization;
 using System.Text.Encodings.Web;
 using System.Text.Json;
-using System.Text.Json.Serialization;
+using System.Text.Json.Nodes;
 using System.Text.Unicode;
 using System.Xml;
 using System.Xml.Linq;
@@ -34,15 +33,21 @@ public class GeneralSettingParser
         }
     }
 
-    private readonly AssetManager _manager = AssetManager.Default;
+    private readonly AssetManager _manager;
+    private readonly string? _explicitRoot;
+    private bool _generalsLoaded;
+    private bool _portraitsLoaded;
+    private readonly Dictionary<GeneralSettingData, (JsonObject Original, JsonObject Baseline, int Id)> _original = new();
+    private XDocument _portraitDocument = new(new XElement("Portraits"));
+    public string? LastError { get; private set; }
 
     private List<GeneralSettingData> _data = new();
     public IReadOnlyList<GeneralSettingData> All => _data;
 
-    public string ConfigPath { get; private set; }
-    public string PortraitPosPath { get; private set; }
-    public string GeneralPhotoDir { get; private set; }
-    public string HeadsDir { get; private set; }
+    public string ConfigPath { get; private set; } = "";
+    public string PortraitPosPath { get; private set; } = "";
+    public string GeneralPhotoDir { get; private set; } = "";
+    public string HeadsDir { get; private set; } = "";
 
     private readonly Dictionary<string, PortraitPosEntry> _portraits = new(StringComparer.OrdinalIgnoreCase);
     public IReadOnlyDictionary<string, PortraitPosEntry> Portraits => _portraits;
@@ -53,27 +58,27 @@ public class GeneralSettingParser
         Encoder = JavaScriptEncoder.Create(UnicodeRanges.All),
         PropertyNameCaseInsensitive = true,
         AllowTrailingCommas = true,
-        ReadCommentHandling = JsonCommentHandling.Skip,
-        // 数值字段容错：允许 "1019" / null / 1019.0 等非标准写法
-        NumberHandling = JsonNumberHandling.AllowReadingFromString,
-        Converters = { new SafeInt32Converter(), new SafeIntListConverter() }
+        ReadCommentHandling = JsonCommentHandling.Skip
     };
 
-    private GeneralSettingParser()
+    private GeneralSettingParser() : this(null, AssetManager.Default) { }
+
+    public GeneralSettingParser(string? assetsRoot, AssetManager? manager = null)
     {
-        ResolvePaths();
+        _manager = manager ?? AssetManager.Default;
+        _explicitRoot = assetsRoot == null ? null : Path.GetFullPath(assetsRoot);
         LoadAll();
     }
 
     private void ResolvePaths()
     {
         // 如果 AssetManager 未扫描，先尝试默认路径扫描
-        if (!_manager.IsLoaded)
+        if (_explicitRoot == null && !_manager.IsLoaded)
         {
             try { _manager.ScanDefault(); } catch { /* 静默处理 */ }
         }
 
-        var root = _manager.AssetsRoot;
+        var root = _explicitRoot ?? _manager.AssetsRoot;
         if (!string.IsNullOrEmpty(root) && Directory.Exists(root))
         {
             ConfigPath = Path.Combine(root, "json", "GeneralSettings.json");
@@ -84,16 +89,7 @@ public class GeneralSettingParser
         else
         {
             // 兜底：从执行目录向上搜索 Resource/WC4DATA/assets
-            var baseDir = AppContext.BaseDirectory;
-            string? candidate = null;
-            string? current = baseDir;
-            for (int i = 0; i < 5 && !string.IsNullOrEmpty(current); i++)
-            {
-                var test = Path.Combine(current, "Resource", "WC4DATA", "assets");
-                if (Directory.Exists(test)) { candidate = test; break; }
-                current = Path.GetDirectoryName(current);
-            }
-            candidate ??= Path.GetFullPath(Path.Combine(baseDir ?? "", "..", "..", "..", "..", "Resource", "WC4DATA", "assets"));
+            string candidate = _explicitRoot ?? AssetManager.GetDefaultAssetsPath();
 
             ConfigPath = Path.Combine(candidate, "json", "GeneralSettings.json");
             PortraitPosPath = Path.Combine(candidate, "config", "def_portraitpos.xml");
@@ -110,6 +106,8 @@ public class GeneralSettingParser
 
     public void LoadAll()
     {
+        LastError = null;
+        ResolvePaths();
         LoadGeneralSettings();
         LoadPortraitPos();
     }
@@ -119,104 +117,90 @@ public class GeneralSettingParser
     // ============================== GeneralSettings.json ==============================
     public void LoadGeneralSettings()
     {
+        _generalsLoaded = false;
         try
         {
-            if (!File.Exists(ConfigPath))
-            {
-                Debug.WriteLine($"[GeneralSettingParser] 配置文件不存在: {ConfigPath}");
-                _data = new List<GeneralSettingData>();
-                return;
-            }
             var json = File.ReadAllText(ConfigPath);
-            if (string.IsNullOrWhiteSpace(json))
-            {
-                _data = new List<GeneralSettingData>();
-                return;
-            }
-
-            try
-            {
-                _data = JsonSerializer.Deserialize<List<GeneralSettingData>>(json, JsonOpts) ?? new List<GeneralSettingData>();
-            }
-            catch (Exception ex)
-            {
-                // 整体解析失败时降级为逐条解析，只丢弃损坏的条目，避免"一条坏数据清空全部"
-                Debug.WriteLine($"[GeneralSettingParser] 整体解析失败，降级为逐条解析: {ex.Message}");
-                _data = DeserializeTolerant(json);
-            }
+            var rows = JsonNode.Parse(json, documentOptions: new JsonDocumentOptions
+            { AllowTrailingCommas = true, CommentHandling = JsonCommentHandling.Skip }) as JsonArray
+                ?? throw new InvalidDataException("GeneralSettings.json must contain an array.");
+            var loaded = JsonSerializer.Deserialize<List<GeneralSettingData>>(json, JsonOpts)
+                ?? throw new InvalidDataException("GeneralSettings.json is null.");
+            if (loaded.Any(g => g == null)) throw new InvalidDataException("Null general record.");
+            _original.Clear();
+            for (int i = 0; i < loaded.Count; i++)
+                _original.Add(loaded[i], ((JsonObject)rows[i]!, JsonSerializer.SerializeToNode(loaded[i], JsonOpts)!.AsObject(), loaded[i].Id));
+            _data = loaded;
+            _generalsLoaded = true;
+            _manager.InvalidateData();
             Debug.WriteLine($"[GeneralSettingParser] 已加载 {_data.Count} 个将领配置");
         }
         catch (Exception ex)
         {
             Debug.WriteLine($"[GeneralSettingParser] 加载 GeneralSettings.json 失败: {ex.Message}");
-            _data = new List<GeneralSettingData>();
+            LastError = $"GeneralSettings load failed: {ex.Message}";
         }
-    }
-
-    /// <summary>
-    /// 逐条反序列化：损坏的条目单独跳过，其余条目正常加载
-    /// </summary>
-    private List<GeneralSettingData> DeserializeTolerant(string json)
-    {
-        var result = new List<GeneralSettingData>();
-        try
-        {
-            using var doc = JsonDocument.Parse(json, new JsonDocumentOptions
-            {
-                AllowTrailingCommas = true,
-                CommentHandling = JsonCommentHandling.Skip
-            });
-
-            if (doc.RootElement.ValueKind != JsonValueKind.Array)
-            {
-                Debug.WriteLine("[GeneralSettingParser] 根节点不是数组，无法解析");
-                return result;
-            }
-
-            int index = 0;
-            foreach (var el in doc.RootElement.EnumerateArray())
-            {
-                try
-                {
-                    var item = el.Deserialize<GeneralSettingData>(JsonOpts);
-                    if (item != null) result.Add(item);
-                }
-                catch (Exception ex)
-                {
-                    var raw = string.Empty;
-                    try { raw = el.GetRawText(); } catch { /* 忽略 */ }
-                    if (raw.Length > 200) raw = raw.Substring(0, 200) + "...";
-                    Debug.WriteLine($"[GeneralSettingParser] 第 {index} 条将领数据损坏已跳过: {ex.Message} | 内容: {raw}");
-                }
-                index++;
-            }
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"[GeneralSettingParser] 逐条解析也失败: {ex.Message}");
-        }
-        return result;
     }
 
     public GeneralSettingData? GetById(int id) => _data.FirstOrDefault(g => g.Id == id);
     public GeneralSettingData? GetByEName(string ename) => _data.FirstOrDefault(g => string.Equals(g.EName, ename, StringComparison.OrdinalIgnoreCase));
 
-    public int GetNextId() => _data.Count == 0 ? 1001 : _data.Max(g => g.Id) + 1;
+    public int GetNextId() => _data.Count == 0 ? 1001 : checked(_data.Max(g => g.Id) + 1);
+
+    public JsonArray GetSnapshot() => JsonNode.Parse(SerializeGenerals())!.AsArray();
+
+    private byte[] SerializeGenerals()
+    {
+        VerifyAssetRoot();
+        if (!_generalsLoaded) throw new InvalidOperationException("GeneralSettings was not loaded successfully; saving is disabled.");
+        var output = new JsonArray();
+        foreach (var general in _data)
+        {
+            var current = JsonSerializer.SerializeToNode(general, JsonOpts)!.AsObject();
+            if (_original.TryGetValue(general, out var source))
+            {
+                if (general.Id != source.Id)
+                    throw new InvalidOperationException("Existing general IDs cannot be changed without migrating their references.");
+                var merged = source.Original.DeepClone().AsObject();
+                foreach (var field in current)
+                    if (!JsonNode.DeepEquals(field.Value, source.Baseline[field.Key]))
+                    {
+                        string key = merged.Select(f => f.Key).FirstOrDefault(k =>
+                            string.Equals(k, field.Key, StringComparison.OrdinalIgnoreCase)) ?? field.Key;
+                        merged[key] = field.Value?.DeepClone();
+                    }
+                output.Add(merged);
+            }
+            else output.Add(current);
+        }
+        return System.Text.Encoding.UTF8.GetBytes(output.ToJsonString(JsonOpts));
+    }
+
+    private void VerifyAssetRoot()
+    {
+        if (_explicitRoot == null && _manager.IsLoaded &&
+            !string.Equals(Path.GetFullPath(Path.Combine(_manager.AssetsRoot, "json", "GeneralSettings.json")),
+                Path.GetFullPath(ConfigPath), OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+            throw new InvalidOperationException("The active assets directory changed. Reload this editor before saving.");
+    }
 
     public bool SaveGeneralSettings(string? outputPath = null)
     {
         try
         {
             var path = outputPath ?? ConfigPath;
-            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            var json = JsonSerializer.Serialize(_data, JsonOpts);
-            File.WriteAllText(path, json, System.Text.Encoding.UTF8);
+            var bytes = SerializeGenerals();
+            Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
+            AtomicFile.Write(path, bytes);
+            _manager.InvalidateData();
+            LastError = null;
             Debug.WriteLine($"[GeneralSettingParser] 已保存 {_data.Count} 个将领配置 -> {path}");
             return true;
         }
         catch (Exception ex)
         {
             Debug.WriteLine($"[GeneralSettingParser] 保存失败: {ex.Message}");
+            LastError = ex.Message;
             return false;
         }
     }
@@ -224,17 +208,20 @@ public class GeneralSettingParser
     // ============================== PortraitPos ==============================
     public void LoadPortraitPos()
     {
-        _portraits.Clear();
+        _portraitsLoaded = false;
         try
         {
             if (!File.Exists(PortraitPosPath))
             {
-                Debug.WriteLine($"[GeneralSettingParser] portraitpos不存在: {PortraitPosPath}");
+                _portraits.Clear();
+                _portraitDocument = new XDocument(new XElement("Portraits"));
+                _portraitsLoaded = true;
                 return;
             }
             var doc = XDocument.Load(PortraitPosPath);
             var root = doc.Element("Portraits");
-            if (root == null) return;
+            if (root == null) throw new InvalidDataException("Expected a Portraits root.");
+            var portraits = new Dictionary<string, PortraitPosEntry>(StringComparer.OrdinalIgnoreCase);
             foreach (var el in root.Elements("general"))
             {
                 var name = (string?)el.Attribute("name") ?? string.Empty;
@@ -246,13 +233,20 @@ public class GeneralSettingParser
                     PosY = (int?)el.Attribute("posy") ?? 40,
                     Scale = (double?)el.Attribute("scale") ?? 1.0
                 };
-                _portraits[name] = entry;
+                if (!double.IsFinite(entry.Scale) || entry.Scale <= 0)
+                    throw new InvalidDataException($"Invalid portrait scale: {name}");
+                portraits[name] = entry;
             }
+            _portraitDocument = doc;
+            _portraits.Clear();
+            foreach (var item in portraits) _portraits[item.Key] = item.Value;
+            _portraitsLoaded = true;
             Debug.WriteLine($"[GeneralSettingParser] 已加载 {_portraits.Count} 个 PortraitPos");
         }
         catch (Exception ex)
         {
             Debug.WriteLine($"[GeneralSettingParser] 加载 PortraitPos 失败: {ex.Message}");
+            LastError = $"PortraitPos load failed: {ex.Message}";
         }
     }
 
@@ -278,43 +272,64 @@ public class GeneralSettingParser
         try
         {
             var path = outputPath ?? PortraitPosPath;
-            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            var settings = new XmlWriterSettings
-            {
-                Indent = true,
-                IndentChars = "  ",
-                OmitXmlDeclaration = false,
-                Encoding = System.Text.Encoding.UTF8
-            };
-            using var writer = XmlWriter.Create(path, settings);
-            writer.WriteStartElement("Portraits");
-            foreach (var kv in _portraits.Values.OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase))
-            {
-                writer.WriteStartElement("general");
-                writer.WriteAttributeString("name", kv.Name);
-                writer.WriteAttributeString("posx", kv.PosX.ToString());
-                writer.WriteAttributeString("posy", kv.PosY.ToString());
-                writer.WriteAttributeString("scale", kv.Scale.ToString("0.0######", System.Globalization.CultureInfo.InvariantCulture));
-                writer.WriteEndElement();
-            }
-            writer.WriteEndElement();
+            var bytes = SerializePortraits();
+            Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
+            AtomicFile.Write(path, bytes);
+            LastError = null;
             Debug.WriteLine($"[GeneralSettingParser] 已保存 PortraitPos {_portraits.Count} 项 -> {path}");
             return true;
         }
         catch (Exception ex)
         {
             Debug.WriteLine($"[GeneralSettingParser] 保存 PortraitPos 失败: {ex.Message}");
+            LastError = ex.Message;
             return false;
         }
+    }
+
+    private byte[] SerializePortraits()
+    {
+        VerifyAssetRoot();
+        if (!_portraitsLoaded) throw new InvalidOperationException("PortraitPos was not loaded successfully; saving is disabled.");
+        var doc = new XDocument(_portraitDocument);
+        var root = doc.Root!;
+        foreach (var element in root.Elements("general").ToList())
+        {
+            string name = (string?)element.Attribute("name") ?? "";
+            if (name.Length != 0 && !_portraits.ContainsKey(name)) element.Remove();
+        }
+        foreach (var entry in _portraits.Values)
+        {
+            if (!double.IsFinite(entry.Scale) || entry.Scale <= 0)
+                throw new InvalidDataException($"Invalid portrait scale: {entry.Name}");
+            var element = root.Elements("general").LastOrDefault(e =>
+                string.Equals((string?)e.Attribute("name"), entry.Name, StringComparison.OrdinalIgnoreCase));
+            if (element == null)
+            {
+                element = new XElement("general", new XAttribute("name", entry.Name),
+                    new XAttribute("posx", entry.PosX), new XAttribute("posy", entry.PosY), new XAttribute("scale", entry.Scale));
+                root.Add(element);
+            }
+            else
+            {
+                if (((int?)element.Attribute("posx") ?? -30) != entry.PosX) element.SetAttributeValue("posx", entry.PosX);
+                if (((int?)element.Attribute("posy") ?? 40) != entry.PosY) element.SetAttributeValue("posy", entry.PosY);
+                if (((double?)element.Attribute("scale") ?? 1) != entry.Scale) element.SetAttributeValue("scale", entry.Scale);
+            }
+        }
+        using var stream = new MemoryStream();
+        doc.Save(stream);
+        return stream.ToArray();
     }
 
     // ============================== 复合操作（新增/删除 同步两边） ==============================
     public (GeneralSettingData g, PortraitPosEntry p) AddNewGeneral(string name, string ename, int? id = null)
     {
         if (string.IsNullOrWhiteSpace(ename)) throw new ArgumentException("EName 不能为空");
-        if (GetByEName(ename) != null) throw new InvalidOperationException($"已存在同名将领 EName={ename}");
+        if (!_generalsLoaded) throw new InvalidOperationException("Load GeneralSettings successfully before adding a general.");
 
         int finalId = id ?? GetNextId();
+        if (finalId <= 0) throw new ArgumentOutOfRangeException(nameof(id));
         if (GetById(finalId) != null) throw new InvalidOperationException($"ID={finalId} 已被占用");
 
         var g = new GeneralSettingData
@@ -323,10 +338,14 @@ public class GeneralSettingParser
             Name = string.IsNullOrWhiteSpace(name) ? ename : name,
             EName = ename,
             Photo = ename,
+            InfantryMax = 6, ArmorMax = 6, ArtilleryMax = 6, NavyMax = 6, AirForceMax = 6, MarchMax = 6,
+            SkillsMax = 5, ResetSkills = 5,
             Skills = new List<int>(),
             Medals = new List<int>()
         };
         _data.Add(g);
+        var initial = JsonSerializer.SerializeToNode(g, JsonOpts)!.AsObject();
+        _original.Add(g, (initial, initial.DeepClone().AsObject(), g.Id));
 
         // 新增时 portraitpos = posx=-30, posy=40, scale=1.0
         var p = EnsurePortraitDefault(ename);
@@ -336,17 +355,30 @@ public class GeneralSettingParser
     public bool DeleteGeneral(int id)
     {
         var g = GetById(id);
-        if (g == null) return false;
-        _data.Remove(g);
-        if (!string.IsNullOrEmpty(g.EName)) RemovePortrait(g.EName);
-        return true;
+        return g != null && DeleteGeneral(g);
     }
+
+    // Portraits may also be used by other generals or promotion records.
+    // Deleting a row does not authorize deleting those shared resources.
+    public bool DeleteGeneral(GeneralSettingData general) => _data.Remove(general);
+
+    public static string GetPhotoKey(GeneralSettingData general)
+        => string.IsNullOrWhiteSpace(general.Photo) ? general.EName ?? "" : general.Photo;
 
     public bool SaveAll()
     {
-        var ok1 = SaveGeneralSettings();
-        var ok2 = SavePortraitPos();
-        return ok1 && ok2;
+        try
+        {
+            var generals = SerializeGenerals();
+            var portraits = SerializePortraits();
+            Directory.CreateDirectory(Path.GetDirectoryName(ConfigPath)!);
+            Directory.CreateDirectory(Path.GetDirectoryName(PortraitPosPath)!);
+            AtomicFile.WriteAll((ConfigPath, generals), (PortraitPosPath, portraits));
+            _manager.InvalidateData();
+            LastError = null;
+            return true;
+        }
+        catch (Exception ex) { LastError = ex.Message; return false; }
     }
 
     // ============================== 辅助：VB 版本的专长/军衔/技能等级算法 ==============================
@@ -369,7 +401,7 @@ public class GeneralSettingParser
     public int GetHp(int id) => GetById(id)?.Hp ?? 0;
     public List<int> GetSkills(int id) => GetById(id)?.Skills?.ToList() ?? new List<int>();
     public string? GetEname(int id) => GetById(id)?.EName;
-    public static int CalculateSkillLevel(int skillId) => Math.Max(1, skillId % 10);
+    public static int CalculateSkillLevel(int skillId) => GeneralSkillRules.GetLevel(AssetManager.Default, skillId);
 
     // ============================== 图片路径解析 ==============================
     public string? GetGeneralPhotoPath(string ename)
@@ -388,95 +420,5 @@ public class GeneralSettingParser
         if (File.Exists(f1)) return f1;
         var f2 = Path.Combine(HeadsDir, $"general_circle_{ename}.png");
         return File.Exists(f2) ? f2 : null;
-    }
-}
-
-/// <summary>
-/// 宽松的 int 读取转换器：容忍 null、字符串数字、浮点数、布尔等非常规写法
-/// </summary>
-public sealed class SafeInt32Converter : JsonConverter<int>
-{
-    public override int Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
-    {
-        switch (reader.TokenType)
-        {
-            case JsonTokenType.Number:
-                if (reader.TryGetInt32(out var i)) return i;
-                if (reader.TryGetDouble(out var d)) return Clamp(d);
-                return 0;
-
-            case JsonTokenType.String:
-                var s = reader.GetString();
-                if (string.IsNullOrWhiteSpace(s)) return 0;
-                if (int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var si)) return si;
-                if (double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var sd)) return Clamp(sd);
-                return 0;
-
-            case JsonTokenType.True:
-                return 1;
-            case JsonTokenType.False:
-                return 0;
-            default:
-                return 0;
-        }
-    }
-
-    public override void Write(Utf8JsonWriter writer, int value, JsonSerializerOptions options)
-        => writer.WriteNumberValue(value);
-
-    private static int Clamp(double d)
-    {
-        if (double.IsNaN(d) || double.IsInfinity(d)) return 0;
-        if (d >= int.MaxValue) return int.MaxValue;
-        if (d <= int.MinValue) return int.MinValue;
-        return (int)Math.Round(d);
-    }
-}
-
-/// <summary>
-/// 宽松的 List&lt;int&gt; 读取转换器：容忍 null、单个数字、逗号分隔字符串等写法
-/// </summary>
-public sealed class SafeIntListConverter : JsonConverter<List<int>>
-{
-    private static readonly SafeInt32Converter IntReader = new();
-
-    public override List<int> Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
-    {
-        var list = new List<int>();
-        switch (reader.TokenType)
-        {
-            case JsonTokenType.Number:
-                list.Add(IntReader.Read(ref reader, typeof(int), options));
-                return list;
-
-            case JsonTokenType.String:
-                var s = reader.GetString();
-                if (!string.IsNullOrWhiteSpace(s))
-                {
-                    foreach (var part in s.Split(',', ';', '|', ' ', '\t'))
-                    {
-                        if (int.TryParse(part, NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
-                            list.Add(v);
-                    }
-                }
-                return list;
-
-            case JsonTokenType.StartArray:
-                while (reader.Read() && reader.TokenType != JsonTokenType.EndArray)
-                {
-                    list.Add(IntReader.Read(ref reader, typeof(int), options));
-                }
-                return list;
-
-            default:
-                return list;
-        }
-    }
-
-    public override void Write(Utf8JsonWriter writer, List<int> value, JsonSerializerOptions options)
-    {
-        writer.WriteStartArray();
-        foreach (var v in value) writer.WriteNumberValue(v);
-        writer.WriteEndArray();
     }
 }

@@ -26,6 +26,8 @@ public struct Reinforcement
     public int Badge3;
     public int OwnerCountry;
     public int SpawnRound;
+    public int ReservedTail1;
+    public int ReservedTail2;
 
     /// <summary>
     /// 从字节数组解析增援数据
