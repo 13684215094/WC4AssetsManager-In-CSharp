@@ -5,7 +5,9 @@
 - 指定上游：`https://github.com/2132937983/WC4AssetsManager-In-CSharp.git`，`6.0` 分支
 - 对照资料：`/home/j60100428/game`
 
-> 文件名按本次要求保留为 `reanme.md`。第 1-7 节和附录记录更新前的只读审计快照；第 8 节记录首次整合；第 9-10 节记录 2026-10-06 的远端核对、压缩与内容差异。前文数字以审计当时的 Git 对象和工作树为准。
+> 文件名按本次要求保留为 `reanme.md`。第 1-7 节和附录记录更新前的只读审计快照；第 8 节记录首次整合；第 9-10 节记录 2026-10-06 的远端核对、压缩与内容差异。第 11 节是当前的仓库选择建议。前文数字以审计当时的 Git 对象和工作树为准，不能当成当前未提交修改统计。
+
+> 当前结论（2026-10-06）：本地 `6.0 @ 51c8486` 已在上游 `7d31340` 上整合源码和 fork 资源；建议以此作为继续开发的基线。fork 的 10 个提交不应笼统称为用户的私有提交，详见第 11 节。此次网络 DNS 不可用，实时远端状态尚待网络恢复后复核。
 
 ## 1. 核心结论
 
@@ -407,7 +409,7 @@ StageParser / ConquestParser / CLI / GUI
 
 最终验证：测试项目 restore 后运行 `dotnet run --project WC4MapEditor.Tests -- --corpus /home/j60100428/game` 为 **52 passed, 0 failed**；CLI build 成功；WPF `win-x64` 交叉构建成功（9 个既有警告、0 错误）。
 
-## 10. 私有提交与最终文件树的逐项核对（2026-10-06）
+## 10. fork 提交历史与最终文件树的逐项核对（2026-10-06）
 
 ### 10.1 “全部合并成一个提交”的确切含义
 
@@ -448,3 +450,61 @@ git diff --check upstream/6.0 6.0
 ```
 
 报告补充后再次确认测试、CLI 构建、WPF 交叉构建和 `git pull --rebase upstream 6.0`；报告和整合树已纳入同一个最终提交。没有推送 `origin`；远端 fork 仍指向原有的 `00fba1e`。`/home/j60100428/game` 只作为只读对照和测试语料，不属于本次 Git 历史压缩的范围。
+
+## 11. 再次选择上游还是 fork（2026-10-06，只读核对）
+
+### 11.1 核对范围与网络边界
+
+本轮核对期间没有改分支、提交、远端配置或 `/home/j60100428/game`，也没有向任何远端推送；核对完成后只更新了本报告文件。报告更新前的 `6.0` 是干净的 `51c8486`，父提交为 `upstream/6.0 @ 7d31340`，比该上游引用领先 1 个本地整合提交；`origin/6.0` 仍指向 `00fba1e`。为直接检查两棵目录树，把**本地已缓存的 Git 对象**分别用 `git archive` 展开到 `/tmp/wc4-compare-20261006/upstream` 和 `/tmp/wc4-compare-20261006/fork`。这些是指定提交的源码快照，不是本轮新 `git clone` 的实时远端副本。
+
+本轮 `git ls-remote` 分别试了两个 GitHub HTTPS 地址、上游 SSH 地址、`gitclone.com` 和 `wget.la` 代理地址；均在 DNS 解析阶段失败（`Could not resolve host` / `Could not resolve hostname`），SSH 未到认证阶段。`origin/6.0` 的 reflog 记录于 2026-10-06 11:45 UTC 获取为 `00fba1e`；`upstream/6.0` 的对象先前已获取，2026-10-06 11:48 UTC 改为现名，仍是 `7d31340`。因此以下是对**这两个已取得的提交**的确切比较，不保证远端此刻没有新提交。本环境不能写 `/home/j60100428` 的新目录；此次不在该处创建克隆。`/tmp` 的快照只是便于人工检查，后续可以重新生成。
+
+### 11.2 提交关系：fork 不是一组已证明由用户写的私有提交
+
+| 仓库引用 | 根提交 / 顶端 | 历史与作者信息 |
+|---|---|---|
+| `origin/6.0`，13684215094 fork | `fa093e1` / `00fba1e` | 共 10 个提交。前 9 个作者署名为 `2132937983 <2132937983@qq.com>`；第 10 个 `00fba1e` 署名 `MioPhas <2132937983@qq.com>`，GitHub 代为提交，删除 13 个 `source/` 文件。署名不能证明实际操作者。 |
+| `upstream/6.0`，2132937983 原仓 | `089712c` / `7d31340` | 共 2 个提交，均署名 `2132937983`。`089712c` 是 2026-09-18 的无父 `Initial commit`；`7d31340` 另新增 33 个路径、修改 3 个路径。 |
+
+`git merge-base origin/6.0 upstream/6.0` 为空；`git rev-list --left-right --count origin/6.0...upstream/6.0` 为 `10 2`。GitHub 的 fork 关联及页面上的 “10 ahead / 2 behind” 与这个计数一致，但不能把它理解成可直接从共同祖先做三方 rebase。更准确的说法是：**当前两个分支的 Git 历史已断开，代码内容仍显然有关联**。上游新根 `089712c` 与 fork 顶端有 308 个同路径，其中 244 个 blob 完全一样，64 个不同；上游新根还有 26 个 fork 没有的路径。这个证据支持“上游以一份项目快照重新建立历史，并带有另一套源码”的判断；没有合并提交，也没有证据表明上游用普通 Git merge 吸收了 fork 的 10 个提交。不能从这些对象推断快照具体从谁的工作目录制作。
+
+过去第 10 节标题“私有提交”指 fork 分支相对新上游历史独有的提交，容易误解为用户亲自写的提交，现已更正。**署名为本地账号的编辑器工作**另见 `50283f4` 及其备份分支；当前整合是 `51c8486`。`git stash list` 为空，是因为保存方式为提交而非 stash。
+
+### 11.3 最终文件树逐项分类
+
+| 比较项 | 路径数 | 具体内容 |
+|---|---:|---|
+| fork 跟踪路径 | 519 | `00fba1e` 的文件树。 |
+| 上游跟踪路径 | 367 | `7d31340` 的文件树。 |
+| 同路径、blob 一致 | 246 | 说明大量内容确实共享。 |
+| 同路径、blob 不同 | 66 | 涉及 34 个 `WC4MapEditor.Core/`、14 个 `Views/`、11 个 `WC4MapEditor.Rendering/`，另有工程、CLI、服务和一份 JSON 资源。 |
+| fork 独有 | 207 | 157 个 `Resource/` 文件，48 个历史误跟踪的 `obj/` 编译产物，另有 `setting.txt` 和 `docs/memory-optimization-plan.md`；**没有 fork 独有的 `.cs` 源码路径**。 |
+| 上游独有 | 55 | 20 个 `Views/`、24 个 Core、7 个 Lua 工程文件，外加一个渲染类、`dist/map_places.json` 和两个 `source/` 资料文件。 |
+
+上游第二个提交才加入了 JSON/布局等编辑场景；上游新根本身已经有 Lua 脚本工程、BTL 格式/规则检查器、省份生成器、首都渲染等。fork 的 157 个资源路径包括 `layout.xml`、多语言 `stringtable_*.ini`、大量图集/XML，而上游代码仍引用 `setting.txt`、资源根和布局文件。直接只留纯上游文件树，会缺少这些本地可用的数据和配置；但资源来自哪个游戏版本仍要按具体目标检查。48 个 `obj/` 文件是生成物，不能作为保留 fork 的理由。
+
+同路径差异中，上游有实际功能和修正，例如 `SettingTxtParser` 回填解析后的配置对象；fork 版本缺少这一步。上游 `ProvinceEditMode`/省份生成服务提供手绘边界和图片识别入口，fork 版本没有。fork `LegionModifier` 中的 `AddCapital`/`RemoveCapital`/`ToggleCapital` 没有在上游同文件出现，但上游把它们迁入独立的 `CapitalModifier` 并在 `LegionEditMode` 调用；这不是功能消失。另一方面，不能把所有 66 个同路径差异都判为上游更正确，尤其是游戏资源与二进制保存细节。
+
+`CountryTechSettings.json` 是明确的数据分歧：fork 有 259 条记录，JSON 对象列表与 `game/wc4/世界征服者_解密_4_1.28.0` 对应文件相等；上游有 260 条（新增 ID `10115`），另修改 20 条既有记录的 `NeedId`、`ResearchLv`、`Position` 或 `Lines`。`game` 内可见的 1.26/1.28 版本均与 fork 的 259 条列表相等；1.30 已解包 JSON 的前 259 条也相等。比较的是解析后的对象内容，不是字节/排版相同。当前整合树选择了上游 JSON，因此处理这些原始游戏包时，应明确指定目标版本的数据文件。
+
+### 11.4 对当前整合树的核验与建议
+
+当前 `6.0` 的 546 个跟踪路径中，fork 独有的 **159 个非 `obj/` 路径全部保留**；fork 原有的 48 个 `obj/` 路径已排除。66 个同路径分歧里，44 个文件采用上游 blob，22 个是两边都不相同的本地整合版本。另有 20 个只在本地整合树的路径，主要是 BTL/World 安全读写、地图变换、资产审计、测试及文档。上游独有的 55 个路径也都在整合树中。因而这个整合是**上游源码基线 + fork 非生成资源/配置 + 本地修复**，不是对 fork 全部旧行为的逐行兼容承诺。
+
+**建议继续以当前 `6.0 @ 51c8486` 为开发基线，并以 `upstream/6.0` 跟踪原仓源码。** 不建议切回纯 `origin/6.0`：它缺少上游新增编辑场景、解析器和工具；也不建议直接重置到纯 `upstream/6.0`：会丢掉 fork 的 157 个资源文件、`setting.txt` 及本地已验证的读写修复。保留 `origin/6.0 @ 00fba1e` 和既有备份分支作为可追溯的历史，不应未经核对就强推覆盖 fork 远端。若需要交付给特定游戏版本，把资源版本选择与源码更新分开处理，优先检查上述 JSON 数据差异。
+
+此前在网络可用时验证过当前整合树：52 个测试通过，4092 份 BTL 逐字节往返，CLI 与 Windows WPF 交叉构建成功。本轮运行环境没有可调用的 `dotnet`，未重复构建；Windows GUI 功能还需实机操作验收。本轮报告是唯一的工作树修改，尚未提交。远端网络恢复后，先对两仓执行只读 `git ls-remote`/`git fetch` 并确认 SHA；若 SHA 变化，需要按新对象重做上述比较，再决定是否 rebase 或推送。
+
+## 12. 本地已整合上游后的资源与生成文件整理（2026-10-06）
+
+本轮再次尝试读取 GitHub 和 `gitclone.com` 的上游 `6.0`，均在 DNS 解析阶段失败，未能获取**实时**新提交。当前本地 `HEAD=51c8486` 的父提交已经是此前取得的 `upstream/6.0=7d31340`，故该提交所含的编辑场景、布局工具、Lua 工程等代码已在本地；本轮没有声称已同步网络不可达时可能出现的新上游提交。`git pull --rebase upstream 6.0` 因本报告的未提交改动而拒绝开始；即使先保存改动，也仍需网络可用才能核实并拉取实时远端。
+
+fork 相对缓存上游独有的 157 个 `Resource/` 文件共 9,391,219 字节：149 个 XML、7 个 INI、1 个 TXT。152 个位于 `Resource/WC4DATA/assets/`，包括 `layout.xml`/`layout_x.xml`、动画与单位/地形图集索引、多语言字符串表、配置与教程；4 个 `Resource/Texture/` 是海岸/灰度/建筑标识图集描述；`Resource/Geo/jiuzhou.txt` 是地理坐标资料。它们是游戏或编辑器的数据，不是编译产物。按文件名在 `/home/j60100428/game` 中找到 153 个对应路径，但内容版本不一定相同；抽查 `layout.xml`、`stringtable_cn.ini`、`def_map.xml`、`image_flags_hd.xml` 均与该目录的 1.28 原版字节不同。这些资源原本已由 `51c8486` 整合提交保留；本轮不删除、不重复制提交。该仓缺少被图集 XML 引用的 PNG 图片，保留描述文件也不等于 Windows GUI 的美术资源已完整。
+
+fork 旧历史里的 48 个 `obj/` 路径都是 .NET/MSBuild 生成源码：`*.AssemblyAttributes.cs`、`*.AssemblyInfo.cs`、`*.GlobalUsings.g.cs`、`App.g.cs` 和 WPF 视图 `*.g.cs`。当前 `6.0` 的 `git ls-files` 中已没有任何 `obj/` 路径，旧文件也不在工作树磁盘上；它们在先前的整合中就已舍弃，无需再制造一次删除提交。已有 `.gitignore` 覆盖 `**/obj/`、`**/bin/`、`/tmp/`，`Directory.Build.props` 还把中间/输出文件放在 `tmp/obj` 和 `tmp/bin`。本轮只补充 `.vs/`、`.idea/`、`TestResults/`、`coverage/`、`artifacts/`、`publish/` 及 IDE 用户文件/包产物的忽略规则。
+
+本轮操作环境的 `.git` 是只读挂载：`git add`/`git commit` 均在创建 `.git/index.lock` 时返回 `Read-only file system`。因此本轮的 `.gitignore` 和报告修改暂时只能留在工作树，无法按要求创建独立提交或完成新的 `git pull --rebase`。待 Git 元数据恢复可写、网络可解析后，先保存这两个文件，再 `git fetch upstream 6.0` 核对顶端 SHA，随后在干净工作树上 rebase；如新上游改变了同路径源码/资源，需解决冲突并重新构建测试。
+
+## 13. VPN 启动尝试与当前执行环境边界（2026-10-06）
+
+已按 `/home/j60100428/README.md` 阅读 VPN 手动管理流程，先把 `.gitignore` 和本报告的未提交差异备份到 `/tmp/wc4-before-vpn-20261006.patch`。该次 Codex 执行环境并非服务器完整的 systemd 会话：PID 1 是 `codex-linux-sandbox`，`sudo .../clash-verge-mihomo.sh start` 在 sudo 权限插件失败，直接以 root 调用同一脚本则被 `systemctl` 报 `Failed to connect to bus: Operation not permitted`。按 unit 文件的 `ExecStart` 临时直启 Mihomo 核心也无法绑定 `127.0.0.1:7897/9097/5335`，所有 `listen` 均返回 `socket: operation not permitted`，进程随后退出；没有留下代理监听或后台进程。尝试通过该端口运行 Git 得到 `Couldn't connect to server`，直接访问 GitHub 仍是 DNS 失败。已在临时 shell 执行 `proxy_off`，检查代理变量为 0；`stop` 因同一 systemd 限制无法调用，但已确认无 Mihomo 进程或端口。此次没有获得新远端对象，也没有执行成功的 `git pull --rebase`。这些错误来自当前 Codex 沙箱权限，不能据此判断服务器上的 VPN 安装或节点本身损坏。

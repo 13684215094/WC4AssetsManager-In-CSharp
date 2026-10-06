@@ -23,3 +23,14 @@
 **/obj/
 **/Lib/
 /tmp/
+**/.vs/
+**/.idea/
+**/TestResults/
+**/coverage/
+**/artifacts/
+**/publish/
+*.user
+*.suo
+*.userosscache
+*.rsuser
+*.nupkg
