@@ -293,7 +293,7 @@ public sealed class BelongModifier : ModifierBase, IBrushTarget
             int col = index % width;
             int row = index / width;
             int sourceBelong = nearest[index];
-            var offsets = col % 2 == 0 ? EvenColNeighborOffsets : OddColNeighborOffsets;
+            var offsets = _mapData!.IsOddColumn(col) ? OddColNeighborOffsets : EvenColNeighborOffsets;
 
             foreach (var offset in offsets)
             {
@@ -322,9 +322,7 @@ public sealed class BelongModifier : ModifierBase, IBrushTarget
     private bool IsEntityOnMapBorder(int coordinate)
     {
         if (_mapData == null || coordinate < 0) return false;
-        int width = _mapData.MapWidth;
-        if (width <= 0) return false;
-        return IsOnMapBorder(coordinate % width, coordinate / width);
+        return _mapData.TryGetLocalCoordinate(coordinate, out var cell) && IsOnMapBorder(cell.Col, cell.Row);
     }
 
     /// <summary>
@@ -544,7 +542,7 @@ public sealed class BelongModifier : ModifierBase, IBrushTarget
         if (_mapData == null || !_brushEngine.Active) return;
 
         byte countryId = ResolveBrushCountryId();
-        var hexes = _brushEngine.GetHexesInBrush(centerCol, centerRow, _mapData.MapWidth, _mapData.MapHeight);
+        var hexes = _brushEngine.GetHexesInBrush(centerCol, centerRow, _mapData.MapWidth, _mapData.MapHeight, _mapData.HexColumnOffset);
         foreach (var (c, r) in hexes)
             _mapData.SetBelongValue(c, r, countryId);
         MarkModified();
@@ -555,7 +553,7 @@ public sealed class BelongModifier : ModifierBase, IBrushTarget
         if (_mapData == null || !_brushEngine.Active) return;
 
         byte countryId = ResolveBrushCountryId();
-        var hexes = _brushEngine.GetHexesInBrush(centerCol, centerRow, _mapData.MapWidth, _mapData.MapHeight);
+        var hexes = _brushEngine.GetHexesInBrush(centerCol, centerRow, _mapData.MapWidth, _mapData.MapHeight, _mapData.HexColumnOffset);
         foreach (var (c, r) in hexes)
         {
             byte terrainType = _mapData.GetTerrainRef(c, r).TileType1;

@@ -1,11 +1,14 @@
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using WC4MapEditor.Core.Models;
 
 namespace WC4MapEditor.Core.Commands;
 
 public sealed class FileStateManager
 {
-    private readonly UndoManager _undoManager;
+    private static readonly ConditionalWeakTable<MapData, UndoManager> Histories = new();
+    private UndoManager _undoManager;
+    private readonly int _maxUndoHistory;
     private MapData? _currentMapData;
     private string? _currentFilePath;
     private string? _fileType;
@@ -23,17 +26,20 @@ public sealed class FileStateManager
 
     public FileStateManager(int maxUndoHistory = 200)
     {
+        _maxUndoHistory = maxUndoHistory;
         _undoManager = new UndoManager(maxUndoHistory);
-        _undoManager.StateChanged += OnUndoStateChanged;
+        _undoManager.ContentChanged += MarkDirty;
     }
 
     public void OpenFile(MapData mapData, string filePath, string fileType)
     {
+        _undoManager.ContentChanged -= MarkDirty;
+        _undoManager = Histories.GetValue(mapData, _ => new UndoManager(_maxUndoHistory));
+        _undoManager.ContentChanged += MarkDirty;
         _currentMapData = mapData;
         _currentFilePath = filePath;
         _fileType = fileType;
-        _isDirty = false;
-        _undoManager.Clear();
+        _isDirty = mapData.IsModified;
         Debug.WriteLine($"[FileState] 打开文件: {filePath} ({fileType})");
         FileChanged?.Invoke();
         DirtyStateChanged?.Invoke();
@@ -41,11 +47,13 @@ public sealed class FileStateManager
 
     public void CloseFile()
     {
+        _undoManager.ContentChanged -= MarkDirty;
+        _undoManager = new UndoManager(_maxUndoHistory);
+        _undoManager.ContentChanged += MarkDirty;
         _currentMapData = null;
         _currentFilePath = null;
         _fileType = null;
         _isDirty = false;
-        _undoManager.Clear();
         Debug.WriteLine("[FileState] 关闭文件");
         FileChanged?.Invoke();
         DirtyStateChanged?.Invoke();
@@ -53,6 +61,7 @@ public sealed class FileStateManager
 
     public void MarkDirty()
     {
+        if (_currentMapData != null) _currentMapData.IsModified = true;
         if (!_isDirty)
         {
             _isDirty = true;
@@ -60,8 +69,10 @@ public sealed class FileStateManager
         }
     }
 
-    public void MarkSaved()
+    public void MarkSaved(string? filePath = null)
     {
+        if (filePath != null) _currentFilePath = filePath;
+        if (_currentMapData != null) _currentMapData.IsModified = false;
         if (_isDirty)
         {
             _isDirty = false;
@@ -73,8 +84,7 @@ public sealed class FileStateManager
     {
         if (!_undoManager.CanUndo) return false;
         bool result = _undoManager.Undo();
-        if (result && _currentMapData != null)
-            _currentMapData.IsModified = true;
+        if (result) MarkDirty();
         return result;
     }
 
@@ -82,8 +92,7 @@ public sealed class FileStateManager
     {
         if (!_undoManager.CanRedo) return false;
         bool result = _undoManager.Redo();
-        if (result && _currentMapData != null)
-            _currentMapData.IsModified = true;
+        if (result) MarkDirty();
         return result;
     }
 
@@ -100,9 +109,4 @@ public sealed class FileStateManager
         return new TerrainChangeCommand(_currentMapData!, description, changes);
     }
 
-    private void OnUndoStateChanged()
-    {
-        if (_undoManager.CanUndo || _undoManager.CanRedo)
-            MarkDirty();
-    }
 }

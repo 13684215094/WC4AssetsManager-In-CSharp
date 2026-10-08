@@ -11,7 +11,7 @@ namespace WC4MapEditor.Core.Config;
 /// </para>
 /// <para>
 /// 与 <see cref="DefMapTerrainParser"/> 同样遵循职责划分：
-/// 由 AssetManager 负责定位并读取 WC4DATA 内的文件，本类只负责解析语义。
+/// 由 AssetManager 负责定位并读取当前项目内的文件，本类只负责解析语义。
 /// </para>
 /// </summary>
 /// <remarks>

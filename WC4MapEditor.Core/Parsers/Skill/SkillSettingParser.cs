@@ -1,3 +1,4 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Text.Encodings.Web;
@@ -34,6 +35,7 @@ public class SkillSettingParser
         }
     }
 
+    private readonly JsonTableFile<SkillSettingData> _skillsFile = new();
     private readonly AssetManager _manager = AssetManager.Default;
     private List<SkillSettingData> _skills = new();
     private StringTableParser? _stringTable;
@@ -42,6 +44,9 @@ public class SkillSettingParser
     public List<SkillSettingData> Items => _skills;
     public string ConfigPath { get; private set; } = "";
     public string StringTablePath { get; private set; } = "";
+
+    public bool HasChanges => _skillsFile.HasChanges(_skills) || _stringTable?.IsDirty == true;
+    public string? LastError { get; private set; }
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -60,39 +65,14 @@ public class SkillSettingParser
 
     private void ResolvePaths()
     {
-        if (!_manager.IsLoaded)
-        {
-            try { _manager.ScanDefault(); } catch { }
-        }
-
-        var root = _manager.AssetsRoot;
-        if (!string.IsNullOrEmpty(root) && Directory.Exists(root))
-        {
-            ConfigPath = Path.Combine(root, "json", "SkillSettings.json");
-            StringTablePath = Path.Combine(root, "stringtable_tw.ini");
-        }
-        else
-        {
-            var baseDir = AppContext.BaseDirectory;
-            string? candidate = null;
-            string? current = baseDir;
-            for (int i = 0; i < 5 && !string.IsNullOrEmpty(current); i++)
-            {
-                var test = Path.Combine(current, "Resource", "WC4DATA", "assets");
-                if (Directory.Exists(test)) { candidate = test; break; }
-                current = Path.GetDirectoryName(current);
-            }
-            candidate ??= Path.GetFullPath(Path.Combine(baseDir ?? "", "..", "..", "..", "..", "Resource", "WC4DATA", "assets"));
-
-            ConfigPath = Path.Combine(candidate, "json", "SkillSettings.json");
-            StringTablePath = Path.Combine(candidate, "stringtable_tw.ini");
-        }
-
-        Debug.WriteLine($"[SkillSettingParser] ConfigPath={ConfigPath} StringTablePath={StringTablePath}");
+        string root = _manager.GetActiveAssetsRoot();
+        ConfigPath = Path.Combine(root, "json", "SkillSettings.json");
+        StringTablePath = Path.Combine(root, "stringtable_tw.ini");
     }
 
     public void LoadAll()
     {
+        _skillsFile.Invalidate();
         LoadSkills();
         _stringTable = new StringTableParser(StringTablePath);
     }
@@ -101,13 +81,12 @@ public class SkillSettingParser
     {
         try
         {
-            if (!File.Exists(ConfigPath))
+            if (!ProjectFile.Exists(ConfigPath))
             {
                 Debug.WriteLine($"[SkillSettingParser] 文件不存在: {ConfigPath}");
                 return;
             }
-            var json = File.ReadAllText(ConfigPath);
-            var data = JsonSerializer.Deserialize<List<SkillSettingData>>(json, JsonOpts);
+            var data = _skillsFile.Read(ConfigPath, JsonOpts);
             if (data != null) _skills = data;
         }
         catch (Exception ex)
@@ -138,7 +117,7 @@ public class SkillSettingParser
     {
         int max = 1000;
         foreach (var s in _skills) if (s.Id > max) max = s.Id;
-        return max + 1;
+        return checked(max + 1);
     }
 
     public bool AddSkill(SkillSettingData skill)
@@ -146,6 +125,28 @@ public class SkillSettingParser
         if (GetById(skill.Id) != null) return false;
         _skills.Add(skill);
         return true;
+    }
+
+    public SkillSettingData AppendNextLevel(SkillSettingData selected)
+    {
+        if (!_skills.Contains(selected)) throw new InvalidOperationException("请先选择当前表中的技能。");
+        var family = _skills.Where(skill => skill.Type == selected.Type).ToArray();
+        if (family.GroupBy(skill => skill.Level).Any(group => group.Count() > 1))
+            throw new InvalidDataException("同一 Type 存在重复等级，请先整理后再追加。");
+        if (selected.Level != family.Max(skill => skill.Level) || selected.UpgradeId != 0)
+            throw new InvalidDataException("请选择该技能最高等级且 UpgradeId 为 0 的链尾。");
+        if (_skills.Count(skill => skill.Id == selected.Id) != 1)
+            throw new InvalidDataException("所选技能 Id 重复，不能确定升级来源。");
+        int nextLevel = checked(selected.Level + 1);
+        int nextId = checked(selected.Id + 1);
+        if (GetById(nextId) != null) nextId = GetNextId();
+        var clone = _skillsFile.CloneRecord(selected);
+        clone.Id = nextId;
+        clone.Level = nextLevel;
+        clone.UpgradeId = 0;
+        _skills.Add(clone);
+        selected.UpgradeId = clone.Id;
+        return clone;
     }
 
     public bool RemoveSkill(int id)
@@ -160,14 +161,15 @@ public class SkillSettingParser
     {
         try
         {
-            var json = JsonSerializer.Serialize(_skills, JsonOpts);
-            File.WriteAllText(ConfigPath, json);
-            _stringTable?.Save();
+            AtomicFile.WriteAllWithStringTable(_stringTable,
+                (ConfigPath, _skillsFile.Serialize(ConfigPath, _skills)));
             Debug.WriteLine($"[SkillSettingParser] 保存成功: {ConfigPath}");
+            LastError = null;
             return true;
         }
         catch (Exception ex)
         {
+            LastError = ex.Message;
             Debug.WriteLine($"[SkillSettingParser] 保存失败: {ex.Message}");
             return false;
         }
@@ -175,9 +177,12 @@ public class SkillSettingParser
 
     public void Reload() => LoadAll();
 
-    public static void ClearInstance()
+    public static void ClearInstance(bool preserveChanges = false)
     {
-        lock (_lock) { _instance = null; }
+        lock (_lock)
+        {
+            if (!preserveChanges || _instance?.HasChanges != true) _instance = null;
+        }
     }
 }
 

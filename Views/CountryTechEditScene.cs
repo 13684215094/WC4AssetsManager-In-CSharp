@@ -21,8 +21,17 @@ namespace WC4MapEditor.Views;
 /// 国家科技树编辑场景（对应 Python 工具的 CountryTech 编辑器）。
 /// 列表 + 属性面板完整 CRUD；名称写入 stringtable 的 skill_name_{Id}。
 /// </summary>
-public class CountryTechEditScene : UserControl
+public class CountryTechEditScene : UserControl, IUnsavedScene
 {
+    public bool HasUnsavedChanges => _parser.HasChanges;
+    public bool SaveChanges()
+    {
+        if (_parser.SaveAll()) return true;
+        MessageBox.Show(_parser.LastError ?? "保存失败，修改仍保留。", "保存失败", MessageBoxButton.OK, MessageBoxImage.Error);
+        return false;
+    }
+    public void DiscardChanges() => _parser.Reload();
+
     private readonly MainWindow _window;
     private readonly CountryTechSettingParser _parser = CountryTechSettingParser.Instance;
 
@@ -1065,8 +1074,8 @@ public class CountryTechEditScene : UserControl
         try
         {
             var am = AssetManager.Default;
-            if (!am.IsLoaded) am.ScanDefault();
-            var pngEntry = am.Find("image/image_countrytech_hd.png");
+            if (!am.IsLoaded) return;
+            var pngEntry = am.Find("image/image_countrytech_hd.webp") ?? am.Find("image/image_countrytech_hd.png");
             var xmlEntry = am.Find("image/image_countrytech_hd.xml");
             if (pngEntry == null || xmlEntry == null)
             {
@@ -1081,12 +1090,8 @@ public class CountryTechEditScene : UserControl
                 return;
             }
 
-            var bmp = new BitmapImage();
-            bmp.BeginInit();
-            bmp.CacheOption = BitmapCacheOption.OnLoad;
-            bmp.StreamSource = new MemoryStream(editor.ImageData);
-            bmp.EndInit();
-            bmp.Freeze();
+            using var decoded = WC4MapEditor.Rendering.Imaging.ProjectImageDecoder.Decode(editor.ImageData);
+            var bmp = WC4MapEditor.Views.Assist.SkiaBitmapSource.Create(decoded);
 
             foreach (var obj in editor.Objects)
             {

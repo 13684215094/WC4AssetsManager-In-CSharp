@@ -341,8 +341,8 @@ public sealed class ObjectPropertiesDialog : IDisposable
         if (!ReadInt(_wBox, "宽度", 1, _srcMaxX + 1 - x, out int w, out var e3)) { SetError(e3!); return; }
         if (!ReadInt(_hBox, "高度", 1, _srcMaxY + 1 - y, out int h, out var e4)) { SetError(e4!); return; }
 
-        if (!ReadInt(_refXBox, "Ref X", 0, w, out int rx, out var e5)) { SetError(e5!); return; }
-        if (!ReadInt(_refYBox, "Ref Y", 0, h, out int ry, out var e6)) { SetError(e6!); return; }
+        if (!ReadInt(_refXBox, "Ref X", int.MinValue, int.MaxValue, out int rx, out var e5)) { SetError(e5!); return; }
+        if (!ReadInt(_refYBox, "Ref Y", int.MinValue, int.MaxValue, out int ry, out var e6)) { SetError(e6!); return; }
 
         // 应用到目标对象
         _target.Name = name;

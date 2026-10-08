@@ -1,3 +1,4 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Diagnostics;
 using System.Text;
 
@@ -10,8 +11,11 @@ namespace WC4MapEditor.Core.Config;
 public sealed class StringTableParser
 {
     private readonly Dictionary<string, string> _entries = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _baseline = new(StringComparer.OrdinalIgnoreCase);
     private readonly string _filePath;
     private bool _isDirty;
+    private readonly HashSet<string> _changedKeys = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _deletedKeys = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// 文件路径
@@ -36,9 +40,9 @@ public sealed class StringTableParser
     public StringTableParser(string filePath)
     {
         _filePath = filePath;
-        if (File.Exists(filePath))
+        if (ProjectFile.Exists(filePath))
         {
-            var lines = File.ReadAllLines(filePath);
+            var lines = ProjectFile.ReadAllLines(filePath);
             Parse(lines);
         }
     }
@@ -51,7 +55,7 @@ public sealed class StringTableParser
         _entries.Clear();
         foreach (var rawLine in lines)
         {
-            string line = rawLine.Trim();
+            string line = rawLine.TrimStart('\uFEFF').Trim();
             if (string.IsNullOrEmpty(line)) continue;
             if (line.StartsWith(';') || line.StartsWith('#')) continue;
             if (line.StartsWith('[')) continue;
@@ -64,6 +68,10 @@ public sealed class StringTableParser
             _entries[key] = value;
         }
         _isDirty = false;
+        _baseline.Clear();
+        foreach (var item in _entries) _baseline[item.Key] = item.Value;
+        _changedKeys.Clear();
+        _deletedKeys.Clear();
         Debug.WriteLine($"[StringTableParser] 已解析 {_entries.Count} 个条目");
     }
 
@@ -80,11 +88,16 @@ public sealed class StringTableParser
     /// </summary>
     public void SetValue(string key, string value)
     {
+        if (string.IsNullOrWhiteSpace(key) || key.IndexOfAny(['=', '\r', '\n']) >= 0 || value.IndexOfAny(['\r', '\n']) >= 0)
+            throw new ArgumentException("String table keys and values must fit on one line.");
         if (_entries.TryGetValue(key, out var existing) && existing == value)
             return;
 
         _entries[key] = value;
-        _isDirty = true;
+        if (_baseline.TryGetValue(key, out string? original) && original == value) _changedKeys.Remove(key);
+        else _changedKeys.Add(key);
+        _deletedKeys.Remove(key);
+        _isDirty = _changedKeys.Count > 0 || _deletedKeys.Count > 0;
     }
 
     /// <summary>
@@ -94,7 +107,9 @@ public sealed class StringTableParser
     {
         if (_entries.Remove(key))
         {
-            _isDirty = true;
+            _changedKeys.Remove(key);
+            if (_baseline.ContainsKey(key)) _deletedKeys.Add(key);
+            _isDirty = _changedKeys.Count > 0 || _deletedKeys.Count > 0;
             return true;
         }
         return false;
@@ -196,72 +211,92 @@ public sealed class StringTableParser
     /// <summary>
     /// 保存到文件
     /// </summary>
+    public byte[]? SerializePending()
+    {
+        if (!_isDirty) return null;
+        VerifyPendingKeys();
+        var preparedVersion = new WC4MapEditor.Core.Parsers.FileVersionGuard();
+        preparedVersion.Capture(_filePath);
+        var sb = new StringBuilder();
+        var processed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        byte[] original = ProjectFile.Exists(_filePath) ? ProjectFile.ReadAllBytes(_filePath) : [];
+        bool bom = original.AsSpan().StartsWith(Encoding.UTF8.Preamble);
+        string text = Encoding.UTF8.GetString(original.AsSpan(bom ? Encoding.UTF8.Preamble.Length : 0));
+        string newline = text.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+        // Retain each line's spacing, terminator and BOM so reverting a value restores the source bytes.
+        foreach (System.Text.RegularExpressions.Match match in
+            System.Text.RegularExpressions.Regex.Matches(text, @"[^\r\n]*(?:\r\n|\n|\r|$)"))
+        {
+            if (match.Length == 0) continue;
+            string raw = match.Value.TrimEnd('\r', '\n');
+            string terminator = match.Value[raw.Length..];
+            string line = raw.Trim();
+            int equals = raw.IndexOf('=');
+            if (equals < 0 || line.StartsWith(';') || line.StartsWith('#') || line.StartsWith('['))
+            {
+                sb.Append(match.Value);
+                continue;
+            }
+            string key = raw[..equals].Trim();
+            if (_deletedKeys.Contains(key)) continue;
+            if (_changedKeys.Contains(key))
+            {
+                string previous = raw[(equals + 1)..];
+                int leading = previous.Length - previous.TrimStart().Length;
+                int trailing = previous.Length - previous.TrimEnd().Length;
+                if (leading + trailing > previous.Length) trailing = 0;
+                sb.Append(raw[..(equals + 1)]).Append(previous[..leading]).Append(_entries[key])
+                    .Append(trailing == 0 ? "" : previous[^trailing..]).Append(terminator);
+                processed.Add(key);
+            }
+            else sb.Append(match.Value);
+        }
+        foreach (string key in _changedKeys)
+            if (!processed.Contains(key))
+            {
+                if (sb.Length > 0 && sb[^1] is not ('\r' or '\n')) sb.Append(newline);
+                sb.Append(key).Append('=').Append(_entries[key]).Append(newline);
+            }
+        byte[] content = Encoding.UTF8.GetBytes(sb.ToString());
+        byte[] bytes = bom ? Encoding.UTF8.Preamble.ToArray().Concat(content).ToArray() : content;
+        WC4MapEditor.Core.Parsers.ResourceSaveTracker.Register(bytes, () =>
+        {
+            VerifyPendingKeys();
+            preparedVersion.Verify();
+        }, AcceptSaved);
+        return bytes;
+    }
+
+    private void VerifyPendingKeys()
+    {
+        var latest = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (ProjectFile.Exists(_filePath))
+            foreach (string raw in ProjectFile.ReadAllLines(_filePath))
+            {
+                string line = raw.TrimStart('\uFEFF').Trim();
+                int equals = line.IndexOf('=');
+                if (equals < 0 || line.StartsWith(';') || line.StartsWith('#') || line.StartsWith('[')) continue;
+                latest[line[..equals].Trim()] = line[(equals + 1)..].Trim();
+            }
+        foreach (string key in _changedKeys.Concat(_deletedKeys))
+        {
+            bool wasPresent = _baseline.TryGetValue(key, out string? original);
+            bool isPresent = latest.TryGetValue(key, out string? current);
+            bool samePending = _deletedKeys.Contains(key) ? !isPresent : isPresent && current == _entries[key];
+            if (!samePending && (wasPresent != isPresent || current != original))
+                throw new IOException($"字符串键 {key} 已被其他编辑器修改，请重新加载后再保存：{_filePath}");
+        }
+    }
+
+    public void AcceptSaved(byte[] bytes)
+        => Parse(Encoding.UTF8.GetString(bytes).TrimStart('\uFEFF').Replace("\r\n", "\n").Split('\n'));
+
     public void Save()
     {
-        if (!_isDirty) return;
-
-        var sb = new StringBuilder();
-
-        // 写入所有条目，保持原有顺序（如果有原始文件则保留注释和空行）
-        if (File.Exists(_filePath))
-        {
-            var lines = File.ReadAllLines(_filePath);
-            var processedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-            foreach (var rawLine in lines)
-            {
-                string line = rawLine.Trim();
-
-                // 保留注释和空行
-                if (string.IsNullOrEmpty(line) || line.StartsWith(';') || line.StartsWith('#') || line.StartsWith('['))
-                {
-                    sb.AppendLine(rawLine);
-                    continue;
-                }
-
-                int eqIdx = line.IndexOf('=');
-                if (eqIdx < 0)
-                {
-                    sb.AppendLine(rawLine);
-                    continue;
-                }
-
-                string key = line.Substring(0, eqIdx).Trim();
-
-                // 如果该键在修改后的字典中存在，使用新值
-                if (_entries.TryGetValue(key, out var newValue))
-                {
-                    sb.AppendLine($"{key}={newValue}");
-                    processedKeys.Add(key);
-                }
-                else
-                {
-                    // 键已被删除，跳过
-                }
-            }
-
-            // 添加新增的条目
-            foreach (var kvp in _entries)
-            {
-                if (!processedKeys.Contains(kvp.Key))
-                {
-                    sb.AppendLine($"{kvp.Key}={kvp.Value}");
-                }
-            }
-        }
-        else
-        {
-            // 新文件，直接写入所有条目
-            foreach (var kvp in _entries)
-            {
-                sb.AppendLine($"{kvp.Key}={kvp.Value}");
-            }
-        }
-
-        File.WriteAllText(_filePath, sb.ToString(), Encoding.UTF8);
-        _isDirty = false;
-
-        Debug.WriteLine($"[StringTableParser] 已保存到 {_filePath}");
+        byte[]? bytes = SerializePending();
+        if (bytes == null) return;
+        WC4MapEditor.Core.Parsers.AtomicFile.Write(_filePath, bytes);
+        WC4MapEditor.Core.Assets.AssetManager.Default.InvalidateData();
     }
 
     /// <summary>
@@ -269,10 +304,6 @@ public sealed class StringTableParser
     /// </summary>
     public void Reload()
     {
-        if (File.Exists(_filePath))
-        {
-            var lines = File.ReadAllLines(_filePath);
-            Parse(lines);
-        }
+        Parse(ProjectFile.Exists(_filePath) ? ProjectFile.ReadAllLines(_filePath) : []);
     }
 }

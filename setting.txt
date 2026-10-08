@@ -174,7 +174,7 @@ WeatherList = [(0,"无"),(1,"下雨"),(2,"暴雨"),(3,"下雪")]
 [AI识别]
 AIApiProvider = "DeepSeek"
 AIApiBaseUrl = ""
-AIApiKey = "sk-ecc2df3c3222429ab8433bc1b656794f"
+AIApiKey =
 AIApiModel = "deepseek-chat"
 AIApiTimeout = 60
 

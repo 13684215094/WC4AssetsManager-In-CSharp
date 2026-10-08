@@ -212,16 +212,16 @@ public sealed class TerrainPaintMode : IModeHandler
                 }
             case "create_coast":
                 {
-                    var result = terrain.CreateCoast(null);
-                    context.RecordMultiCellChange("创建海岸线", () => { });
+                    ModifierResult result = default;
+                    context.RecordMultiCellChange("创建海岸线", () => result = terrain.CreateCoast(null));
                     context.NotifyDataModified?.Invoke();
                     context.RaiseStatusMessage?.Invoke(result.Message);
                 }
                 return true;
             case "process_ocean_layer2":
                 {
-                    var result = terrain.ProcessOceanSecondLayer(null);
-                    context.RecordMultiCellChange("处理海洋第二层", () => { });
+                    ModifierResult result = default;
+                    context.RecordMultiCellChange("处理海洋第二层", () => result = terrain.ProcessOceanSecondLayer(null));
                     context.NotifyDataModified?.Invoke();
                     context.RaiseStatusMessage?.Invoke(result.Message);
                 }
@@ -476,8 +476,9 @@ public sealed class TerrainPaintMode : IModeHandler
         if (!_isMovingSelection) return;
 
         var selector = HexSelector.Instance;
-        var result = terrain.ConfirmSelectionMove(_originalSelectedHexes, _moveSelectionOffsetCol, _moveSelectionOffsetRow);
-        context.RecordMultiCellChange("确认选区移动", () => { });
+        ModifierResult result = default;
+        context.RecordMultiCellChange("确认选区移动", () => result = terrain.ConfirmSelectionMove(
+            _originalSelectedHexes, _moveSelectionOffsetCol, _moveSelectionOffsetRow));
         context.NotifyDataModified?.Invoke();
         context.RaiseStatusMessage?.Invoke(result.Message);
 

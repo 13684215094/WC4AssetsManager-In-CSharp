@@ -48,16 +48,16 @@ public static class KeyCodes
     public const int OemComma = 145;
     public const int OemPeriod = 147;
     public const int OemPlus = 141;
-    public const int D1 = 34;
-    public const int D2 = 35;
-    public const int D3 = 36;
-    public const int D4 = 37;
-    public const int D5 = 38;
-    public const int D6 = 39;
-    public const int D7 = 40;
-    public const int D8 = 41;
-    public const int D9 = 42;
-    public const int D0 = 43;
+    public const int D0 = 34;
+    public const int D1 = 35;
+    public const int D2 = 36;
+    public const int D3 = 37;
+    public const int D4 = 38;
+    public const int D5 = 39;
+    public const int D6 = 40;
+    public const int D7 = 41;
+    public const int D8 = 42;
+    public const int D9 = 43;
 }
 
 /// <summary>

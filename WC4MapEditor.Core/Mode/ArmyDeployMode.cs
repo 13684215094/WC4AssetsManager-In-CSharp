@@ -170,7 +170,7 @@ public sealed class ArmyDeployMode : IModeHandler
                                 {
                                     if (b.HasValue) belong.SetBelongByCountryId(c, r, b.Value);
                                 }
-                            });
+                            }, 256L + 128L * army.CopiedArmyGroupCount);
 
                         context.NotifyDataModified?.Invoke();
                         context.RaiseStatusMessage?.Invoke($"已粘贴单位组到 ({col},{row})");
@@ -247,7 +247,7 @@ public sealed class ArmyDeployMode : IModeHandler
                                     {
                                         if (b.HasValue) belong.SetBelongByCountryId(c, r, b.Value);
                                     }
-                                });
+                                }, 256L + 128L * removed.Count);
 
                             context.NotifyDataModified?.Invoke();
                             context.RaiseStatusMessage?.Invoke($"已删除 {removed.Count} 个单位");
@@ -823,7 +823,7 @@ public sealed class ArmyDeployMode : IModeHandler
         var mapData = context.MapData;
         if (mapData == null) return;
 
-        int coord = row * mapData.MapWidth + col;
+        int coord = mapData.ToRecordCoordinate(col, row);
 
         if (coord < 0 || coord > short.MaxValue)
         {

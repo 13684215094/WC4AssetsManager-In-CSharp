@@ -6,10 +6,23 @@ using WC4MapEditor.Core.Parsers.Stage;
 using WC4MapEditor.Core.Parsers.Conquest;
 
 int passed = 0;
+int skipped = 0;
 var failures = new List<string>();
+foreach (string option in new[] { "--filter", "--corpus", "--apk" })
+{
+    int index = Array.IndexOf(args, option);
+    if (index >= 0 && (index + 1 >= args.Length || args[index + 1].StartsWith("--")))
+    {
+        Console.Error.WriteLine($"{option} requires a value.");
+        return 2;
+    }
+}
 void Test(string name, Action action)
 {
+    int filter = Array.IndexOf(args, "--filter");
+    if (filter >= 0 && !name.Contains(args[filter + 1], StringComparison.OrdinalIgnoreCase)) return;
     try { action(); passed++; Console.WriteLine($"PASS {name}"); }
+    catch (TestSkippedException ex) { skipped++; Console.WriteLine($"SKIP {name}: {ex.Message}"); }
     catch (Exception ex) { failures.Add(name); Console.Error.WriteLine($"FAIL {name}: {ex}"); }
 }
 void Equal(byte[] expected, byte[] actual)
@@ -115,12 +128,46 @@ TransformTests.Run(Test);
 CliTests.Run(Test);
 GeneralDataTests.Run(Test);
 AssetAuditTests.Run(Test);
+GameProjectTests.Run(Test);
+IncrementalProjectTests.Run(Test);
+ProjectWorkflowTests.Run(Test);
+JsonTableDocumentTests.Run(Test);
+ApkAndTechTests.Run(Test);
+ProjectSceneTests.Run(Test);
+AuditRegressionTests.Run(Test);
+EditorDataAuditTests.Run(Test);
+ResourceSourceTests.Run(Test);
+GameUiPreviewTests.Run(Test);
+WindowsReviewTests.Run(Test);
+bool rendering = args.Contains("--rendering");
+if (rendering)
+{
+    ProjectRenderingTests.Run(Test);
+    ImageEditorAuditTests.Run(Test);
+    ResourceImageTests.Run(Test);
+    ApkAndTechTests.RunRendering(Test);
+    ResourceSourceTests.RunRendering(Test);
+    GameUiPreviewTests.RunRendering(Test);
+    WindowsReviewTests.RunRendering(Test);
+}
 
 int corpus = Array.IndexOf(args, "--corpus");
 if (corpus >= 0)
 {
     string root = Path.GetFullPath(args[corpus + 1]);
+    GameProjectTests.RunCorpus(Test, root);
+    ProjectWorkflowTests.RunCorpus(Test, root);
+    JsonTableDocumentTests.RunCorpus(Test, root);
+    int apkArgument = Array.IndexOf(args, "--apk");
+    ApkAndTechTests.RunCorpus(Test, root, apkArgument >= 0 ? args[apkArgument + 1] : null, args.Contains("--require-apk"));
+    EditorDataAuditTests.RunCorpus(Test, root);
+    if (rendering) ProjectRenderingTests.RunCorpus(Test, root);
+    if (rendering) ResourceImageTests.RunCorpus(Test, root);
+    if (rendering) ApkAndTechTests.RunRenderingCorpus(Test, root);
+    if (rendering) ResourceSourceTests.RunCorpus(Test, root);
+    if (rendering) GameUiPreviewTests.RunRenderingCorpus(Test, root);
     GeneralDataTests.RunCorpus(Test, root);
+    WindowsReviewTests.RunCorpus(Test, root);
     Test("original BTL corpus lossless roundtrip", () =>
     {
         int count = 0;
@@ -148,5 +195,5 @@ if (corpus >= 0)
         }
     });
 }
-Console.WriteLine($"RESULT: {passed} passed, {failures.Count} failed.");
+Console.WriteLine($"RESULT: {passed} passed, {failures.Count} failed, {skipped} skipped.");
 return failures.Count == 0 ? 0 : 1;

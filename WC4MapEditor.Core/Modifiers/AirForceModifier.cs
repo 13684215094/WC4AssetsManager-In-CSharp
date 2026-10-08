@@ -27,7 +27,7 @@ public sealed class AirForceModifier : ModifierBase
         else
         {
             airForce = AirForce.CreateDefault();
-            airForce.Coordinate = row * _mapData.MapWidth + col;
+            airForce.Coordinate = _mapData.ToRecordCoordinate(col, row);
         }
 
         _mapData.AirForces.Add(airForce);
@@ -191,7 +191,7 @@ public sealed class AirForceModifier : ModifierBase
         {
             if (existingCoords.Contains(building.Coordinate)) continue;
 
-            int belongValue = _mapData.GetBelongValueByIndex(building.Coordinate);
+            int belongValue = _mapData.GetBelongAtRecordCoordinate(building.Coordinate);
             if (belongValue == 0xFF || belongValue < 0) continue;
 
             if (building.AviationLevel <= 0) continue;

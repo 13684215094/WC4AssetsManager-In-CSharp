@@ -1,8 +1,12 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.IO;
 using System.Xml;
 using SkiaSharp;
 using WC4MapEditor.Core.Assets;
 using WC4MapEditor.Core.Parsers.HdAtlas;
+using WC4MapEditor.Rendering.Imaging;
+using WC4MapEditor.Core.Parsers;
+using LayoutPath = System.IO.Path;
 
 namespace WC4MapEditor.Views.Assist;
 
@@ -26,15 +30,18 @@ internal sealed class LayoutImageRec
 internal static class LayoutImageProvider
 {
     private static Dictionary<string, (string Atlas, int X, int Y, int W, int H)>? _index;
+    private static AtlasResourceIndex? _resources;
     private static readonly List<string> _atlasNames = new();
     private static readonly Dictionary<string, SKBitmap?> _pages = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, LayoutImageRec?> _cache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly object _gate = new();
+    private static long _revision = -1;
 
     // ---------- 额外资源（用户导入的文件夹 / 文件） ----------
     private static readonly List<string> _extraRoots = new();
     private static readonly Dictionary<string, (SKBitmap Page, int X, int Y, int W, int H)> _extraAtlas = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, SKBitmap> _extraLoose = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly HashSet<SKBitmap> _extraPages = [];
     private static int _extraAtlasCount, _extraImageCount;
 
     public static IReadOnlyList<string> AtlasNames { get { EnsureIndex(); return _atlasNames; } }
@@ -42,7 +49,7 @@ internal static class LayoutImageProvider
     public static int ExtraAtlasCount => _extraAtlasCount;
     public static int ExtraImageCount => _extraImageCount;
 
-    private static readonly string[] ImageExtensions = { ".png", ".webp", ".jpg", ".jpeg", ".bmp" };
+    private static readonly string[] ImageExtensions = { ".webp", ".png", ".pkm", ".jpg", ".jpeg", ".bmp" };
 
     /// <summary>
     /// 导入一个资源文件夹：扫描顶层 .xml（图集 / 布局）、图片散图，
@@ -53,13 +60,14 @@ internal static class LayoutImageProvider
         var layouts = new List<(string, string)>();
         lock (_gate)
         {
-            if (Directory.Exists(folder) && !_extraRoots.Contains(folder))
+            EnsureIndex();
+            if (ProjectFile.DirectoryExists(folder) && !_extraRoots.Contains(folder))
                 _extraRoots.Add(folder);
 
             foreach (var xml in SafeEnumerateFiles(folder, "*.xml"))
             {
                 string text;
-                try { text = File.ReadAllText(xml); } catch { continue; }
+                try { text = ProjectFile.ReadAllText(xml); } catch { continue; }
                 if (text.Contains("<Texture", StringComparison.OrdinalIgnoreCase) &&
                     (text.Contains("<Image", StringComparison.OrdinalIgnoreCase) ||
                      text.Contains("<SubTexture", StringComparison.OrdinalIgnoreCase)))
@@ -68,7 +76,7 @@ internal static class LayoutImageProvider
                 }
                 else if (text.Contains("<Layouts", StringComparison.OrdinalIgnoreCase))
                 {
-                    var name = IOPath.GetFileName(xml) ?? "";
+                    var name = LayoutPath.GetFileName(xml) ?? "";
                     layouts.Add((name, text));
                 }
             }
@@ -88,25 +96,26 @@ internal static class LayoutImageProvider
         var layouts = new List<(string, string)>();
         lock (_gate)
         {
+            EnsureIndex();
             foreach (var path in paths)
             {
-                if (!File.Exists(path)) continue;
-                var ext = IOPath.GetExtension(path).ToLowerInvariant();
-                var dir = IOPath.GetDirectoryName(path) ?? "";
+                if (!ProjectFile.Exists(path)) continue;
+                var ext = LayoutPath.GetExtension(path).ToLowerInvariant();
+                var dir = LayoutPath.GetDirectoryName(path) ?? "";
                 if (!_extraRoots.Contains(dir)) _extraRoots.Add(dir);
 
                 if (ext == ".xml")
                 {
                     string text;
-                    try { text = File.ReadAllText(path); } catch { continue; }
+                    try { text = ProjectFile.ReadAllText(path); } catch { continue; }
                     if (text.Contains("<Texture", StringComparison.OrdinalIgnoreCase) &&
                         (text.Contains("<Image", StringComparison.OrdinalIgnoreCase) ||
                          text.Contains("<SubTexture", StringComparison.OrdinalIgnoreCase)))
                         RegisterExtraAtlas(path, text, dir);
                     else if (text.Contains("<Layouts", StringComparison.OrdinalIgnoreCase))
-                        layouts.Add((IOPath.GetFileName(path) ?? "", text));
+                        layouts.Add((LayoutPath.GetFileName(path) ?? "", text));
                 }
-                else if (ext is ".png" or ".webp" or ".jpg" or ".jpeg" or ".bmp")
+                else if (ext is ".png" or ".webp" or ".pkm" or ".jpg" or ".jpeg" or ".bmp")
                 {
                     RegisterExtraLoose(path);
                 }
@@ -118,73 +127,60 @@ internal static class LayoutImageProvider
 
     private static void RegisterExtraAtlas(string xmlPath, string text, string imageDir)
     {
-        var baseName = IOPath.GetFileNameWithoutExtension(xmlPath) ?? "";
         SKBitmap? page = null;
-        var stems = new List<string> { baseName };
-        var m = System.Text.RegularExpressions.Regex.Match(
-            text, "<Texture\\b[^>]*\\bname\\s*=\\s*\"([^\"]+)\"",
-            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        if (m.Success)
-        {
-            var tex = m.Groups[1].Value.Replace('\\', '/');
-            var file = tex.Split('/')[^1];
-            int dot = file.LastIndexOf('.');
-            if (dot > 0) file = file[..dot];
-            if (file.Length > 0) stems.Insert(0, file);
-        }
-        foreach (var stem in stems)
-        {
-            foreach (var ext in ImageExtensions)
-            {
-                var p = IOPath.Combine(imageDir, stem + ext);
-                if (File.Exists(p)) { try { page = SKBitmap.Decode(p); } catch { } break; }
-            }
-            if (page != null) break;
-        }
-        if (page == null) return;
-
         try
         {
-            var xmlDoc = new XmlDocument();
-            xmlDoc.LoadXml($"<root>{text}</root>");
-            var nodes = xmlDoc.SelectNodes("//Images/Image") ?? xmlDoc.SelectNodes("//SubTextures/SubTexture");
-            if (nodes == null) return;
-            foreach (XmlNode n in nodes)
+            var document = ResourceXml.ParseFragments(text);
+            string baseName = LayoutPath.GetFileNameWithoutExtension(xmlPath);
+            string texture = (document.SelectSingleNode("//Texture") as XmlElement)?.GetAttribute("name") ?? baseName + ".png";
+            foreach (string extension in ImageExtensions)
             {
-                if (n.Attributes == null) continue;
-                var name = n.Attributes["name"]?.Value ?? "";
-                if (string.IsNullOrEmpty(name)) continue;
-                int x = int.TryParse(n.Attributes["x"]?.Value, out var xv) ? xv : 0;
-                int y = int.TryParse(n.Attributes["y"]?.Value, out var yv) ? yv : 0;
-                int w = int.TryParse(n.Attributes["w"]?.Value ?? n.Attributes["width"]?.Value, out var wv) ? wv : 0;
-                int h = int.TryParse(n.Attributes["h"]?.Value ?? n.Attributes["height"]?.Value, out var hv) ? hv : 0;
-                if (w > 0 && h > 0)
-                {
-                    _extraAtlas[name] = (page, x, y, w, h);
-                    _extraAtlasCount++;
-                }
+                string path = LayoutPath.Combine(imageDir, LayoutPath.ChangeExtension(texture.Replace('\\', '/'), extension));
+                if (!ProjectFile.Exists(path)) continue;
+                page = ProjectImageDecoder.Decode(ProjectFile.ReadAllBytes(path));
+                break;
             }
+            if (page == null) return;
+            var entries = new Dictionary<string, (SKBitmap, int, int, int, int)>(StringComparer.OrdinalIgnoreCase);
+            foreach (XmlElement node in document.SelectNodes("//Images/Image | //SubTexture")!)
+            {
+                string name = node.GetAttribute("name");
+                int Read(string key) => int.TryParse(node.GetAttribute(key), out int value) ? value : 0;
+                int x = Read("x"), y = Read("y");
+                int w = Read(node.HasAttribute("w") ? "w" : "width"), h = Read(node.HasAttribute("h") ? "h" : "height");
+                if (name.Length == 0 || x < 0 || y < 0 || w <= 0 || h <= 0 ||
+                    (long)x + w > page.Width || (long)y + h > page.Height)
+                    throw new InvalidDataException($"额外图集存在无效图块：{name}");
+                entries[name] = (page, x, y, w, h);
+            }
+            if (entries.Count == 0) return;
+            foreach (var entry in entries) _extraAtlas[entry.Key] = entry.Value;
+            _extraAtlasCount = _extraAtlas.Count;
+            _extraPages.Add(page);
+            page = null;
             if (!_atlasNames.Contains(baseName)) _atlasNames.Add(baseName);
         }
-        catch { }
+        catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[LayoutImageProvider] {ex.Message}"); }
+        finally { page?.Dispose(); }
     }
 
     private static void RegisterExtraLoose(string path)
     {
         try
         {
-            var bmp = SKBitmap.Decode(path);
+            var bmp = ProjectImageDecoder.Decode(ProjectFile.ReadAllBytes(path));
             if (bmp == null) return;
-            var name = IOPath.GetFileNameWithoutExtension(path) ?? "";
+            var name = LayoutPath.GetFileNameWithoutExtension(path) ?? "";
+            if (_extraLoose.TryGetValue(name, out var previous)) previous.Dispose();
             _extraLoose[name] = bmp;
-            _extraImageCount++;
+            _extraImageCount = _extraLoose.Count;
         }
         catch { }
     }
 
     private static IEnumerable<string> SafeEnumerateFiles(string dir, string pattern)
     {
-        try { return Directory.EnumerateFiles(dir, pattern, SearchOption.TopDirectoryOnly); }
+        try { return ProjectFile.EnumerateFiles(dir, pattern, SearchOption.TopDirectoryOnly); }
         catch { return Array.Empty<string>(); }
     }
 
@@ -192,37 +188,24 @@ internal static class LayoutImageProvider
     {
         lock (_gate)
         {
+            if (_revision != AssetManager.Default.Revision)
+            {
+                ClearCache();
+                _revision = AssetManager.Default.Revision;
+            }
             if (_index != null) return _index;
 
             var index = new Dictionary<string, (string, int, int, int, int)>(StringComparer.OrdinalIgnoreCase);
             try
             {
                 var manager = AssetManager.Default;
-                if (!manager.IsLoaded)
+
+                var resources = _resources = new AtlasResourceIndex(manager);
+                _atlasNames.AddRange(resources.Atlases);
+                foreach (var (name, tile) in resources.Tiles)
                 {
-                    try { manager.ScanDefault(); } catch { /* ignore */ }
-                }
-
-                foreach (var entry in manager.ListByExtension(".xml"))
-                {
-                    var rel = entry.RelativePath.Replace('\\', '/');
-                    if (rel.Contains('/')) continue; // 只扫 assets 根目录下的图集 xml
-
-                    string text;
-                    try { text = manager.ReadText(entry); }
-                    catch { continue; }
-
-                    if (!text.Contains("<Texture", StringComparison.OrdinalIgnoreCase)) continue;
-                    if (!text.Contains("<Image", StringComparison.OrdinalIgnoreCase) &&
-                        !text.Contains("<SubTexture", StringComparison.OrdinalIgnoreCase)) continue;
-
-                    var baseName = rel.EndsWith(".xml", StringComparison.OrdinalIgnoreCase) ? rel[..^4] : rel;
-                    var parser = HdAtlasParser.Get(baseName);
-                    if (!parser.IsLoaded) continue;
-
-                    _atlasNames.Add(baseName);
-                    foreach (var def in parser.ImageDefinitions)
-                        index[def.Name] = (baseName, def.X, def.Y, def.Width, def.Height);
+                    var def = tile.Definition;
+                    index[name] = (tile.Atlas, def.X, def.Y, def.Width, def.Height);
                 }
             }
             catch { /* 索引失败时退化为空 */ }
@@ -236,13 +219,13 @@ internal static class LayoutImageProvider
     public static LayoutImageRec? Resolve(string? imageRef)
     {
         if (string.IsNullOrWhiteSpace(imageRef)) return null;
-
+        var index = EnsureIndex();
         if (_cache.TryGetValue(imageRef, out var cached)) return cached;
 
         LayoutImageRec? result = null;
 
         var s = imageRef.Replace('\\', '/');
-        var noPrefix = s.StartsWith("image/", StringComparison.OrdinalIgnoreCase) ? s[7..] : s;
+        var noPrefix = s.StartsWith("image/", StringComparison.OrdinalIgnoreCase) ? s[6..] : s;
         var baseName = noPrefix.Split('/')[^1];
         var stem = StripExt(baseName);
 
@@ -258,18 +241,19 @@ internal static class LayoutImageProvider
             goto done;
         }
 
-        var index = EnsureIndex();
-        if (index.TryGetValue(s, out var hit) || index.TryGetValue(noPrefix, out hit) || index.TryGetValue(baseName, out hit))
+        if (_resources?.Resolve(s) is { } tile)
         {
-            var page = GetAtlasPage(hit.Atlas);
-            result = new LayoutImageRec { Page = page, X = hit.X, Y = hit.Y, W = hit.W, H = hit.H };
+            var page = GetAtlasPage(tile.Atlas);
+            var hit = tile.Definition;
+            result = new LayoutImageRec { Page = page, X = hit.X, Y = hit.Y, W = hit.Width, H = hit.Height };
         }
         else
         {
             // 散图回退
             foreach (var ext in ImageExtensions)
             {
-                foreach (var cand in new[] { baseName, stem + ext, "image/" + baseName, "image/" + stem + ext })
+                foreach (var cand in new[] { System.IO.Path.ChangeExtension(s, ext), System.IO.Path.ChangeExtension(noPrefix, ext),
+                    baseName, stem + ext, "image/" + stem + ext })
                 {
                     var file = FindFile(cand);
                     if (file == null) continue;
@@ -304,7 +288,7 @@ internal static class LayoutImageProvider
             if (!string.IsNullOrEmpty(root))
             {
                 var p = System.IO.Path.Combine(root, relativePath.Replace('/', System.IO.Path.DirectorySeparatorChar));
-                if (File.Exists(p)) return p;
+                if (ProjectFile.Exists(p)) return p;
             }
 
             // 额外导入的资源目录
@@ -312,10 +296,10 @@ internal static class LayoutImageProvider
             foreach (var extra in _extraRoots)
             {
                 var p = System.IO.Path.Combine(extra, rel);
-                if (File.Exists(p)) return p;
+                if (ProjectFile.Exists(p)) return p;
                 var fn = System.IO.Path.GetFileName(relativePath);
                 p = System.IO.Path.Combine(extra, fn);
-                if (File.Exists(p)) return p;
+                if (ProjectFile.Exists(p)) return p;
             }
         }
         catch { /* ignore */ }
@@ -333,8 +317,7 @@ internal static class LayoutImageProvider
             var data = parser.SurfaceData;
             if (data != null && data.Length > 0)
             {
-                using var ms = new MemoryStream(data);
-                page = SKBitmap.Decode(ms);
+                page = ProjectImageDecoder.Decode(data);
             }
         }
         catch { page = null; }
@@ -349,8 +332,7 @@ internal static class LayoutImageProvider
         SKBitmap? bmp = null;
         try
         {
-            using var stream = File.OpenRead(path);
-            bmp = SKBitmap.Decode(stream);
+            bmp = ProjectImageDecoder.Decode(ProjectFile.ReadAllBytes(path));
         }
         catch { bmp = null; }
         _pages["file:" + path] = bmp;
@@ -363,6 +345,7 @@ internal static class LayoutImageProvider
         lock (_gate)
         {
             _index = null;
+            _resources = null;
             _atlasNames.Clear();
             foreach (var p in _pages.Values) p?.Dispose();
             _pages.Clear();
@@ -370,6 +353,8 @@ internal static class LayoutImageProvider
             if (clearExtra)
             {
                 foreach (var p in _extraLoose.Values) p.Dispose();
+                foreach (var p in _extraPages) p.Dispose();
+                _extraPages.Clear();
                 _extraLoose.Clear();
                 _extraAtlas.Clear();
                 _extraRoots.Clear();

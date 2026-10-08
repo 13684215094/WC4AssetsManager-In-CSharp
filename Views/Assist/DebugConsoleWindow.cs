@@ -1,3 +1,4 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -119,13 +120,13 @@ public sealed class DebugConsoleWindow : Window
 
         // 加载背景图片
         string bgPath = ConfigManager.Instance.GetConsoleBackgroundPath();
-        if (System.IO.File.Exists(bgPath))
+        if (ProjectFile.Exists(bgPath))
         {
             try
             {
                 var brush = new ImageBrush
                 {
-                    ImageSource = new BitmapImage(new Uri(bgPath, UriKind.Absolute)),
+                    ImageSource = new BitmapImage(new Uri(ProjectFile.ResolveRead(bgPath), UriKind.Absolute)),
                     Stretch = Stretch.UniformToFill,
                     Opacity = 0.6
                 };
@@ -362,7 +363,7 @@ public sealed class DebugConsoleWindow : Window
 
             try
             {
-                var lines = await System.IO.File.ReadAllLinesAsync(file);
+                var lines = await ProjectFile.ReadAllLinesAsync(file);
                 int totalLines = lines.Length;
                 int executedCount = 0;
                 int skippedCount = 0;

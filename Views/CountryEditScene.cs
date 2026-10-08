@@ -1,7 +1,10 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using SkiaSharp;
 using WC4MapEditor.Core.Assets;
 using WC4MapEditor.Core.Models;
@@ -12,8 +15,17 @@ using WC4MapEditor.Rendering.Imaging;
 
 namespace WC4MapEditor.Views;
 
-public class CountryEditScene : UserControl
+public class CountryEditScene : UserControl, IUnsavedScene
 {
+    public bool HasUnsavedChanges => _parser.HasChanges;
+    public bool SaveChanges()
+    {
+        if (_parser.SaveAll()) return true;
+        MessageBox.Show(_parser.LastError ?? "保存失败，修改仍保留。", "保存失败", MessageBoxButton.OK, MessageBoxImage.Error);
+        return false;
+    }
+    public void DiscardChanges() => _parser.Reload();
+
     private readonly MainWindow _window;
     private readonly CountrySettingParser _parser = CountrySettingParser.Instance;
     private readonly IFlagImageService _flagService = new FlagImageService();
@@ -30,6 +42,7 @@ public class CountryEditScene : UserControl
     public CountryEditScene(MainWindow window)
     {
         _window = window;
+        Unloaded += (_, _) => (_flagService as IDisposable)?.Dispose();
         InitializeUI();
         LoadCountries();
         LoadConquers();
@@ -299,10 +312,14 @@ public class CountryEditScene : UserControl
         var realName = _parser.GetCountryRealName(country.Id);
         _detailPanel.Children.Add(CreateEditableInfoBlockWithSync("名称", country.Name,
             v => { country.Name = v; SaveAndReload(country); },
-            () => { if (_parser.SyncRealNameToName(country.Id)) { SaveAndReload(country); SetStatus($"已将真实名称同步为名称: {country.Name}"); } }));
+            () =>
+            {
+                if (_parser.SyncRealNameToName(country.Id)) { LoadCountries(); SetStatus($"已将真实名称同步为名称: {country.Name}"); }
+                else ShowSaveError();
+            }));
         _detailPanel.Children.Add(CreateEditableInfoBlockWithSync("真实名称", realName,
-            v => { if (_parser.SetCountryRealName(country.Id, v)) { ShowCountryDetail(country); SetStatus($"已更新真实名称: {v}"); } },
-            () => { if (_parser.SyncNameToRealName(country.Id)) { ShowCountryDetail(country); SetStatus($"已将名称同步为真实名称: {country.Name}"); } }));
+            v => { if (_parser.SetCountryRealName(country.Id, v)) { ShowCountryDetail(country); SetStatus($"已更新真实名称: {v}"); } else ShowSaveError(); },
+            () => { if (_parser.SyncNameToRealName(country.Id)) { ShowCountryDetail(country); SetStatus($"已将名称同步为真实名称: {country.Name}"); } else ShowSaveError(); }));
         _detailPanel.Children.Add(CreateEditableInfoBlock("阵营", country.Camp.ToString(), v => { if (int.TryParse(v, out var n)) { country.Camp = n; SaveAndReload(country); } }));
         _detailPanel.Children.Add(CreateEditableInfoBlock("步兵模组", country.InfantryMod.ToString(), v => { if (int.TryParse(v, out var n)) { country.InfantryMod = n; SaveAndReload(country); } }));
         _detailPanel.Children.Add(CreateEditableInfoBlock("装甲模组", country.ArmoredMod.ToString(), v => { if (int.TryParse(v, out var n)) { country.ArmoredMod = n; SaveAndReload(country); } }));
@@ -331,13 +348,18 @@ public class CountryEditScene : UserControl
                 _detailPanel.Children.Clear();
                 SetStatus($"已删除国家: [{country.Id}] {country.Name}");
             }
+            else MessageBox.Show(_parser.LastError ?? "删除失败。", "删除失败", MessageBoxButton.OK, MessageBoxImage.Error);
         };
         _detailPanel.Children.Add(deleteBtn);
     }
 
     private void SaveAndReload(CountrySettingData country)
     {
-        _parser.SaveCountries();
+        if (!_parser.SaveCountries())
+        {
+            ShowSaveError();
+            return;
+        }
         LoadCountries();
         SetStatus($"已更新: [{country.Id}] {country.Name}");
         foreach (ListBoxItem item in _countryList.Items)
@@ -348,6 +370,13 @@ public class CountryEditScene : UserControl
                 break;
             }
         }
+    }
+
+    private void ShowSaveError()
+    {
+        string message = _parser.LastError ?? "无法保存或同步，请检查名称与当前资源。";
+        SetStatus($"保存失败，修改仍保留：{message}");
+        MessageBox.Show(message, "保存失败", MessageBoxButton.OK, MessageBoxImage.Error);
     }
 
     private StackPanel CreateEditableInfoBlock(string label, string value, Action<string> onSave)
@@ -502,60 +531,27 @@ public class CountryEditScene : UserControl
 
     private void LoadFlagPreview(int countryId)
     {
+        _flagPreview.Source = null;
         try
         {
-            var flag = _flagService.LoadFlagFromHdAtlas(countryId);
-            if (flag == null)
-                flag = _flagService.LoadBigFlag(countryId);
+            using var flag = _flagService.LoadFlagFromHdAtlas(countryId) ?? _flagService.LoadBigFlag(countryId);
 
             if (flag != null)
             {
                 _flagPreview.Source = SkBitmapToBitmapSource(flag);
-                flag.Dispose();
+                _flagPreview.ToolTip = $"flag_{countryId}.png（来自当前项目图集）";
+            }
+            else
+            {
+                _flagPreview.ToolTip = _flagService.LastError ?? "当前项目未提供该国家旗帜。";
+                SetStatus($"国旗加载失败：{_flagPreview.ToolTip}");
             }
         }
-        catch { }
+        catch (Exception ex) { _flagPreview.ToolTip = ex.Message; SetStatus($"国旗加载失败：{ex.Message}"); }
     }
 
-    private static System.Windows.Media.Imaging.BitmapSource? SkBitmapToBitmapSource(SkiaSharp.SKBitmap bitmap)
-    {
-        try
-        {
-            var info = bitmap.Info;
-            var wb = new System.Windows.Media.Imaging.WriteableBitmap(info.Width, info.Height, 96, 96,
-                System.Windows.Media.PixelFormats.Pbgra32, null);
-            wb.Lock();
-            try
-            {
-                using var pixmap = bitmap.PeekPixels();
-                var srcPtr = pixmap.GetPixels();
-                for (int y = 0; y < info.Height; y++)
-                {
-                    var dstPtr = System.IntPtr.Add(wb.BackBuffer, y * wb.BackBufferStride);
-                    var row = new byte[info.Width * 4];
-                    System.Runtime.InteropServices.Marshal.Copy(System.IntPtr.Add(srcPtr, y * pixmap.RowBytes), row, 0, row.Length);
-                    for (int i = 0; i < row.Length; i += 4)
-                    {
-                        byte r = row[i], g = row[i + 1], b = row[i + 2], a = row[i + 3];
-                        if (a < 255)
-                        {
-                            r = (byte)(r * a / 255); g = (byte)(g * a / 255); b = (byte)(b * a / 255);
-                        }
-                        row[i] = b; row[i + 1] = g; row[i + 2] = r; row[i + 3] = a;
-                    }
-                    System.Runtime.InteropServices.Marshal.Copy(row, 0, dstPtr, row.Length);
-                }
-                wb.AddDirtyRect(new System.Windows.Int32Rect(0, 0, info.Width, info.Height));
-            }
-            finally
-            {
-                wb.Unlock();
-            }
-            wb.Freeze();
-            return wb;
-        }
-        catch { return null; }
-    }
+    private static BitmapSource SkBitmapToBitmapSource(SKBitmap bitmap)
+        => WC4MapEditor.Views.Assist.SkiaBitmapSource.Create(bitmap);
 
     private async void OnAddCountry(object sender, RoutedEventArgs e)
     {
@@ -604,7 +600,7 @@ public class CountryEditScene : UserControl
         }
         else
         {
-            MessageBox.Show("新增国家失败，可能ID已存在", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+            ShowSaveError();
         }
     }
 
@@ -692,9 +688,9 @@ public class CountryEditScene : UserControl
 
         try
         {
-            var bigFlag = _flagService.LoadBigFlag(sourceId.Value);
-            var smallFlag = _flagService.LoadSmallFlag(sourceId.Value);
-            var hdFlag = _flagService.LoadFlagFromHdAtlas(sourceId.Value);
+            using var bigFlag = _flagService.LoadBigFlag(sourceId.Value);
+            using var smallFlag = _flagService.LoadSmallFlag(sourceId.Value);
+            using var hdFlag = _flagService.LoadFlagFromHdAtlas(sourceId.Value);
 
             if (bigFlag == null && smallFlag == null && hdFlag == null)
             {
@@ -702,50 +698,27 @@ public class CountryEditScene : UserControl
                 return;
             }
 
+            var files = new List<(string Path, byte[] Bytes)>();
             if (bigFlag != null || smallFlag != null)
             {
-                var (tacticalImagePath, tacticalXmlPath) = FindTacticalMapFiles();
-                if (!string.IsNullOrEmpty(tacticalImagePath) && !string.IsNullOrEmpty(tacticalXmlPath))
-                {
-                    var tmEditor = new TacticalMapEditor();
-                    if (tmEditor.LoadFromFiles(tacticalImagePath, tacticalXmlPath))
-                    {
-                        var imagesToAdd = new List<(string name, SKBitmap image)>();
-
-                        if (bigFlag != null)
-                            imagesToAdd.Add(($"flag_{targetCountryId}.png", bigFlag.Copy()));
-
-                        if (smallFlag != null)
-                            imagesToAdd.Add(($"f_{targetCountryId:D2}.png", smallFlag.Copy()));
-
-                        var ok = tmEditor.AddImagesAndArrange(imagesToAdd, tacticalImagePath, tacticalXmlPath);
-                        SetStatus(ok ? "TacticalMap添加成功" : "TacticalMap添加失败");
-
-                        foreach (var (_, img) in imagesToAdd)
-                            img.Dispose();
-                    }
-                }
+                var (imagePath, xmlPath) = FindTacticalMapFiles();
+                if (imagePath == null || xmlPath == null) throw new InvalidDataException("战术国旗图集缺少图片或 XML。");
+                var editor = new TacticalMapEditor();
+                if (!editor.LoadFromFiles(imagePath, xmlPath)) throw new InvalidDataException("战术国旗图集加载失败。");
+                var images = new List<(string name, SKBitmap image)>();
+                if (bigFlag != null) images.Add(($"flag_{targetCountryId}.png", bigFlag));
+                if (smallFlag != null) images.Add(($"f_{targetCountryId:D2}.png", smallFlag));
+                files.AddRange(editor.PrepareImagesAndArrange(images, imagePath, xmlPath));
             }
-
             if (hdFlag != null)
             {
-                var (hdImagePath, hdXmlPath) = FindHdAtlasFiles();
-                if (!string.IsNullOrEmpty(hdImagePath) && !string.IsNullOrEmpty(hdXmlPath))
-                {
-                    var hdEditor = new HdAtlasEditor();
-                    if (hdEditor.LoadFromFiles(hdImagePath, hdXmlPath))
-                    {
-                        var hdCopy = hdFlag.Copy();
-                        var ok = hdEditor.AddImageAndSave(targetCountryId, hdCopy, hdImagePath, hdXmlPath);
-                        hdCopy.Dispose();
-                        SetStatus(ok ? "HD图集添加成功" : "HD图集添加失败");
-                    }
-                }
+                var (imagePath, xmlPath) = FindHdAtlasFiles();
+                if (imagePath == null || xmlPath == null) throw new InvalidDataException("HD 国旗图集缺少图片或 XML。");
+                var editor = new TacticalMapEditor();
+                if (!editor.LoadFromFiles(imagePath, xmlPath)) throw new InvalidDataException("HD 国旗图集加载失败。");
+                files.AddRange(editor.PrepareImagesAndArrange([($"flag_{targetCountryId}.png", hdFlag)], imagePath, xmlPath));
             }
-
-            bigFlag?.Dispose();
-            smallFlag?.Dispose();
-            hdFlag?.Dispose();
+            Core.Parsers.AtomicFile.WriteAll(files.ToArray());
 
             _flagService.RefreshCache();
 
@@ -779,12 +752,12 @@ public class CountryEditScene : UserControl
         var dirs = new[] { dir, System.IO.Path.GetDirectoryName(dir) ?? "" };
         foreach (var d in dirs)
         {
-            if (string.IsNullOrEmpty(d) || !System.IO.Directory.Exists(d)) continue;
+            if (string.IsNullOrEmpty(d) || !ProjectFile.DirectoryExists(d)) continue;
             foreach (var ext in new[] { ".png", ".webp" })
             {
                 var imgPath = System.IO.Path.Combine(d, $"tacticalmap{ext}");
                 var xmlPath = System.IO.Path.Combine(d, "tacticalmap.xml");
-                if (System.IO.File.Exists(imgPath) && System.IO.File.Exists(xmlPath))
+                if (ProjectFile.Exists(imgPath) && ProjectFile.Exists(xmlPath))
                     return (imgPath, xmlPath);
             }
         }
@@ -796,14 +769,14 @@ public class CountryEditScene : UserControl
         var hdImg = _parser.FlagsHdImagePath;
         var hdXml = _parser.FlagsHdXmlPath;
 
-        if (!string.IsNullOrEmpty(hdImg) && !string.IsNullOrEmpty(hdXml) && System.IO.File.Exists(hdImg) && System.IO.File.Exists(hdXml))
+        if (!string.IsNullOrEmpty(hdImg) && !string.IsNullOrEmpty(hdXml) && ProjectFile.Exists(hdImg) && ProjectFile.Exists(hdXml))
             return (hdImg, hdXml);
 
-        if (!string.IsNullOrEmpty(hdXml) && System.IO.File.Exists(hdXml))
+        if (!string.IsNullOrEmpty(hdXml) && ProjectFile.Exists(hdXml))
         {
             var dir = System.IO.Path.GetDirectoryName(hdImg) ?? "";
             var pngPath = System.IO.Path.Combine(dir, "image_flags_hd.png");
-            if (System.IO.File.Exists(pngPath)) return (pngPath, hdXml);
+            if (ProjectFile.Exists(pngPath)) return (pngPath, hdXml);
         }
         return (null, null);
     }

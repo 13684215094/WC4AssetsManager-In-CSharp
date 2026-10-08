@@ -1,3 +1,4 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -14,13 +15,37 @@ using WC4MapEditor.Views.Dialogs;
 namespace WC4MapEditor.Views;
 
 /// <summary>
-/// 布局编辑器场景（还原 source/layout_布局编辑器.html）：
+/// 布局编辑器场景：
 /// 宽松解析布局 XML → 复刻 WC4 布局引擎求解 → Skia 画布可视化；
 /// 左侧表单列表、右侧控件树 + 属性面板 + 精灵图库，支持拖拽移动/手柄缩放/属性编辑/导入导出。
 /// </summary>
-public partial class LayoutEditScene : UserControl
+public partial class LayoutEditScene : UserControl, IUnsavedScene
 {
+    private string _savedLayout = "";
+    private string? _layoutPath;
+    private readonly WC4MapEditor.Core.Parsers.FileVersionGuard _layoutVersion = new();
+    public bool HasUnsavedChanges => _doc.Dump() != _savedLayout;
+    public bool SaveChanges()
+    {
+        if (_layoutPath == null) { OnExportXml(this, new RoutedEventArgs()); return !HasUnsavedChanges; }
+        try { SaveLayout(_layoutPath); return true; }
+        catch (Exception ex) { MessageBox.Show(ex.Message, "保存失败", MessageBoxButton.OK, MessageBoxImage.Error); return false; }
+    }
+    public void DiscardChanges() => _doc.Load(_savedLayout, _doc.SourceName ?? "layout.xml");
+
+    private void SaveLayout(string path)
+    {
+        _project?.ValidateOutputPath(path);
+        if (_layoutPath != null) _layoutVersion.Verify();
+        if (_layoutPath != null && IOPath.GetFullPath(path).Equals(IOPath.GetFullPath(_layoutPath),
+            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal) && !HasUnsavedChanges) return;
+        WC4MapEditor.Core.Parsers.AtomicFile.Write(path, System.Text.Encoding.UTF8.GetBytes(_doc.Dump()));
+        _savedLayout = _doc.Dump();
+        _layoutPath = path;
+        _layoutVersion.Capture(path);
+    }
     private readonly MainWindow _window;
+    private readonly GameProjectWorkspace? _project;
     private readonly LayoutDocument _doc = new();
     private readonly LayoutEngine.Context _ctx = new();
 
@@ -89,9 +114,11 @@ public partial class LayoutEditScene : UserControl
         "pressedimage", "disabledimage", "checkedimage", "uncheckedimage", "barimage", "thumbimage"
     };
 
-    public LayoutEditScene(MainWindow window)
+    public LayoutEditScene(MainWindow window, string? preferredForm = null, string? preferredLayout = null)
     {
         _window = window;
+        _project = window.Projects.Current;
+        _savedLayout = _doc.Dump();
         Background = new SolidColorBrush(Color.FromRgb(0x1E, 0x1E, 0x1E));
 
         _ctx.ImageSize = r =>
@@ -110,6 +137,17 @@ public partial class LayoutEditScene : UserControl
         BuildUI();
         DiscoverLayouts();
         LoadPreferredLayout();
+        int layoutIndex = preferredLayout == null ? -1 : _layouts.FindIndex(layout => layout.Name.Equals(preferredLayout, StringComparison.OrdinalIgnoreCase));
+        if (layoutIndex >= 0)
+        {
+            _layoutCombo.SelectedIndex = layoutIndex;
+            LoadLayoutText(_layouts[layoutIndex].Text, _layouts[layoutIndex].Name);
+        }
+        if (preferredForm != null && _doc.Forms.FirstOrDefault(form => form.Get("id") == preferredForm) is { } selectedForm)
+        {
+            SelectForm(selectedForm);
+            RefreshFormList();
+        }
 
         Loaded += (_, _) => Dispatcher.BeginInvoke(() =>
         {
@@ -562,7 +600,7 @@ public partial class LayoutEditScene : UserControl
         try
         {
             var manager = AssetManager.Default;
-            if (!manager.IsLoaded) { try { manager.ScanDefault(); } catch { } }
+            if (!manager.IsLoaded) return;
             foreach (var entry in manager.ListByExtension(".xml"))
             {
                 var name = entry.RelativePath.Replace('\\', '/');
@@ -608,10 +646,14 @@ public partial class LayoutEditScene : UserControl
 
     private void LoadLayoutText(string text, string name)
     {
+        if (!_window.ConfirmUnsavedDocument(this, "加载另一布局")) return;
         try
         {
             _doc.Load(text, name);
             _doc.BuildExpansion();
+            _savedLayout = _doc.Dump();
+            _layoutPath = AssetManager.Default.Find(name)?.FullPath;
+            if (_layoutPath != null) _layoutVersion.Capture(_layoutPath);
             _form = _doc.Forms.FirstOrDefault(f => f.Get("id") == "form_main") ?? _doc.Forms.FirstOrDefault();
             _selected = null;
             _hover = null;
@@ -631,7 +673,7 @@ public partial class LayoutEditScene : UserControl
     {
         var dlg = new OpenFileDialog { Filter = "布局 XML|*.xml|所有文件|*.*", Title = "导入布局 XML" };
         if (dlg.ShowDialog() != true) return;
-        var text = File.ReadAllText(dlg.FileName);
+        var text = ProjectFile.ReadAllText(dlg.FileName);
         var name = IOPath.GetFileName(dlg.FileName);
         if (!_layouts.Any(l => l.Name == name)) _layouts.Add((name, text));
         _layoutCombo.Items.Clear();
@@ -660,7 +702,7 @@ public partial class LayoutEditScene : UserControl
 
     private void IngestResources(string[] paths)
     {
-        var layouts = paths.Length == 1 && Directory.Exists(paths[0])
+        var layouts = paths.Length == 1 && ProjectFile.DirectoryExists(paths[0])
             ? LayoutImageProvider.IngestFolder(paths[0])
             : LayoutImageProvider.IngestFiles(paths);
 
@@ -696,12 +738,14 @@ public partial class LayoutEditScene : UserControl
         {
             Filter = "布局 XML|*.xml",
             FileName = _doc.SourceName ?? "layout.xml",
-            Title = "导出布局 XML"
+            Title = "导出布局 XML",
+            InitialDirectory = _project?.AssetsRoot ?? Environment.CurrentDirectory
         };
         if (dlg.ShowDialog() != true) return;
         try
         {
-            File.WriteAllText(dlg.FileName, _doc.Dump(), new System.Text.UTF8Encoding(false));
+            _project?.ValidateOutputPath(dlg.FileName);
+            SaveLayout(dlg.FileName);
             SetStatus($"已导出 {IOPath.GetFileName(dlg.FileName)}");
         }
         catch (Exception ex)
@@ -721,6 +765,7 @@ public partial class LayoutEditScene : UserControl
         if (dlg.ShowDialog() != true) return;
         try
         {
+            _project?.ValidateOutputPath(dlg.FileName);
             int w = (int)Math.Max(1, Math.Round(_worldW));
             int h = (int)Math.Max(1, Math.Round(_worldH));
             var info = new SKImageInfo(w, h, SKColorType.Rgba8888, SKAlphaType.Premul);
@@ -730,7 +775,8 @@ public partial class LayoutEditScene : UserControl
             DrawScene(canvas, overlay: true);
             using var image = surface.Snapshot();
             using var data = image.Encode(SKEncodedImageFormat.Png, 100);
-            if (data != null) File.WriteAllBytes(dlg.FileName, data.ToArray());
+            if (data == null) throw new InvalidOperationException("图片编码失败。");
+            WC4MapEditor.Core.Parsers.AtomicFile.Write(dlg.FileName, data.ToArray());
             SetStatus($"已导出 {IOPath.GetFileName(dlg.FileName)}（{w}×{h}）");
         }
         catch (Exception ex)

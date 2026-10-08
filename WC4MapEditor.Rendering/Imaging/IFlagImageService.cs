@@ -4,6 +4,7 @@ namespace WC4MapEditor.Rendering.Imaging;
 
 public interface IFlagImageService
 {
+    string? LastError { get; }
     SKBitmap? LoadFlagFromTacticalMap(string flagName);
     SKBitmap? LoadFlagFromHdAtlas(int countryId);
     SKBitmap? LoadFlagFromFile(string path);

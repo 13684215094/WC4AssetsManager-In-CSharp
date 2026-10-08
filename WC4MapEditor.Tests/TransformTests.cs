@@ -144,7 +144,7 @@ static class TransformTests
             var map = Fixture(1);
             var first = new MapResizeCommand(map, "first");
             first.CaptureAfterState();
-            var history = new UndoManager(maxResizeSnapshotBytes: first.SnapshotBytes);
+            var history = new UndoManager(maxResizeSnapshotBytes: first.EstimatedBytes);
             history.Record(first);
             var second = new MapResizeCommand(map, "second");
             second.CaptureAfterState();

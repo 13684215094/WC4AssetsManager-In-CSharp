@@ -1,10 +1,9 @@
 using System.Diagnostics;
-using System.IO;
 using SkiaSharp;
-using WC4MapEditor.Core.Config;
+using WC4MapEditor.Core.Assets;
+using WC4MapEditor.Rendering.Imaging;
 using WC4MapEditor.Core.Models;
 using WC4MapEditor.Rendering.Helpers;
-using IOPath = System.IO.Path;
 
 namespace WC4MapEditor.Rendering.Skia;
 
@@ -45,6 +44,9 @@ public class BackGroundRender : IDisposable
     private SKShader? _seaShader;
     private SKShader? _landShader;
     private SKImage? _landImage;
+    private long _resourceRevision = -1;
+    private MapData? _coastMap;
+    private bool _disposed;
 
     private readonly Dictionary<float, SKPath> _hexPathCache = new();
 
@@ -211,29 +213,14 @@ public class BackGroundRender : IDisposable
     {
         try
         {
-            var configManager = ConfigManager.Instance;
-            configManager.Initialize();
-            string texturePath = configManager.GetTexturePath("MapTerrian");
-            string seaPath = IOPath.Combine(texturePath, "MapSea.png");
-            string landPath = IOPath.Combine(texturePath, "MapLand.png");
-
-            if (File.Exists(seaPath))
+            _seaTexture = ProjectTextureLoader.Load("map_sea@2x");
+            if (_seaTexture != null)
+                _seaShader = SKShader.CreateBitmap(_seaTexture, SKShaderTileMode.Repeat, SKShaderTileMode.Repeat);
+            _landTexture = ProjectTextureLoader.Load("map_land@2x");
+            if (_landTexture != null)
             {
-                _seaTexture = SKBitmap.Decode(seaPath);
-                if (_seaTexture != null)
-                    _seaShader = SKShader.CreateBitmap(_seaTexture, SKShaderTileMode.Repeat, SKShaderTileMode.Repeat);
-            }
-            if (File.Exists(landPath))
-            {
-                _landTexture = SKBitmap.Decode(landPath);
-                if (_landTexture != null)
-                    _landShader = SKShader.CreateBitmap(_landTexture, SKShaderTileMode.Repeat, SKShaderTileMode.Repeat);
-                try
-                {
-                    using var fs = File.OpenRead(landPath);
-                    _landImage = SKImage.FromEncodedData(fs);
-                }
-                catch { _landImage = null; }
+                _landShader = SKShader.CreateBitmap(_landTexture, SKShaderTileMode.Repeat, SKShaderTileMode.Repeat);
+                _landImage = SKImage.FromBitmap(_landTexture);
             }
         }
         catch (Exception ex)
@@ -246,17 +233,16 @@ public class BackGroundRender : IDisposable
     {
         try
         {
-            _coastHelper = CoastHelper.Instance;
-            _coastMaskProcessor = CoastMaskProcessor.Instance;
-
-            if (!_coastMaskProcessor.IsInitialized)
-                _coastMaskProcessor.Initialize(_coastHelper);
+            _coastHelper = new CoastHelper();
+            _coastMaskProcessor = new CoastMaskProcessor();
+            _coastMaskProcessor.Initialize(_coastHelper);
+            _resourceRevision = AssetManager.Default.Revision;
 
             // 缓存命中时无需预生成六边形图块：
             // 六边形图块（_hexagonCoastCache）仅被「最终图集构建」使用，而缓存已提供等价产物
             if (_coastMaskProcessor.LoadedFromDiskCache || _coastMaskProcessor.HasFinalAtlas) return;
 
-            Task.Run(() => _coastHelper.PreGenerateAllHexagonCoasts(null));
+            // Tiles are extracted on demand; no background task outlives the project resources.
         }
         catch (Exception ex)
         {
@@ -264,12 +250,44 @@ public class BackGroundRender : IDisposable
         }
     }
 
+    private void RefreshProjectResources()
+    {
+        if (_resourceRevision == AssetManager.Default.Revision) return;
+        _coastMaskProcessor?.DisposeAll();
+        _coastHelper?.Dispose();
+        _landImage?.Dispose(); _landImage = null;
+        _seaPaint!.Shader = null;
+        _landPaint!.Shader = null;
+        _seaShader?.Dispose(); _seaShader = null;
+        _landShader?.Dispose(); _landShader = null;
+        _seaTexture?.Dispose(); _seaTexture = null;
+        _landTexture?.Dispose(); _landTexture = null;
+        LoadTextures();
+        _seaPaint.Color = DEFAULT_SEA_COLOR;
+        _landPaint.Color = DEFAULT_LAND_COLOR;
+        _seaPaint.Shader = _seaShader;
+        _landPaint.Shader = _landShader;
+        InitializeCoastRender();
+        _resourceRevision = AssetManager.Default.Revision;
+        InvalidateCache();
+    }
+
+    private int _hexColumnOffset;
+
     public void Render(SKCanvas canvas, MapData? mapData)
     {
         if (canvas == null || ViewportWidth <= 0 || ViewportHeight <= 0) return;
+        RefreshProjectResources();
 
         if (mapData != null)
         {
+            if (!ReferenceEquals(_coastMap, mapData))
+            {
+                _coastMap = mapData;
+                _coastDecorationArray = null;
+                InvalidateCache();
+            }
+            _hexColumnOffset = mapData.HexColumnOffset;
             MapWidth = mapData.MapWidth;
             MapHeight = mapData.MapHeight;
             if (_coastDecorationArray == null && MapWidth > 0 && MapHeight > 0)
@@ -293,7 +311,9 @@ public class BackGroundRender : IDisposable
         double zoomLevel, int width, int height, bool showLayer2 = false, bool showGridLines = false)
     {
         if (canvas == null || mapData == null || width <= 0 || height <= 0) return;
+        RefreshProjectResources();
 
+        _hexColumnOffset = mapData.HexColumnOffset;
         MapWidth = mapData.MapWidth;
         MapHeight = mapData.MapHeight;
 
@@ -315,6 +335,7 @@ public class BackGroundRender : IDisposable
     // so off-screen renders (screenshots) are never missing coastline decorations.
     public void PrepareCoastComposition()
     {
+        RefreshProjectResources();
         if (_coastHelper == null || _coastMaskProcessor == null) return;
 
         if (!_coastMaskProcessor.IsInitialized)
@@ -334,6 +355,7 @@ public class BackGroundRender : IDisposable
     // background precomputation task completing first.
     public void PrecomputeCoastDecorations(MapData mapData)
     {
+        _coastMap = mapData;
         int mapWidth = mapData.MapWidth;
         int mapHeight = mapData.MapHeight;
         if (mapWidth <= 0 || mapHeight <= 0) return;
@@ -353,8 +375,7 @@ public class BackGroundRender : IDisposable
             }
         }
 
-        lock (_arraySwapLock)
-            _coastDecorationArray = newArray;
+        lock (_arraySwapLock) _coastDecorationArray = newArray;
     }
 
     private void RenderFallbackBackground(SKCanvas canvas)
@@ -384,7 +405,7 @@ public class BackGroundRender : IDisposable
         for (int col = startCol; col <= endCol; col++)
         {
             double centerX = offsetX + col * hexSpacingX;
-            double rowOffsetY = offsetY + (col % 2) * (hexSpacingY / 2);
+            double rowOffsetY = offsetY + ((col + _hexColumnOffset) & 1) * (hexSpacingY / 2);
             for (int row = startRow; row <= endRow; row++)
             {
                 double centerY = rowOffsetY + row * hexSpacingY;
@@ -599,7 +620,7 @@ public class BackGroundRender : IDisposable
         for (int col = startCol; col <= endCol; col++)
         {
             double centerX = offsetX + col * hexSpacingX;
-            double rowOffsetY = offsetY + (col % 2) * (hexSpacingY / 2);
+            double rowOffsetY = offsetY + ((col + _hexColumnOffset) & 1) * (hexSpacingY / 2);
             for (int row = startRow; row <= endRow; row++)
             {
                 double centerY = rowOffsetY + row * hexSpacingY;
@@ -670,7 +691,7 @@ public class BackGroundRender : IDisposable
         for (int col = startCol; col <= endCol; col++)
         {
             double centerX = offsetX + col * hexSpacingX;
-            double rowOffsetY = offsetY + (col % 2) * (hexSpacingY / 2);
+            double rowOffsetY = offsetY + ((col + _hexColumnOffset) & 1) * (hexSpacingY / 2);
             for (int row = startRow; row <= endRow; row++)
             {
                 double centerY = rowOffsetY + row * hexSpacingY;
@@ -739,7 +760,7 @@ public class BackGroundRender : IDisposable
                 if (decorationType < 11 || decorationType > 73) continue;
 
                 double centerX = offsetX + col * hexSpacingX;
-                double rowOffsetY = offsetY + (col % 2) * (hexSpacingY / 2);
+                double rowOffsetY = offsetY + ((col + _hexColumnOffset) & 1) * (hexSpacingY / 2);
                 double centerY = rowOffsetY + row * hexSpacingY;
 
                 var spriteName = _coastHelper?.GetCoastSpriteName(COAST_TILE_TYPE, decorationType);
@@ -793,7 +814,7 @@ public class BackGroundRender : IDisposable
                 if (decorationType < 11 || decorationType > 73) continue;
 
                 double centerX = offsetX + col * hexSpacingX;
-                double rowOffsetY = offsetY + (col % 2) * (hexSpacingY / 2);
+                double rowOffsetY = offsetY + ((col + _hexColumnOffset) & 1) * (hexSpacingY / 2);
                 double centerY = rowOffsetY + row * hexSpacingY;
 
                 var coastImage = _coastHelper?.GetCoastImageByDoodad(COAST_TILE_TYPE, decorationType);
@@ -895,8 +916,11 @@ public class BackGroundRender : IDisposable
             }
         }
 
-        lock (_arraySwapLock)
-            _coastDecorationArray = newArray;
+        lock (_coastTaskLock)
+        {
+            if (_disposed || token.IsCancellationRequested) return;
+            lock (_arraySwapLock) _coastDecorationArray = newArray;
+        }
 
         Debug.WriteLine($"[Coast] 预计算完成！海岸线格子 {calculatedCount}");
         CoastCacheUpdated?.Invoke();
@@ -1074,7 +1098,7 @@ public class BackGroundRender : IDisposable
             for (int col = startCol; col <= endCol; col++)
             {
                 double centerX = offsetX + col * hexSpacingX;
-                double rowOffsetY = offsetY + (col % 2) * (hexSpacingY / 2);
+                double rowOffsetY = offsetY + ((col + _hexColumnOffset) & 1) * (hexSpacingY / 2);
 
                 for (int row = startRow; row <= endRow; row++)
                 {
@@ -1122,6 +1146,12 @@ public class BackGroundRender : IDisposable
 
     public void Dispose()
     {
+        _disposed = true;
+        lock (_coastTaskLock) _coastCalculationCts?.Cancel();
+        _coastMaskProcessor?.DisposeAll();
+        _coastHelper?.Dispose();
+        _landImage?.Dispose();
+        _textFont?.Dispose();
         _seaPaint?.Dispose(); _landPaint?.Dispose(); _gridPaint?.Dispose();
         _textPaint?.Dispose(); _riverPaint?.Dispose(); _seaTexture?.Dispose();
         _landTexture?.Dispose(); _seaShader?.Dispose(); _landShader?.Dispose();

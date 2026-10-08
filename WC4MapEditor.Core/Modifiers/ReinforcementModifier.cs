@@ -22,7 +22,7 @@ public sealed class ReinforcementModifier : ModifierBase
         if (!IsValidCoord(col, row)) return ModifierResult.Fail("坐标超出范围");
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
 
-        int coordIndex = row * _mapData.MapWidth + col;
+        int coordIndex = _mapData.ToRecordCoordinate(col, row);
 
         Reinforcement reinforcement;
         if (parameter is Reinforcement r)
@@ -80,7 +80,7 @@ public sealed class ReinforcementModifier : ModifierBase
         if (!IsValidCoord(col, row) || _mapData == null) return false;
         if (data is not Reinforcement reinforcement) return false;
 
-        reinforcement.Coordinate = row * _mapData.MapWidth + col;
+        reinforcement.Coordinate = _mapData.ToRecordCoordinate(col, row);
         int idx = _mapData.FindReinforcementIndex(col, row);
         if (idx >= 0)
             _mapData.ReplaceReinforcement(idx, reinforcement);
@@ -141,7 +141,7 @@ public sealed class ReinforcementModifier : ModifierBase
     {
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
 
-        var coord = HexCoord.FromIndex(reinforcement.Coordinate, _mapData.MapWidth);
+        var coord = _mapData.ToLocalCoordinate(reinforcement.Coordinate);
         int idx = _mapData.FindReinforcementIndex(coord.Col, coord.Row);
         if (idx >= 0)
             _mapData.ReplaceReinforcement(idx, reinforcement);
@@ -189,18 +189,18 @@ public sealed class ReinforcementModifier : ModifierBase
         {
             for (int col = 0; col < _mapData.MapWidth; col++)
             {
-                int hexIndex = row * _mapData.MapWidth + col;
+                int recordCoordinate = _mapData.ToRecordCoordinate(col, row);
                 int cellBelong = _mapData.GetBelongValue(col, row);
 
                 if (cellBelong != belongValue) continue;
-                if (existingCoords.Contains(hexIndex)) continue;
+                if (existingCoords.Contains(recordCoordinate)) continue;
 
                 var reinforcement = Reinforcement.CreateDefault();
-                reinforcement.Coordinate = hexIndex;
+                reinforcement.Coordinate = _mapData.ToRecordCoordinate(col, row);
                 reinforcement.OwnerCountry = belongValue;
 
                 _mapData.Reinforcements.Add(reinforcement);
-                existingCoords.Add(hexIndex);
+                existingCoords.Add(recordCoordinate);
                 addedCount++;
             }
         }
@@ -279,20 +279,20 @@ public sealed class ReinforcementModifier : ModifierBase
             {
                 if (_random.Next(0, 100) >= probability) continue;
 
-                int hexIndex = row * _mapData.MapWidth + col;
+                int recordCoordinate = _mapData.ToRecordCoordinate(col, row);
                 int cellBelong = _mapData.GetBelongValue(col, row);
 
                 if (belongValue != -1 && cellBelong != belongValue) continue;
-                if (existingCoords.Contains(hexIndex)) continue;
+                if (existingCoords.Contains(recordCoordinate)) continue;
 
                 var reinforcement = Reinforcement.CreateDefault();
-                reinforcement.Coordinate = hexIndex;
+                reinforcement.Coordinate = _mapData.ToRecordCoordinate(col, row);
                 reinforcement.OwnerCountry = cellBelong;
                 reinforcement.Level = (byte)_random.Next(1, 6);
                 reinforcement.Organization = (byte)_random.Next(1, 11);
 
                 _mapData.Reinforcements.Add(reinforcement);
-                existingCoords.Add(hexIndex);
+                existingCoords.Add(recordCoordinate);
                 generatedCount++;
             }
         }

@@ -52,7 +52,7 @@ public sealed class MapScriptApi : IMapScriptApi
         for (int i = 0; i < _mapData.Buildings.Count; i++)
         {
             var building = _mapData.Buildings[i];
-            if (building.Coordinate == row * _mapData.MapWidth + col)
+            if (building.Coordinate == _mapData.ToRecordCoordinate(col, row))
                 return ToInfo(building);
         }
         return null;
@@ -69,7 +69,7 @@ public sealed class MapScriptApi : IMapScriptApi
         var modifier = _modeManager.GetModifier<BuildingModifier>();
         if (modifier == null) return ScriptOperationResult.Fail("建筑修改器不可用");
 
-        int index = row * _mapData.MapWidth + col;
+        int index = _mapData.ToRecordCoordinate(col, row);
         var building = Building.CreateDefault(index);
         building.BuildingType = (byte)buildingType;
         building.Name = BuildingNameResolver.Resolve(name);
@@ -139,8 +139,8 @@ public sealed class MapScriptApi : IMapScriptApi
 
     private ScriptBuildingInfo ToInfo(Building building)
     {
-        int col = _mapData.MapWidth > 0 ? building.Coordinate % _mapData.MapWidth : 0;
-        int row = _mapData.MapWidth > 0 ? building.Coordinate / _mapData.MapWidth : 0;
+        int col = _mapData.ToLocalCoordinate(building.Coordinate).Col;
+        int row = _mapData.ToLocalCoordinate(building.Coordinate).Row;
 
         int nameId = building.Name;
         bool hasName = nameId != 0 && nameId != BuildingNameResolver.NoName;

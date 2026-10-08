@@ -150,7 +150,7 @@ public sealed class MapCaseModifier : ModifierBase
         for (int i = 0; i < _mapData.Armies.Count; i++)
         {
             var army = _mapData.Armies[i];
-            int armyBelong = _mapData.GetBelongValueByIndex(army.Coordinate);
+            int armyBelong = _mapData.GetBelongAtRecordCoordinate(army.Coordinate);
             if (belongValue != -1 && armyBelong != belongValue) continue;
 
             army.Plan = (byte)Math.Clamp(policyValue, 0, 255);
@@ -161,7 +161,7 @@ public sealed class MapCaseModifier : ModifierBase
         for (int i = 0; i < _mapData.ArmiesV3.Count; i++)
         {
             var army = _mapData.ArmiesV3[i];
-            int armyBelong = _mapData.GetBelongValueByIndex(army.Coordinate);
+            int armyBelong = _mapData.GetBelongAtRecordCoordinate(army.Coordinate);
             if (belongValue != -1 && armyBelong != belongValue) continue;
 
             army.Plan = (byte)Math.Clamp(policyValue, 0, 255);
@@ -182,7 +182,7 @@ public sealed class MapCaseModifier : ModifierBase
         for (int i = 0; i < _mapData.Armies.Count; i++)
         {
             var army = _mapData.Armies[i];
-            int armyBelong = _mapData.GetBelongValueByIndex(army.Coordinate);
+            int armyBelong = _mapData.GetBelongAtRecordCoordinate(army.Coordinate);
             if (belongValue != -1 && armyBelong != belongValue) continue;
 
             army.Plan = (byte)_random.Next(0, 256);
@@ -193,7 +193,7 @@ public sealed class MapCaseModifier : ModifierBase
         for (int i = 0; i < _mapData.ArmiesV3.Count; i++)
         {
             var army = _mapData.ArmiesV3[i];
-            int armyBelong = _mapData.GetBelongValueByIndex(army.Coordinate);
+            int armyBelong = _mapData.GetBelongAtRecordCoordinate(army.Coordinate);
             if (belongValue != -1 && armyBelong != belongValue) continue;
 
             army.Plan = (byte)_random.Next(0, 256);

@@ -3,6 +3,8 @@ using System.IO;
 using SkiaSharp;
 using WC4MapEditor.Core.Config;
 using WC4MapEditor.Core.Parsers;
+using WC4MapEditor.Core.Assets;
+using WC4MapEditor.Rendering.Imaging;
 
 namespace WC4MapEditor.Rendering.Skia;
 
@@ -33,16 +35,19 @@ public sealed class TacticalMapImageCache : IDisposable
 
     private bool _initialized;
     private bool _disposed;
+    private long _revision = -1;
 
-    public bool IsInitialized => _initialized;
+    public bool IsInitialized => _initialized && _revision == AssetManager.Default.Revision;
 
     public void Initialize()
     {
-        if (_initialized) return;
+        if (IsInitialized) return;
 
         lock (_lock)
         {
-            if (_initialized) return;
+            if (IsInitialized) return;
+            ClearCache();
+            _revision = AssetManager.Default.Revision;
 
             var parser = ConfigManager.Instance.TacticalMapParser;
             if (parser == null)
@@ -62,8 +67,7 @@ public sealed class TacticalMapImageCache : IDisposable
             {
                 var sw = Stopwatch.StartNew();
 
-                using var stream = new MemoryStream(surfaceData);
-                using var atlasBitmap = SKBitmap.Decode(stream);
+                using var atlasBitmap = ProjectImageDecoder.Decode(surfaceData);
                 if (atlasBitmap == null)
                 {
                     Debug.WriteLine("[TacticalMapImageCache] 解码图集失败");
@@ -89,10 +93,9 @@ public sealed class TacticalMapImageCache : IDisposable
 
                     int x = def.X;
                     int y = def.Y;
-                    int w = Math.Min(def.Width, atlasImage.Width - x);
-                    int h = Math.Min(def.Height, atlasImage.Height - y);
-
-                    if (w <= 0 || h <= 0) continue;
+                    int w = def.Width, h = def.Height;
+                    if (x < 0 || y < 0 || w <= 0 || h <= 0 || (long)x + w > atlasImage.Width || (long)y + h > atlasImage.Height)
+                    { failed++; continue; }
 
                     try
                     {
@@ -120,6 +123,7 @@ public sealed class TacticalMapImageCache : IDisposable
 
     public SKImage? GetImage(string name)
     {
+        if (!IsInitialized) Initialize();
         if (!_initialized) return null;
         _images.TryGetValue(name, out var image);
         return image;
@@ -127,6 +131,7 @@ public sealed class TacticalMapImageCache : IDisposable
 
     public bool HasImage(string name)
     {
+        if (!IsInitialized) Initialize();
         if (!_initialized) return false;
         return _images.ContainsKey(name);
     }

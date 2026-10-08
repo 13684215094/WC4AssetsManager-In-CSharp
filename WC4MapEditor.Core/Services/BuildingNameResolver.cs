@@ -37,8 +37,9 @@ public static class BuildingNameResolver
             return numeric;
 
         // 兼容旧输入习惯：-1 等价于 0xFFFF
-        if (int.TryParse(text, out int signed))
-            return unchecked((ushort)signed);
+        if (text == "-1") return NoName;
+        if (System.Text.RegularExpressions.Regex.IsMatch(text, @"^[+-]?\d+$"))
+            throw new ArgumentOutOfRangeException(nameof(input), "建筑名称 ID 必须在 0..65535 范围内，或用 -1 表示无名称。");
 
         // 视为城市名称。
         // 名称表可能尚未加载（配置缺失、脚本独立运行等），此时不能把异常抛给调用方：

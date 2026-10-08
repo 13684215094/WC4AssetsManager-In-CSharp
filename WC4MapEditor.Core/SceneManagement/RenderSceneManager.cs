@@ -1,3 +1,4 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Diagnostics;
 using System.IO;
 using WC4MapEditor.Core.Models;
@@ -118,7 +119,7 @@ public sealed class RenderSceneManager
     {
         var baseDir = AppDomain.CurrentDomain.BaseDirectory;
         var cachePath = Path.Combine(baseDir, "Cache", "Scenes");
-        if (!Directory.Exists(cachePath))
+        if (!ProjectFile.DirectoryExists(cachePath))
         {
             Directory.CreateDirectory(cachePath);
             Debug.WriteLine($"[SceneManager] 创建缓存目录: {cachePath}");
@@ -206,7 +207,7 @@ public sealed class RenderSceneManager
             try
             {
                 var cacheDir = Path.GetDirectoryName(scene.CacheFilePath);
-                if (!string.IsNullOrEmpty(cacheDir) && !Directory.Exists(cacheDir))
+                if (!string.IsNullOrEmpty(cacheDir) && !ProjectFile.DirectoryExists(cacheDir))
                     Directory.CreateDirectory(cacheDir);
 
                 if (scene.MapData != null)
@@ -225,9 +226,9 @@ public sealed class RenderSceneManager
                         Debug.WriteLine($"[SceneManager] 场景 {sceneId} 已缓存到磁盘: {scene.CacheFilePath}");
                     }
                 }
-                else if (File.Exists(scene.MapFilePath))
+                else if (ProjectFile.Exists(scene.MapFilePath))
                 {
-                    File.Copy(scene.MapFilePath, scene.CacheFilePath, true);
+                    File.Copy(ProjectFile.ResolveRead(scene.MapFilePath), scene.CacheFilePath, true);
                     scene.IsCachedToDisk = true;
                     Debug.WriteLine($"[SceneManager] 场景 {sceneId} 已缓存（复制原文件）");
                 }
@@ -245,11 +246,11 @@ public sealed class RenderSceneManager
         {
             if (!_scenes.TryGetValue(sceneId, out var scene)) return null;
 
-            var filePath = scene.IsCachedToDisk && File.Exists(scene.CacheFilePath)
+            var filePath = scene.IsCachedToDisk && ProjectFile.Exists(scene.CacheFilePath)
                 ? scene.CacheFilePath
                 : scene.MapFilePath;
 
-            if (!File.Exists(filePath)) return null;
+            if (!ProjectFile.Exists(filePath)) return null;
 
             try
             {
@@ -313,7 +314,7 @@ public sealed class RenderSceneManager
 
             ReleaseSceneMemory(sceneId);
 
-            if (File.Exists(scene.CacheFilePath))
+            if (ProjectFile.Exists(scene.CacheFilePath))
             {
                 try { File.Delete(scene.CacheFilePath); }
                 catch (Exception ex) { Debug.WriteLine($"[SceneManager] 删除缓存文件失败: {ex.Message}"); }
@@ -333,7 +334,7 @@ public sealed class RenderSceneManager
         {
             foreach (var sceneId in _scenes.Keys.ToList())
             {
-                if (_scenes.TryGetValue(sceneId, out var scene) && File.Exists(scene.CacheFilePath))
+                if (_scenes.TryGetValue(sceneId, out var scene) && ProjectFile.Exists(scene.CacheFilePath))
                 {
                     try { File.Delete(scene.CacheFilePath); }
                     catch { }

@@ -1,3 +1,4 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Runtime.InteropServices;
@@ -5,7 +6,9 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using SkiaSharp;
-using WC4MapEditor.Core.Config;
+using WC4MapEditor.Core.Assets;
+using WC4MapEditor.Core.Parsers.HdAtlas;
+using WC4MapEditor.Rendering.Imaging;
 using WC4MapEditor.Core.Models;
 
 namespace WC4MapEditor.Rendering.Helpers;
@@ -29,6 +32,7 @@ public sealed class CoastMaskProcessor
     private SKImage? _finalAtlasLandTextureRef;
 
     private bool _initialized;
+    private long _resourceRevision = -1;
 
     public bool IsInitialized => _initialized;
     public bool HasFinalAtlas => _finalAtlasBuilt && _finalCoastAtlas != null;
@@ -93,24 +97,20 @@ public sealed class CoastMaskProcessor
     {
         try
         {
-            string grayLevelDir = ConfigManager.Instance.GetTexturePath("MapCoastGrayLevel");
-            string terrainDir = ConfigManager.Instance.GetTexturePath("MapTerrian");
-
-            string[] sources =
-            [
-                Path.Combine(grayLevelDir, "coastmask_hd.webp"),
-                Path.Combine(grayLevelDir, "coastmask_hd.xml"),
-                Path.Combine(terrainDir, "MapLand.png"),
-            ];
+            if (!AssetManager.Default.IsLoaded) return null;
+            var coast = HdAtlasParser.Get("coast_hd");
+            var mask = HdAtlasParser.Get("coastmask_hd");
+            string?[] sources = [coast.ImagePath, coast.XmlPath, mask.ImagePath, mask.XmlPath,
+                ProjectTextureLoader.FindPath("map_land@2x")];
 
             var sb = new StringBuilder();
             foreach (var path in sources)
             {
-                if (!File.Exists(path)) { sb.Append("missing|"); continue; }
-                var fi = new FileInfo(path);
-                sb.Append(Path.GetFileName(path)).Append(':')
-                  .Append(fi.Length).Append(':')
-                  .Append(fi.LastWriteTimeUtc.Ticks).Append('|');
+                if (!ProjectFile.Exists(path)) return null;
+                string resolved = ProjectFile.ResolveRead(path!);
+                using var stream = File.OpenRead(resolved);
+                sb.Append(Path.GetFullPath(resolved)).Append(':')
+                  .Append(Convert.ToHexString(SHA256.HashData(stream))).Append('|');
             }
 
             return Convert.ToHexString(MD5.HashData(Encoding.UTF8.GetBytes(sb.ToString())));
@@ -133,13 +133,13 @@ public sealed class CoastMaskProcessor
             var dir = GetCacheDirectory();
             var atlasPath = Path.Combine(dir, key + ".webp");
             var metaPath = Path.Combine(dir, key + ".json");
-            if (!File.Exists(atlasPath) || !File.Exists(metaPath)) return false;
+            if (!ProjectFile.Exists(atlasPath) || !ProjectFile.Exists(metaPath)) return false;
 
-            var meta = JsonSerializer.Deserialize<FinalAtlasCacheMeta>(File.ReadAllText(metaPath));
+            var meta = JsonSerializer.Deserialize<FinalAtlasCacheMeta>(ProjectFile.ReadAllText(metaPath));
             if (meta == null || meta.Version != CacheFormatVersion || meta.Sprites.Count == 0) return false;
 
             SKImage? atlas;
-            using (var fs = File.OpenRead(atlasPath))
+            using (var fs = ProjectFile.OpenRead(atlasPath))
                 atlas = SKImage.FromEncodedData(fs);
 
             if (atlas == null) return false;
@@ -224,10 +224,10 @@ public sealed class CoastMaskProcessor
         try
         {
             var dir = GetCacheDirectory();
-            if (!Directory.Exists(dir)) return;
-            foreach (var f in Directory.GetFiles(dir, "*.webp")) File.Delete(f);
-            foreach (var f in Directory.GetFiles(dir, "*.json")) File.Delete(f);
-            foreach (var f in Directory.GetFiles(dir, "masks_*.bin.gz")) File.Delete(f);
+            if (!ProjectFile.DirectoryExists(dir)) return;
+            foreach (var f in ProjectFile.GetFiles(dir, "*.webp")) File.Delete(f);
+            foreach (var f in ProjectFile.GetFiles(dir, "*.json")) File.Delete(f);
+            foreach (var f in ProjectFile.GetFiles(dir, "masks_*.bin.gz")) File.Delete(f);
             Debug.WriteLine("[CoastMaskProcessor] 磁盘缓存已清空");
         }
         catch (Exception ex)
@@ -264,13 +264,13 @@ public sealed class CoastMaskProcessor
             if (key == null) return false;
 
             var path = GetMaskCachePath(key);
-            if (!File.Exists(path))
+            if (!ProjectFile.Exists(path))
             {
                 Debug.WriteLine($"[CoastMaskProcessor] 未找到遮罩缓存（首次运行属正常）: {path}");
                 return false;
             }
 
-            using var fs = File.OpenRead(path);
+            using var fs = ProjectFile.OpenRead(path);
             using var gz = new GZipStream(fs, CompressionMode.Decompress);
             using var reader = new BinaryReader(gz, Encoding.UTF8);
 
@@ -459,6 +459,13 @@ public sealed class CoastMaskProcessor
     public void Initialize(CoastHelper coastHelper, Action<int, string>? progressCallback)
     {
         if (coastHelper == null) return;
+        long revision = AssetManager.Default.Revision;
+        if (_resourceRevision != revision)
+        {
+            DisposeAll();
+            _resourceRevision = revision;
+            LoadedFromDiskCache = false;
+        }
         if (_initialized) { progressCallback?.Invoke(100, "海岸线遮罩已缓存"); return; }
 
         Debug.WriteLine($"[CoastMaskProcessor] 缓存目录: {GetCacheDirectory()}");
@@ -529,23 +536,15 @@ public sealed class CoastMaskProcessor
     {
         if (canvas == null || coastAtlasImage == null || string.IsNullOrEmpty(spriteName)) return;
 
-        SKBitmap? coastMask = null, landMask = null;
         lock (_cacheLock)
         {
             if (_maskCache.TryGetValue(spriteName, out var masks))
             {
-                coastMask = masks.CoastMask;
-                landMask = masks.LandMask;
+                RenderWithMasks(canvas, coastAtlasImage, coastSrcRect, masks.CoastMask, masks.LandMask, dstRect, paint);
+                return;
             }
         }
-
-        if (coastMask == null)
-        {
-            canvas.DrawImage(coastAtlasImage, coastSrcRect, dstRect, paint);
-            return;
-        }
-
-        RenderWithMasks(canvas, coastAtlasImage, coastSrcRect, coastMask, landMask, dstRect, paint);
+        canvas.DrawImage(coastAtlasImage, coastSrcRect, dstRect, paint);
     }
 
     public void DrawFinalCoast(SKCanvas canvas, string spriteName, SKRect dstRect, SKPaint paint, double zoomLevel = 1.0)

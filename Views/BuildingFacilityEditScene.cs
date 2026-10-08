@@ -15,8 +15,17 @@ namespace WC4MapEditor.Views;
 /// 建筑与设施编辑场景（对应 Python 工具的 BuildingFacility 编辑器，双模合一：
 /// BuildingSettings.json + FacilitySettings.json，名称直接来自 JSON）。
 /// </summary>
-public class BuildingFacilityEditScene : UserControl
+public class BuildingFacilityEditScene : UserControl, IUnsavedScene
 {
+    public bool HasUnsavedChanges => _parser.HasChanges;
+    public bool SaveChanges()
+    {
+        if (_parser.SaveAll()) return true;
+        MessageBox.Show(_parser.LastError ?? "保存失败，修改仍保留。", "保存失败", MessageBoxButton.OK, MessageBoxImage.Error);
+        return false;
+    }
+    public void DiscardChanges() => _parser.Reload();
+
     private readonly MainWindow _window;
     private readonly BuildingFacilitySettingParser _parser = BuildingFacilitySettingParser.Instance;
 

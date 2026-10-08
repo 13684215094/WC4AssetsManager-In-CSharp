@@ -51,7 +51,6 @@ public partial class App : Application
         services.AddSingleton<MouseManager>(_ => MouseManager.Instance);
         services.AddSingleton<DebugConsole>(_ => DebugConsole.Instance);
         services.AddSingleton<AssetCache>(_ => AssetCache.Instance);
-        services.AddSingleton<TextureDiskCache>(_ => TextureDiskCache.Instance);
         services.AddSingleton<CoastHelper>(_ => CoastHelper.Instance);
         services.AddSingleton<CoastMaskProcessor>(_ => CoastMaskProcessor.Instance);
 

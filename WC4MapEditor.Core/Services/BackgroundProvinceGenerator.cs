@@ -113,19 +113,20 @@ public static class BackgroundProvinceGenerator
         var capitalIndices = new HashSet<int>();
         foreach (var capital in mapData.Capitals)
         {
-            int idx = capital.Coordinate;
-            if (idx >= 0 && idx < total)
-                capitalIndices.Add(idx);
+            if (mapData.TryGetLocalCoordinate(capital.Coordinate, out var cell))
+                capitalIndices.Add(cell.Row * mapWidth + cell.Col);
         }
 
         for (int i = 0; i < total; i++)
         {
             ref var provinceRef = ref mapData.GetProvinceRef(i);
-            if (provinceRef.IsValid && provinceRef.ProvinceValue == i)
+            if (provinceRef.IsValid && provinceRef.ProvinceValue == mapData.ToRecordCoordinate(i % mapWidth, i / mapWidth))
                 capitalIndices.Add(i);
         }
 
         if (capitalIndices.Count == 0) return null;
+        if (capitalIndices.Any(index => mapData.ToRecordCoordinate(index % mapWidth, index / mapWidth) is <= 0 or >= ushort.MaxValue))
+            throw new InvalidOperationException("省会坐标无法存入省份引用（有效范围 1–65534），未生成省区。");
 
         // ---------- 1. 背景图 → 灰度图 ----------
         GrayscaleImage? gray = provider.ExtractGrayscale();
@@ -315,7 +316,7 @@ public static class BackgroundProvinceGenerator
             for (int col = 0; col < mapWidth; col++)
             {
                 double centerX = (col * hexW * 0.75 + hexW / 2) * scaleX;
-                double centerY = (row * hexH + hexH / 2 + ((col & 1) == 1 ? hexH * 0.5 : 0)) * scaleY;
+                double centerY = (row * hexH + hexH / 2 + (mapData.IsOddColumn(col) ? hexH * 0.5 : 0)) * scaleY;
 
                 int py0 = (int)Math.Floor(centerY - halfHeight);
                 int py1 = (int)Math.Ceiling(centerY + halfHeight);
@@ -405,7 +406,7 @@ public static class BackgroundProvinceGenerator
                 int col = index % mapWidth;
                 int row = index / mapWidth;
 
-                CollectNeighbors(col, row, mapWidth, mapHeight, neighbors);
+                CollectNeighbors(col, row, mapData, neighbors);
                 foreach (int neighbor in neighbors)
                 {
                     if (visited[neighbor]) continue;
@@ -448,7 +449,7 @@ public static class BackgroundProvinceGenerator
                 int col = index % mapWidth;
                 int row = index / mapWidth;
 
-                CollectNeighbors(col, row, mapWidth, mapHeight, neighbors);
+                CollectNeighbors(col, row, mapData, neighbors);
                 foreach (int neighbor in neighbors)
                 {
                     if (owner[neighbor] != -1) continue;
@@ -479,7 +480,7 @@ public static class BackgroundProvinceGenerator
             int col = index % mapWidth;
             int row = index / mapWidth;
 
-            CollectNeighbors(col, row, mapWidth, mapHeight, neighbors);
+            CollectNeighbors(col, row, mapData, neighbors);
             foreach (int neighbor in neighbors)
             {
                 if (owner[neighbor] != -1) continue;
@@ -505,7 +506,7 @@ public static class BackgroundProvinceGenerator
 
             int col = index % mapWidth;
             int row = index / mapWidth;
-            ushort provinceValue = (ushort)(sourceIndex <= 0xFFFF ? sourceIndex : sourceIndex % 0x10000);
+            ushort provinceValue = (ushort)mapData.ToRecordCoordinate(sourceIndex % mapWidth, sourceIndex / mapWidth);
             mapData.GetProvinceRef(col, row).ProvinceValue = provinceValue;
             filledCells++;
         }
@@ -647,30 +648,11 @@ public static class BackgroundProvinceGenerator
     /// <summary>
     /// 收集六边形邻居（奇数列下移，与渲染层的 <c>(col % 2) * hexSpacingY / 2</c> 偏移一致）。
     /// </summary>
-    private static void CollectNeighbors(int col, int row, int width, int height, List<int> output)
+    private static void CollectNeighbors(int col, int row, MapData mapData, List<int> output)
     {
         output.Clear();
-
-        Add(col - 1, row);
-        Add(col + 1, row);
-        Add(col, row - 1);
-        Add(col, row + 1);
-
-        if ((col & 1) == 1)
-        {
-            Add(col - 1, row + 1);
-            Add(col + 1, row + 1);
-        }
-        else
-        {
-            Add(col - 1, row - 1);
-            Add(col + 1, row - 1);
-        }
-
-        void Add(int c, int r)
-        {
-            if (c < 0 || c >= width || r < 0 || r >= height) return;
-            output.Add(r * width + c);
-        }
+        foreach (var cell in mapData.GetNeighbors(col, row))
+            if ((uint)cell.Col < (uint)mapData.MapWidth && (uint)cell.Row < (uint)mapData.MapHeight)
+                output.Add(cell.Row * mapData.MapWidth + cell.Col);
     }
 }

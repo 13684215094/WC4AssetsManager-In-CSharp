@@ -15,8 +15,17 @@ namespace WC4MapEditor.Views;
 /// ArmyGroupSettings + ArmyGroupReinforcementSettings + EventSettings +
 /// EventStageSettings + EventCalendarSettings，文本写入 stringtable 的 event_{EventId}）。
 /// </summary>
-public class ArmyGroupEditScene : UserControl
+public class ArmyGroupEditScene : UserControl, IUnsavedScene
 {
+    public bool HasUnsavedChanges => _parser.HasChanges;
+    public bool SaveChanges()
+    {
+        if (_parser.SaveAll()) return true;
+        MessageBox.Show(_parser.LastError ?? "保存失败，修改仍保留。", "保存失败", MessageBoxButton.OK, MessageBoxImage.Error);
+        return false;
+    }
+    public void DiscardChanges() => _parser.Reload();
+
     private readonly MainWindow _window;
     private readonly ArmyGroupSettingParser _parser = ArmyGroupSettingParser.Instance;
 

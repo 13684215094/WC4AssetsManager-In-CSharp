@@ -8,11 +8,13 @@ public class MapRenderScene : RenderSceneBase
 {
     private readonly string? _filePath;
     private readonly bool _isNew;
+    private readonly MapData? _initialMap;
 
-    public MapRenderScene(MainWindow window, string? filePath = null, bool isNew = false) : base(window)
+    public MapRenderScene(MainWindow window, string? filePath = null, bool isNew = false, MapData? initialMap = null) : base(window)
     {
         _filePath = filePath;
         _isNew = isNew;
+        _initialMap = initialMap;
     }
 
     protected override string SceneTitle => "地形地图";
@@ -20,6 +22,7 @@ public class MapRenderScene : RenderSceneBase
 
     protected override MapData? LoadMapData()
     {
+        if (_initialMap != null) return _initialMap;
         if (_isNew)
         {
             var mapData = WorldParser.CreateNew(40, 30);
@@ -32,12 +35,14 @@ public class MapRenderScene : RenderSceneBase
             var dlg = new OpenFileDialog
             {
                 Filter = "Map Files|*.bin;*.dat|All Files|*.*",
-                Title = "打开地图文件"
+                Title = "打开地图文件",
+                InitialDirectory = MapInitialDirectory
             };
             if (dlg.ShowDialog() != true) return null;
             path = dlg.FileName;
         }
 
+        path = ResolveMapInputPath(path);
         var loadedData = WorldParser.LoadFromFile(path);
         if (loadedData == null) return null;
 
@@ -65,6 +70,7 @@ public class MapRenderScene : RenderSceneBase
 
     protected override MapData? ReloadMapData(string filePath)
     {
+        filePath = ResolveMapInputPath(filePath);
         var loaded = WorldParser.LoadFromFile(filePath);
         if (loaded != null) loaded.FilePath = filePath;
         return loaded;

@@ -1,3 +1,4 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Text.Encodings.Web;
@@ -33,6 +34,8 @@ public class BuildingFacilitySettingParser
         }
     }
 
+    private readonly JsonTableFile<BuildingSettingData> _buildingsFile = new();
+    private readonly JsonTableFile<FacilitySettingData> _facilitiesFile = new();
     private readonly AssetManager _manager = AssetManager.Default;
     private List<BuildingSettingData> _buildings = new();
     private List<FacilitySettingData> _facilities = new();
@@ -44,6 +47,9 @@ public class BuildingFacilitySettingParser
 
     public string BuildingConfigPath { get; private set; } = "";
     public string FacilityConfigPath { get; private set; } = "";
+
+    public bool HasChanges => _buildingsFile.HasChanges(_buildings) || _facilitiesFile.HasChanges(_facilities);
+    public string? LastError { get; private set; }
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -64,34 +70,15 @@ public class BuildingFacilitySettingParser
 
     private void ResolvePaths()
     {
-        if (!_manager.IsLoaded)
-        {
-            try { _manager.ScanDefault(); } catch { }
-        }
-
-        var root = _manager.AssetsRoot;
-        if (string.IsNullOrEmpty(root) || !Directory.Exists(root))
-        {
-            var baseDir = AppContext.BaseDirectory;
-            string? candidate = null;
-            string? current = baseDir;
-            for (int i = 0; i < 5 && !string.IsNullOrEmpty(current); i++)
-            {
-                var test = Path.Combine(current, "Resource", "WC4DATA", "assets");
-                if (Directory.Exists(test)) { candidate = test; break; }
-                current = Path.GetDirectoryName(current);
-            }
-            candidate ??= Path.GetFullPath(Path.Combine(baseDir ?? "", "..", "..", "..", "..", "Resource", "WC4DATA", "assets"));
-            root = candidate;
-        }
-
+        string root = _manager.GetActiveAssetsRoot();
         BuildingConfigPath = Path.Combine(root, "json", "BuildingSettings.json");
         FacilityConfigPath = Path.Combine(root, "json", "FacilitySettings.json");
-        Debug.WriteLine($"[BuildingFacilitySettingParser] Building={BuildingConfigPath} Facility={FacilityConfigPath}");
     }
 
     public void LoadAll()
     {
+        _buildingsFile.Invalidate();
+        _facilitiesFile.Invalidate();
         LoadBuildings();
         LoadFacilities();
     }
@@ -100,13 +87,12 @@ public class BuildingFacilitySettingParser
     {
         try
         {
-            if (!File.Exists(BuildingConfigPath))
+            if (!ProjectFile.Exists(BuildingConfigPath))
             {
                 Debug.WriteLine($"[BuildingFacilitySettingParser] 文件不存在: {BuildingConfigPath}");
                 return;
             }
-            var json = File.ReadAllText(BuildingConfigPath);
-            var data = JsonSerializer.Deserialize<List<BuildingSettingData>>(json, JsonOpts);
+            var data = _buildingsFile.Read(BuildingConfigPath, JsonOpts);
             if (data != null) _buildings = data;
         }
         catch (Exception ex)
@@ -119,13 +105,12 @@ public class BuildingFacilitySettingParser
     {
         try
         {
-            if (!File.Exists(FacilityConfigPath))
+            if (!ProjectFile.Exists(FacilityConfigPath))
             {
                 Debug.WriteLine($"[BuildingFacilitySettingParser] 文件不存在: {FacilityConfigPath}");
                 return;
             }
-            var json = File.ReadAllText(FacilityConfigPath);
-            var data = JsonSerializer.Deserialize<List<FacilitySettingData>>(json, JsonOpts);
+            var data = _facilitiesFile.Read(FacilityConfigPath, JsonOpts);
             if (data != null) _facilities = data;
         }
         catch (Exception ex)
@@ -168,13 +153,17 @@ public class BuildingFacilitySettingParser
     {
         try
         {
-            File.WriteAllText(BuildingConfigPath, JsonSerializer.Serialize(_buildings, JsonOpts));
-            File.WriteAllText(FacilityConfigPath, JsonSerializer.Serialize(_facilities, JsonOpts));
+            AtomicFile.WriteAll(
+                (BuildingConfigPath, _buildingsFile.Serialize(BuildingConfigPath, _buildings)),
+                (FacilityConfigPath, _facilitiesFile.Serialize(FacilityConfigPath, _facilities)));
+            AssetManager.Default.InvalidateData();
             Debug.WriteLine($"[BuildingFacilitySettingParser] 保存成功: {BuildingConfigPath} / {FacilityConfigPath}");
+            LastError = null;
             return true;
         }
         catch (Exception ex)
         {
+            LastError = ex.Message;
             Debug.WriteLine($"[BuildingFacilitySettingParser] 保存失败: {ex.Message}");
             return false;
         }
@@ -182,9 +171,12 @@ public class BuildingFacilitySettingParser
 
     public void Reload() => LoadAll();
 
-    public static void ClearInstance()
+    public static void ClearInstance(bool preserveChanges = false)
     {
-        lock (_lock) { _instance = null; }
+        lock (_lock)
+        {
+            if (!preserveChanges || _instance?.HasChanges != true) _instance = null;
+        }
     }
 }
 

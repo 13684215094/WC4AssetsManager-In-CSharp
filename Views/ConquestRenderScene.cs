@@ -29,20 +29,21 @@ public class ConquestRenderScene : RenderSceneBase
             var dlg = new OpenFileDialog
             {
                 Filter = "征服文件 (*.btl)|*.btl|所有文件 (*.*)|*.*",
-                Title = "打开征服地图文件"
+                Title = "打开征服地图文件",
+                InitialDirectory = MapInitialDirectory
             };
             if (dlg.ShowDialog() != true) return null;
             path = dlg.FileName;
         }
 
-        return ConquestParser.LoadToMapData(path);
+        return ConquestParser.LoadToMapData(ResolveMapInputPath(path));
     }
 
     protected override bool SaveMapData(MapData mapData, string outputPath)
         => ConquestParser.SaveFromMapData(mapData, outputPath);
 
     protected override MapData? ReloadMapData(string filePath)
-        => ConquestParser.LoadToMapData(filePath);
+        => ConquestParser.LoadToMapData(ResolveMapInputPath(filePath));
 
     protected override void InitializeRenderers()
     {

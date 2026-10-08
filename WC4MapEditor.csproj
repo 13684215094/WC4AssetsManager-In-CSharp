@@ -10,7 +10,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <NoWarn>NU1701</NoWarn>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
-    <ApplicationIcon Condition="Exists('Resource/Texture/ZSEditor_Icon/name.ico')">Resource\Texture\ZSEditor_Icon\name.ico</ApplicationIcon>
+    <ApplicationIcon Condition="Exists('EditorResources/Texture/ZSEditor_Icon/name.ico')">EditorResources\Texture\ZSEditor_Icon\name.ico</ApplicationIcon>
     <SelfContained>false</SelfContained>
     <PublishTrimmed>false</PublishTrimmed>
     <PublishReadyToRun>false</PublishReadyToRun>
@@ -57,12 +57,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Update="Resource\**\*;setting.txt;Maps\**\*">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
-    </None>
-    <!-- Lua 示例脚本随程序输出，方便用 lua scripts/lua-example.lua 直接试 -->
-    <None Update="scripts\**\*">
+    <None Update="EditorResources\Texture\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </None>

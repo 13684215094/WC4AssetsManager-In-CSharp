@@ -9,7 +9,7 @@ namespace WC4MapEditor.Core.Assets;
 /// 负责扫描一次 assets 目录，构建全部文件的元数据（<see cref="AssetEntry"/>）并缓存在内存中，
 /// 之后可按类别、扩展名、顶层目录、文件名等条件快速查询，无需重复访问磁盘。
 ///
-/// 典型 assets 根目录形如 E:\CSharpProject\WC4MapEditor\Resource\WC4DATA\assets。
+/// 典型 assets 根目录形如 E:\Games\World Conqueror 4\assets。
 ///
 /// 线程安全：构建与查询使用读写锁保护，可在多线程环境读取。
 /// </summary>
@@ -76,7 +76,8 @@ public sealed class AssetCache
     /// <param name="assetsRoot">assets 根目录。可以直接指向 assets 目录，也可以指向其父目录（会自动向下探测 assets 子目录）。</param>
     /// <param name="forceReload">为 true 时强制重新扫描。</param>
     /// <returns>扫描到的文件数量。</returns>
-    public int Load(string assetsRoot, bool forceReload = false)
+    public int Load(string assetsRoot, bool forceReload = false,
+        IProgress<ProjectCopyProgress>? progress = null, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(assetsRoot))
             throw new ArgumentException("assetsRoot 不能为空", nameof(assetsRoot));
@@ -88,25 +89,35 @@ public sealed class AssetCache
         _lock.EnterWriteLock();
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (_isLoaded && !forceReload &&
                 string.Equals(_assetsRoot, resolved, StringComparison.OrdinalIgnoreCase))
             {
                 return _entries.Count;
             }
 
+            var sw = Stopwatch.StartNew();
+            var entries = new List<AssetEntry>();
+            foreach (string file in ProjectFiles.EnumerateFiles(resolved, "*", SearchOption.AllDirectories))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                entries.Add(BuildEntry(resolved, file));
+                if (entries.Count % 32 == 0)
+                    progress?.Report(new(entries.Count, 0, 0, 0, $"正在索引资源：{entries.Count} 个 · {Path.GetRelativePath(resolved, file)}"));
+            }
+            cancellationToken.ThrowIfCancellationRequested();
+            // Publish only a complete scan; failed reads keep the active project intact.
             ClearInternal();
             _assetsRoot = resolved;
-
-            var sw = Stopwatch.StartNew();
-            foreach (string file in Directory.EnumerateFiles(resolved, "*", SearchOption.AllDirectories))
+            foreach (var entry in entries)
             {
-                AssetEntry entry = BuildEntry(resolved, file);
                 _entries.Add(entry);
                 IndexEntry(entry);
             }
             sw.Stop();
 
             _isLoaded = true;
+            progress?.Report(new(entries.Count, entries.Count, 0, 0, $"资源索引完成：{entries.Count} 个文件"));
             Debug.WriteLine($"[AssetCache] 已缓存 {_entries.Count} 个文件，耗时 {sw.ElapsedMilliseconds} ms，根目录: {resolved}");
             return _entries.Count;
         }
@@ -183,7 +194,7 @@ public sealed class AssetCache
     /// <param name="kind">语义类别过滤。</param>
     /// <param name="extension">扩展名过滤（可带或不带点）。</param>
     /// <param name="topDirectory">顶层目录过滤。</param>
-    /// <param name="nameContains">文件名（不含扩展名）包含的子串，不区分大小写。</param>
+    /// <param name="nameContains">相对路径（含文件扩展名）包含的子串，不区分大小写。</param>
     public IReadOnlyList<AssetEntry> Query(
         AssetKind? kind = null,
         string? extension = null,
@@ -204,7 +215,7 @@ public sealed class AssetCache
             if (!string.IsNullOrEmpty(topDirectory))
                 query = query.Where(e => string.Equals(e.TopDirectory, topDirectory, StringComparison.OrdinalIgnoreCase));
             if (!string.IsNullOrEmpty(nameContains))
-                query = query.Where(e => e.FileNameWithoutExtension.Contains(nameContains, StringComparison.OrdinalIgnoreCase));
+                query = query.Where(e => e.RelativePath.Contains(nameContains, StringComparison.OrdinalIgnoreCase));
 
             return query.ToArray();
         }
@@ -242,7 +253,7 @@ public sealed class AssetCache
     public byte[] ReadBytes(AssetEntry entry)
     {
         if (entry == null) throw new ArgumentNullException(nameof(entry));
-        return File.ReadAllBytes(entry.FullPath);
+        return ProjectFiles.ReadAllBytes(entry.FullPath);
     }
 
     /// <summary>枚举已缓存的全部语义类别及其文件计数（用于概览）。</summary>
@@ -299,7 +310,7 @@ public sealed class AssetCache
 
     private static AssetEntry BuildEntry(string root, string fullPath)
     {
-        var info = new FileInfo(fullPath);
+        var info = new FileInfo(ProjectFiles.ResolveRead(fullPath));
         string relative = Path.GetRelativePath(root, fullPath).Replace('\\', '/');
         int slash = relative.IndexOf('/');
         string top = slash >= 0 ? relative[..slash] : "";
@@ -316,8 +327,16 @@ public sealed class AssetCache
             TopDirectory = top,
             Size = info.Length,
             LastModifiedUtc = info.LastWriteTimeUtc,
-            Kind = ClassifyKind(top, nameNoExt, ext),
+            Kind = (ext is "bin" or "dat") && HasWorldHeader(fullPath)
+                ? AssetKind.World : ClassifyKind(top, nameNoExt, ext),
         };
+    }
+
+    private static bool HasWorldHeader(string path)
+    {
+        using var stream = ProjectFiles.OpenRead(path);
+        Span<byte> header = stackalloc byte[8];
+        return stream.Read(header) == header.Length && header.SequenceEqual(new byte[] { 0x59, 0x53, 0x41, 0x45, 4, 0, 0, 0 });
     }
 
     /// <summary>依据顶层目录、文件名前缀和扩展名推断语义类别。</summary>
@@ -382,6 +401,7 @@ public sealed class AssetCache
     /// - 若传入目录本身名为 assets，直接使用；
     /// - 否则若其下存在 assets 子目录，使用该子目录；
     /// - 否则若其下存在 WC4DATA/assets，使用该路径；
+    /// - 否则兼容所选目录下的 Resource/WC4DATA/assets；
     /// - 都没有则原样返回。
     /// </summary>
     private static string ResolveAssetsRoot(string input)
@@ -397,6 +417,9 @@ public sealed class AssetCache
 
         string wc4Child = Path.Combine(full, "WC4DATA", "assets");
         if (Directory.Exists(wc4Child)) return wc4Child;
+
+        string legacyChild = Path.Combine(full, "Resource", "WC4DATA", "assets");
+        if (Directory.Exists(legacyChild)) return legacyChild;
 
         return full;
     }

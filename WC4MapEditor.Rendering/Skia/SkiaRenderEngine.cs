@@ -1,7 +1,9 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Diagnostics;
 using SkiaSharp;
 using WC4MapEditor.Core.Helpers;
 using WC4MapEditor.Core.Models;
+using WC4MapEditor.Core.Assets;
 using WC4MapEditor.Rendering.Helpers;
 
 namespace WC4MapEditor.Rendering.Skia;
@@ -15,6 +17,7 @@ public class SkiaRenderEngine : IRenderEngine
     public Action? InvalidateCallback { get; set; }
 
     private bool _disposed;
+    private long _entityResourceRevision = -1;
 
     private BackGroundRender? _backgroundRender;
     private LandTerrainsRender? _landTerrainsRender;
@@ -34,6 +37,9 @@ public class SkiaRenderEngine : IRenderEngine
     private LegionDomainRender? _legionDomainRender;
     private BelongFlagRender? _belongFlagRender;
     private CapitalFlagRender? _capitalFlagRender;
+    private MapData? _entityMap;
+    private Camera? _entityCamera;
+    private bool _showBuildingNames = true;
 
     public bool IsAvailable => true;
     public string EngineName => "SkiaSharp";
@@ -57,9 +63,10 @@ public class SkiaRenderEngine : IRenderEngine
 
     public bool ShowBuildingNames
     {
-        get => _buildingRender?.ShowBuildingNames ?? true;
+        get => _showBuildingNames;
         set
         {
+            _showBuildingNames = value;
             if (_buildingRender != null)
                 _buildingRender.ShowBuildingNames = value;
         }
@@ -262,6 +269,18 @@ public class SkiaRenderEngine : IRenderEngine
 
     private void InitializeEntityRenderers(Camera camera, MapData mapData)
     {
+        if (!ReferenceEquals(_entityMap, mapData) || !ReferenceEquals(_entityCamera, camera) ||
+            _entityResourceRevision != AssetManager.Default.Revision)
+        {
+            DisposeEntityRenderers();
+            _entityMap = mapData;
+            _entityCamera = camera;
+            _entityResourceRevision = AssetManager.Default.Revision;
+            _backgroundRender?.InvalidateCache();
+            _legionDomainRender?.InvalidateCache();
+            _belongFlagRender?.InvalidateCache();
+            _capitalFlagRender?.InvalidateCache();
+        }
         // 只创建当前开关启用（或可能被渲染路径用到）的渲染器，避免为未启用的图层
         // 白付构造成本。Render 每帧都会调用本方法，开关之后再打开时会自动补建。
         var total = Stopwatch.StartNew();
@@ -270,7 +289,10 @@ public class SkiaRenderEngine : IRenderEngine
         if (_buildingRender == null && EnableBuildingRender)
         {
             anyCreated = true;
-            _buildingRender = Timed("BuildingRender", () => new BuildingRender(camera, mapData));
+            _buildingRender = Timed("BuildingRender", () => new BuildingRender(camera, mapData)
+            {
+                ShowBuildingNames = _showBuildingNames
+            });
         }
         if (_armyRender == null && EnableArmyRender)
         {
@@ -318,6 +340,19 @@ public class SkiaRenderEngine : IRenderEngine
             Debug.WriteLine($"[Timing] InitializeEntityRenderers 总计: {total.ElapsedMilliseconds}ms");
     }
 
+    private void DisposeEntityRenderers()
+    {
+        _buildingRender?.Dispose(); _buildingRender = null;
+        _armyRender?.Dispose(); _armyRender = null;
+        _trapRender?.Dispose(); _trapRender = null;
+        _reinforceRender?.Dispose(); _reinforceRender = null;
+        _reinforceRenderNew?.Dispose(); _reinforceRenderNew = null;
+        _strategicConstructionRender?.Dispose(); _strategicConstructionRender = null;
+        _airForceRender?.Dispose(); _airForceRender = null;
+        _weatherRender?.Dispose(); _weatherRender = null;
+        _mapCaseRender?.Dispose(); _mapCaseRender = null;
+    }
+
     public void Resize(int width, int height)
     {
         if (_backgroundRender != null)
@@ -353,6 +388,7 @@ public class SkiaRenderEngine : IRenderEngine
     public void Render(SKCanvas canvas, MapData mapData, Camera camera)
     {
         if (canvas == null || mapData == null) return;
+        camera.HexColumnOffset = mapData.HexColumnOffset;
 
         canvas.Clear(SKColors.Black);
 
@@ -476,6 +512,7 @@ public class SkiaRenderEngine : IRenderEngine
 
         if (_overlayRender != null)
         {
+            _overlayRender.HexColumnOffset = mapData.HexColumnOffset;
             _overlayRender.ViewportWidth = (int)camera.ViewportWidth;
             _overlayRender.ViewportHeight = (int)camera.ViewportHeight;
             _overlayRender.Render(canvas);
@@ -608,12 +645,12 @@ public class SkiaRenderEngine : IRenderEngine
     {
         try
         {
-            if (!System.IO.File.Exists(imagePath))
+            if (!ProjectFile.Exists(imagePath))
                 return false;
 
             int originalWidth = 0;
             int originalHeight = 0;
-            using (var stream = System.IO.File.OpenRead(imagePath))
+            using (var stream = ProjectFile.OpenRead(imagePath))
             {
                 using var codec = SKCodec.Create(stream);
                 if (codec == null) return false;
@@ -634,7 +671,7 @@ public class SkiaRenderEngine : IRenderEngine
             _viewLayerImage?.Dispose();
             _viewLayerImage = null;
 
-            using (var stream = System.IO.File.OpenRead(imagePath))
+            using (var stream = ProjectFile.OpenRead(imagePath))
             {
                 if (scale < 1.0)
                 {
@@ -747,8 +784,6 @@ public class SkiaRenderEngine : IRenderEngine
         using var cacheCanvas = new SKCanvas(_viewLayerCache);
         cacheCanvas.Clear(SKColors.Transparent);
 
-        const double baseHexSize = 20.0;
-
         double mapPixelWidth = _backgroundRender.MapPixelWidth * currentZoom;
         double mapPixelHeight = _backgroundRender.MapPixelHeight * currentZoom;
 
@@ -843,7 +878,7 @@ public class SkiaRenderEngine : IRenderEngine
         double scaledHexWidth = Camera.HexHorizontalSpacing;
         double scaledHexHeight = Camera.HexVerticalSpacing;
         int col = (int)Math.Round(screenX / scaledHexWidth);
-        double rowOffset = (col % 2 == 1) ? (scaledHexHeight / 2) : 0;
+        double rowOffset = (_entityMap?.IsOddColumn(col) == true) ? (scaledHexHeight / 2) : 0;
         int row = (int)Math.Round((screenY - rowOffset) / scaledHexHeight);
         return (col, row);
     }
@@ -852,7 +887,7 @@ public class SkiaRenderEngine : IRenderEngine
     {
         double x = col * Camera.HexHorizontalSpacing;
         double y = row * Camera.HexVerticalSpacing;
-        if (col % 2 == 1)
+        if (_entityMap?.IsOddColumn(col) == true)
             y += Camera.HexVerticalSpacing / 2;
         return (x, y);
     }
@@ -866,15 +901,9 @@ public class SkiaRenderEngine : IRenderEngine
         _landTerrainsRender?.Dispose();
         _backgroundRender?.Dispose();
         _provinceRender?.Dispose();
-        _buildingRender?.Dispose();
-        _armyRender?.Dispose();
-        _trapRender?.Dispose();
-        _reinforceRender?.Dispose();
-        _reinforceRenderNew?.Dispose();
-        _strategicConstructionRender?.Dispose();
-        _airForceRender?.Dispose();
-        _weatherRender?.Dispose();
-        _mapCaseRender?.Dispose();
+        DisposeEntityRenderers();
+        _entityMap = null;
+        _entityCamera = null;
         _selectionRender?.Dispose();
         _overlayRender?.Dispose();
         _geoRulerRender?.Dispose();

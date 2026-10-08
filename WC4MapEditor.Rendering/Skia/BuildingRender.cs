@@ -86,11 +86,7 @@ public class BuildingRender : IDisposable
     /// </summary>
     public void ReloadCityNames()
     {
-        // 丢弃全进程共享的城市名表并重建。
-        lock (_sharedCityNamesLock)
-        {
-            _sharedCityNames = null;
-        }
+        ClearCityNameCache();
 
         _cityNames = GetSharedCityNames();
         _cityNameCache.Clear();
@@ -129,6 +125,11 @@ public class BuildingRender : IDisposable
 
     private static readonly object _sharedCityNamesLock = new();
     private static Dictionary<int, string>? _sharedCityNames;
+
+    public static void ClearCityNameCache()
+    {
+        lock (_sharedCityNamesLock) { _sharedCityNames = null; }
+    }
 
     /// <summary>
     /// 全进程共享的城市名表。原实现每次构造 BuildingRender 都会向 StringTableParser
@@ -249,8 +250,8 @@ public class BuildingRender : IDisposable
 
         foreach (var building in _mapData.Buildings)
         {
-            int row = building.Coordinate / _mapData.MapWidth;
-            int col = building.Coordinate % _mapData.MapWidth;
+            if (!_mapData.TryGetLocalCoordinate(building.Coordinate, out var coord)) continue;
+            int col = coord.Col, row = coord.Row;
 
             if (col < startCol || col >= endCol || row < startRow || row >= endRow)
                 continue;
@@ -343,7 +344,7 @@ public class BuildingRender : IDisposable
 
     private void DrawBuildingsAtlas(SKCanvas canvas, List<BuildingDrawCall> batch)
     {
-        if (batch.Count == 0 || _buildingAtlas == null) return;
+        if (batch.Count == 0) return;
 
         lock (_atlasLock)
         {
@@ -360,7 +361,7 @@ public class BuildingRender : IDisposable
                     continue;
                 }
 
-                if (!_buildingAtlasMap.TryGetValue(group.Key, out var srcRect)) continue;
+                if (_buildingAtlas == null || !_buildingAtlasMap.TryGetValue(group.Key, out var srcRect)) continue;
                 if (!_buildingOriginalSize.TryGetValue(group.Key, out var originalSize)) continue;
 
                 foreach (var drawCall in group)

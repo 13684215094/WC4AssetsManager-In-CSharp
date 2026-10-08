@@ -1,8 +1,9 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Collections.Specialized;
 using System.Diagnostics;
 using System.IO;
 using SkiaSharp;
-using WC4MapEditor.Core.Config;
+using WC4MapEditor.Rendering.Imaging;
 using WC4MapEditor.Core.Helpers;
 using WC4MapEditor.Core.Parsers.General;
 using WC4MapEditor.Core.Models;
@@ -17,7 +18,6 @@ public class ReinforceRender : IDisposable
     private const double REINFORCE_GROUP_SIZE_RATIO = 0.5;
     private const int MAX_REINFORCE_PER_HEX = 6;
     private const double BASE_HEX_SIZE = 20.0;
-    private static readonly double HEX_HORIZONTAL_SPACING = BASE_HEX_SIZE * 1.5;
     private static readonly double HEX_VERTICAL_SPACING = BASE_HEX_SIZE * Math.Sqrt(3);
 
     private readonly Camera _camera;
@@ -170,39 +170,31 @@ public class ReinforceRender : IDisposable
     {
         try
         {
-            string infoMarkPath = ConfigManager.Instance.GetInformationMarkPath();
+            using var sprites = new ProjectSpriteLoader();
 
             for (int level = 1; level <= 5; level++)
             {
-                string levelPath = Path.Combine(infoMarkPath, $"level_{level}.png");
-                if (File.Exists(levelPath))
+                if (sprites.LoadImage($"level_{level}.png") is { } sprite1)
                 {
-                    using var stream = File.OpenRead(levelPath);
-                    _levelIconCache[level] = SKImage.FromEncodedData(stream);
+                    _levelIconCache[level] = sprite1;
                 }
             }
 
-            string boardPath = Path.Combine(infoMarkPath, "formation_board1.png");
-            if (File.Exists(boardPath))
+            if (sprites.LoadImage("formation_board1.png") is { } sprite2)
             {
-                using var stream = File.OpenRead(boardPath);
-                _formationBoardCache = SKImage.FromEncodedData(stream);
+                _formationBoardCache = sprite2;
             }
 
-            string formationPath = Path.Combine(infoMarkPath, "formation.png");
-            if (File.Exists(formationPath))
+            if (sprites.LoadImage("formation.png") is { } sprite3)
             {
-                using var stream = File.OpenRead(formationPath);
-                _formationIconCache = SKImage.FromEncodedData(stream);
+                _formationIconCache = sprite3;
             }
 
             for (int plan = 0; plan <= 4; plan++)
             {
-                string planPath = Path.Combine(infoMarkPath, $"act{plan}.png");
-                if (File.Exists(planPath))
+                if (sprites.LoadImage($"act{plan}.png") is { } sprite4)
                 {
-                    using var stream = File.OpenRead(planPath);
-                    _actionPlanCache[plan] = SKImage.FromEncodedData(stream);
+                    _actionPlanCache[plan] = sprite4;
                 }
             }
         }
@@ -414,6 +406,7 @@ public class ReinforceRender : IDisposable
         SKImage? headImage = null;
 
         var tacticalCache = TacticalMapImageCache.Instance;
+        tacticalCache.Initialize();
         if (tacticalCache.IsInitialized)
         {
             var generalSetting = GeneralSettingParser.Instance;
@@ -548,8 +541,8 @@ public class ReinforceRender : IDisposable
     {
         if (_mapData == null || _mapData.MapWidth <= 0 || _mapData.MapHeight <= 0) return null;
 
-        int row = coordinate / _mapData.MapWidth;
-        int col = coordinate % _mapData.MapWidth;
+        if (!_mapData.TryGetLocalCoordinate(coordinate, out var coord)) return null;
+        int col = coord.Col, row = coord.Row;
 
         if (row < 0 || row >= _mapData.MapHeight || col < 0 || col >= _mapData.MapWidth) return null;
 

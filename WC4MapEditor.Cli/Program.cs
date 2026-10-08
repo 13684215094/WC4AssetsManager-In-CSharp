@@ -39,9 +39,55 @@ public class Program
         root.Subcommands.Add(BuildWorldCommand());
         root.Subcommands.Add(BuildScreenshotCommand());
         root.Subcommands.Add(BuildAssetCommand());
+        root.Subcommands.Add(BuildProjectCommand());
         root.Subcommands.Add(BuildModifyCommand());
 
         return root;
+    }
+
+    private static Command BuildProjectCommand()
+    {
+        var command = new Command("project", "创建或查看游戏增量项目，保留原目录结构");
+        var source = new Argument<string>("source") { Description = "原游戏项目目录、assets 目录或 APK 安装包" };
+        var output = new Argument<string>("output") { Description = "新的或空的输出目录" };
+        var create = new Command("create", "加载原项目，仅将新增或修改文件保存到输出目录");
+        create.Arguments.Add(source);
+        create.Arguments.Add(output);
+        create.SetAction(result =>
+        {
+            try
+            {
+                var project = GameProjectWorkspace.Create(result.GetValue(source)!, result.GetValue(output)!);
+                PrintProject(project);
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"创建项目失败：{ex.Message}");
+                return 2;
+            }
+        });
+        command.Subcommands.Add(create);
+        var directory = new Argument<string>("directory") { Description = "已创建的项目输出目录" };
+        var info = new Command("info", "查看项目的来源、输出与资源目录");
+        info.Arguments.Add(directory);
+        info.SetAction(result =>
+        {
+            try { PrintProject(GameProjectWorkspace.Open(result.GetValue(directory)!)); return 0; }
+            catch (Exception ex) { Console.Error.WriteLine($"打开项目失败：{ex.Message}"); return 2; }
+        });
+        command.Subcommands.Add(info);
+        return command;
+    }
+
+    private static void PrintProject(GameProjectWorkspace project)
+    {
+        var assets = new AssetManager(new AssetCache());
+        assets.Scan(project.AssetsRoot);
+        Console.WriteLine($"来源：{project.SourcePath}\n编辑与保存目录：{project.OutputRoot}");
+        if (project.IsApkSource) Console.WriteLine($"APK 缓存：{project.SourceRoot}\nAPK SHA-256：{project.SourceApkSha256}");
+        Console.WriteLine($"保存方式：{(project.IsIncremental ? "增量（只输出新增或修改文件，读取时回退原项目）" : "旧版完整副本")}");
+        Console.Write(assets.GetSummaryReport());
     }
 
     private static Command BuildStageCommand()
@@ -153,22 +199,24 @@ public class Program
         var cmd = new Command("asset", "资源管理操作");
         cmd.Subcommands.Add(BuildAssetAuditCommand());
 
-        var scanPathArg = new Argument<string?>("path") { Description = "assets 根目录（默认自动探测）" };
-        scanPathArg.Arity = ArgumentArity.ZeroOrOne;
+        const string sourceDescription = "游戏目录、assets 目录、APK 或已保存项目目录（必填）";
+        var scanPathArg = new Argument<string>("path") { Description = sourceDescription };
         var forceOpt = new Option<bool>("--force", "-f", "强制重新扫描");
         var scanCmd = new Command("scan", "扫描 assets 目录并构建缓存");
         scanCmd.Arguments.Add(scanPathArg);
         scanCmd.Options.Add(forceOpt);
         scanCmd.SetAction(parseResult =>
         {
-            string? path = parseResult.GetValue(scanPathArg);
+            string path = parseResult.GetValue(scanPathArg)!;
             bool force = parseResult.GetValue(forceOpt);
-            AssetScan(path, force);
+            return AssetScan(path, force);
         });
         cmd.Subcommands.Add(scanCmd);
 
         var summaryCmd = new Command("summary", "显示资源概览（按目录和类别统计）");
-        summaryCmd.SetAction(_ => AssetSummary());
+        var summaryPathArg = new Argument<string>("path") { Description = sourceDescription };
+        summaryCmd.Arguments.Add(summaryPathArg);
+        summaryCmd.SetAction(result => AssetSummary(result.GetValue(summaryPathArg)!));
         cmd.Subcommands.Add(summaryCmd);
 
         var listKindOpt = new Option<AssetKind?>("--kind", "-k", "按语义类别过滤");
@@ -177,6 +225,8 @@ public class Program
         var listNameOpt = new Option<string?>("--name", "-n", "文件名包含子串（不区分大小写）");
         var listLimitOpt = new Option<int>("--limit", "-l") { Description = "最多显示条数", DefaultValueFactory = _ => 50 };
         var listCmd = new Command("list", "列出资源文件");
+        var listPathArg = new Argument<string>("path") { Description = sourceDescription };
+        listCmd.Arguments.Add(listPathArg);
         listCmd.Options.Add(listKindOpt);
         listCmd.Options.Add(listExtOpt);
         listCmd.Options.Add(listDirOpt);
@@ -184,7 +234,8 @@ public class Program
         listCmd.Options.Add(listLimitOpt);
         listCmd.SetAction(parseResult =>
         {
-            AssetList(
+            return AssetList(
+                parseResult.GetValue(listPathArg)!,
                 parseResult.GetValue(listKindOpt),
                 parseResult.GetValue(listExtOpt),
                 parseResult.GetValue(listDirOpt),
@@ -199,6 +250,8 @@ public class Program
         var queryNameOpt = new Option<string?>("--name", "-n", "文件名子串");
         var queryFormatOpt = new Option<string>("--format") { Description = "输出格式: table, paths, json", DefaultValueFactory = _ => "table" };
         var queryCmd = new Command("query", "组合条件查询资源");
+        var queryPathArg = new Argument<string>("path") { Description = sourceDescription };
+        queryCmd.Arguments.Add(queryPathArg);
         queryCmd.Options.Add(queryKindOpt);
         queryCmd.Options.Add(queryExtOpt);
         queryCmd.Options.Add(queryDirOpt);
@@ -206,7 +259,8 @@ public class Program
         queryCmd.Options.Add(queryFormatOpt);
         queryCmd.SetAction(parseResult =>
         {
-            AssetQuery(
+            return AssetQuery(
+                parseResult.GetValue(queryPathArg)!,
                 parseResult.GetValue(queryKindOpt),
                 parseResult.GetValue(queryExtOpt),
                 parseResult.GetValue(queryDirOpt),
@@ -1569,51 +1623,47 @@ public class Program
 
     #endregion
 
-    private static void AssetScan(string? path, bool force)
+    private static int AssetScan(string path, bool force)
     {
         try
         {
             var manager = AssetManager.Default;
-            int count;
-            if (string.IsNullOrWhiteSpace(path))
-                count = manager.ScanDefault(force);
-            else
-                count = manager.Scan(path, force);
+            int count = manager.Scan(path, force);
 
             Console.WriteLine($"扫描完成: {count} 个文件");
             Console.WriteLine($"根目录: {manager.AssetsRoot}");
+            return 0;
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"错误: {ex.Message}");
-            Environment.ExitCode = 1;
+            return 2;
         }
     }
 
-    private static void AssetSummary()
+    private static int AssetSummary(string path)
     {
         try
         {
             var manager = AssetManager.Default;
-            if (!manager.IsLoaded)
-                manager.ScanDefault();
+            manager.Scan(path);
 
             manager.PrintSummary();
+            return 0;
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"错误: {ex.Message}");
-            Environment.ExitCode = 1;
+            return 2;
         }
     }
 
-    private static void AssetList(AssetKind? kind, string? ext, string? dir, string? name, int limit)
+    private static int AssetList(string path, AssetKind? kind, string? ext, string? dir, string? name, int limit)
     {
         try
         {
             var manager = AssetManager.Default;
-            if (!manager.IsLoaded)
-                manager.ScanDefault();
+            manager.Scan(path);
 
             var entries = manager.Query(kind, ext, dir, name);
             Console.WriteLine($"匹配: {entries.Count} 条");
@@ -1628,21 +1678,21 @@ public class Program
             }
             if (entries.Count > limit)
                 Console.WriteLine($"  ... 还有 {entries.Count - limit} 条（使用 --limit 调整）");
+            return 0;
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"错误: {ex.Message}");
-            Environment.ExitCode = 1;
+            return 2;
         }
     }
 
-    private static void AssetQuery(AssetKind? kind, string? ext, string? dir, string? name, string format)
+    private static int AssetQuery(string path, AssetKind? kind, string? ext, string? dir, string? name, string format)
     {
         try
         {
             var manager = AssetManager.Default;
-            if (!manager.IsLoaded)
-                manager.ScanDefault();
+            manager.Scan(path);
 
             var entries = manager.Query(kind, ext, dir, name);
 
@@ -1673,11 +1723,12 @@ public class Program
                         Console.WriteLine($"{e.RelativePath,-55} {e.Size,10} {e.Kind}");
                     break;
             }
+            return 0;
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"错误: {ex.Message}");
-            Environment.ExitCode = 1;
+            return 2;
         }
     }
 

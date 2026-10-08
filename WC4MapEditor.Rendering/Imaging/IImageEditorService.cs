@@ -9,7 +9,7 @@ public interface IImageEditorService
     SKBitmap? CropCircularRegion(SKBitmap image, int x0, int y0, int x1, int y1);
     SKBitmap? ResizeImage(SKBitmap image, int width, int height);
     bool SaveImage(SKBitmap image, string path, SKEncodedImageFormat format, int quality);
-    ImageEditorSaveResult SaveGeneralImages(SKBitmap canvasImage, SKBitmap? circleCropped, string baseName, string outputDir, int resize1W, int resize1H, int resize2W, int resize2H);
+    ImageEditorSaveResult SaveGeneralImages(SKBitmap canvasImage, SKBitmap? circleCropped, string baseName, string outputDir, int resize1W, int resize1H, int resize2W, int resize2H, string? headsDir = null);
 }
 
 public class ImageEditorSaveResult

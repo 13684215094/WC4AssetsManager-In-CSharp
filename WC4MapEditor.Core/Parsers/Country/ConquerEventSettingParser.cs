@@ -1,3 +1,4 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -33,6 +34,7 @@ public class ConquerEventSettingParser
         }
     }
 
+    private readonly JsonTableFile<ConquerEventData> _eventsFile = new();
     private readonly AssetManager _manager = AssetManager.Default;
     private List<ConquerEventData> _events = new();
     private StringTableParser? _stringTable;
@@ -41,6 +43,9 @@ public class ConquerEventSettingParser
     public IReadOnlyList<ConquerEventData> Items => _events;
     public string ConfigPath { get; private set; } = "";
     public string StringTablePath { get; private set; } = "";
+
+    public bool HasChanges => _eventsFile.HasChanges(_events) || _stringTable?.IsDirty == true;
+    public string? LastError { get; private set; }
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -59,39 +64,14 @@ public class ConquerEventSettingParser
 
     private void ResolvePaths()
     {
-        if (!_manager.IsLoaded)
-        {
-            try { _manager.ScanDefault(); } catch { }
-        }
-
-        var root = _manager.AssetsRoot;
-        if (!string.IsNullOrEmpty(root) && Directory.Exists(root))
-        {
-            ConfigPath = Path.Combine(root, "json", "ConquerEventSettings.json");
-            StringTablePath = Path.Combine(root, "stringtable_tw.ini");
-        }
-        else
-        {
-            var baseDir = AppContext.BaseDirectory;
-            string? candidate = null;
-            string? current = baseDir;
-            for (int i = 0; i < 5 && !string.IsNullOrEmpty(current); i++)
-            {
-                var test = Path.Combine(current, "Resource", "WC4DATA", "assets");
-                if (Directory.Exists(test)) { candidate = test; break; }
-                current = Path.GetDirectoryName(current);
-            }
-            candidate ??= Path.GetFullPath(Path.Combine(baseDir ?? "", "..", "..", "..", "..", "Resource", "WC4DATA", "assets"));
-
-            ConfigPath = Path.Combine(candidate, "json", "ConquerEventSettings.json");
-            StringTablePath = Path.Combine(candidate, "stringtable_tw.ini");
-        }
-
-        Debug.WriteLine($"[ConquerEventSettingParser] ConfigPath={ConfigPath} StringTablePath={StringTablePath}");
+        string root = _manager.GetActiveAssetsRoot();
+        ConfigPath = Path.Combine(root, "json", "ConquerEventSettings.json");
+        StringTablePath = Path.Combine(root, "stringtable_tw.ini");
     }
 
     public void LoadAll()
     {
+        _eventsFile.Invalidate();
         LoadEvents();
         _stringTable = new StringTableParser(StringTablePath);
     }
@@ -100,13 +80,12 @@ public class ConquerEventSettingParser
     {
         try
         {
-            if (!File.Exists(ConfigPath))
+            if (!ProjectFile.Exists(ConfigPath))
             {
                 Debug.WriteLine($"[ConquerEventSettingParser] 文件不存在: {ConfigPath}");
                 return;
             }
-            var json = File.ReadAllText(ConfigPath);
-            var data = JsonSerializer.Deserialize<List<ConquerEventData>>(json, JsonOpts);
+            var data = _eventsFile.Read(ConfigPath, JsonOpts);
             if (data != null) _events = data;
         }
         catch (Exception ex)
@@ -154,14 +133,15 @@ public class ConquerEventSettingParser
     {
         try
         {
-            var json = JsonSerializer.Serialize(_events, JsonOpts);
-            File.WriteAllText(ConfigPath, json);
-            _stringTable?.Save();
+            AtomicFile.WriteAllWithStringTable(_stringTable,
+                (ConfigPath, _eventsFile.Serialize(ConfigPath, _events)));
             Debug.WriteLine($"[ConquerEventSettingParser] 保存成功: {ConfigPath}");
+            LastError = null;
             return true;
         }
         catch (Exception ex)
         {
+            LastError = ex.Message;
             Debug.WriteLine($"[ConquerEventSettingParser] 保存失败: {ex.Message}");
             return false;
         }
@@ -169,9 +149,12 @@ public class ConquerEventSettingParser
 
     public void Reload() => LoadAll();
 
-    public static void ClearInstance()
+    public static void ClearInstance(bool preserveChanges = false)
     {
-        lock (_lock) { _instance = null; }
+        lock (_lock)
+        {
+            if (!preserveChanges || _instance?.HasChanges != true) _instance = null;
+        }
     }
 }
 

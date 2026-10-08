@@ -309,7 +309,7 @@ public partial class LayoutEditScene
     private void UpdateGeoCard()
     {
         var n = _selected;
-        if (_geoX == null) return;
+        if (_geoX == null || _geoY == null || _geoW == null || _geoH == null) return;
         if (n is { HasRect: true })
         {
             _geoX.Text = Math.Round(n.X).ToString(CultureInfo.InvariantCulture);

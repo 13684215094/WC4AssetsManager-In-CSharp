@@ -1,3 +1,4 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Diagnostics;
 using WC4MapEditor.Core.Models;
 
@@ -85,7 +86,7 @@ public abstract class BattleParser
     {
         try
         {
-            using var stream = File.OpenRead(filePath);
+            using var stream = ProjectFile.OpenRead(filePath);
             var bytes = new byte[MapLimits.FileSize(stream.Length)];
             stream.ReadExactly(bytes);
             SetMapData(BTLParser.LoadFromBytes(bytes, filePath), bytes);

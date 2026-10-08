@@ -1,3 +1,4 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Diagnostics;
 using System.Text.Encodings.Web;
 using System.Text.Json;
@@ -27,6 +28,9 @@ public class CountrySettingParser
         }
     }
 
+    private readonly JsonTableFile<CountrySettingData> _countriesFile = new();
+    private readonly JsonTableFile<ConquerCountrySettingData> _conquerCountriesFile = new();
+    private readonly JsonTableFile<ConquerSettingData> _conquersFile = new();
     private readonly AssetManager _manager = AssetManager.Default;
 
     private List<CountrySettingData> _countries = new();
@@ -36,6 +40,9 @@ public class CountrySettingParser
     public IReadOnlyList<CountrySettingData> Countries => _countries;
     public IReadOnlyList<ConquerCountrySettingData> ConquerCountries => _conquerCountries;
     public IReadOnlyList<ConquerSettingData> Conquers => _conquers;
+    public string? LastError { get; private set; }
+    public bool HasChanges => _countriesFile.HasChanges(_countries) || _conquerCountriesFile.HasChanges(_conquerCountries) ||
+        _stringTableParser?.IsDirty == true;
 
     public string CountrySettingsPath { get; private set; } = "";
     public string ConquerCountrySettingsPath { get; private set; } = "";
@@ -62,55 +69,21 @@ public class CountrySettingParser
 
     private void ResolvePaths()
     {
-        if (!_manager.IsLoaded)
-        {
-            try { _manager.ScanDefault(); } catch { }
-        }
-
-        var root = _manager.AssetsRoot;
-        if (!string.IsNullOrEmpty(root) && Directory.Exists(root))
-        {
-            CountrySettingsPath = Path.Combine(root, "json", "CountrySettings.json");
-            ConquerCountrySettingsPath = Path.Combine(root, "json", "ConquerCountrySettings.json");
-            ConquerSettingsPath = Path.Combine(root, "json", "ConquerSettings.json");
-            TacticalMapDir = Path.Combine(root, "image");
-            FlagsHdImagePath = Path.Combine(root, "image", "image_flags_hd.webp");
-            FlagsHdXmlPath = Path.Combine(root, "image", "image_flags_hd.xml");
-            StringTablePath = Path.Combine(root, "stringtable_tw.ini");
-        }
-        else
-        {
-            var baseDir = AppContext.BaseDirectory;
-            string? candidate = null;
-            string? current = baseDir;
-            for (int i = 0; i < 5 && !string.IsNullOrEmpty(current); i++)
-            {
-                var test = Path.Combine(current, "Resource", "WC4DATA", "assets");
-                if (Directory.Exists(test)) { candidate = test; break; }
-                current = Path.GetDirectoryName(current);
-            }
-            candidate ??= Path.GetFullPath(Path.Combine(baseDir ?? "", "..", "..", "..", "..", "Resource", "WC4DATA", "assets"));
-
-            CountrySettingsPath = Path.Combine(candidate, "json", "CountrySettings.json");
-            ConquerCountrySettingsPath = Path.Combine(candidate, "json", "ConquerCountrySettings.json");
-            ConquerSettingsPath = Path.Combine(candidate, "json", "ConquerSettings.json");
-            TacticalMapDir = Path.Combine(candidate, "image");
-            FlagsHdImagePath = Path.Combine(candidate, "image", "image_flags_hd.webp");
-            FlagsHdXmlPath = Path.Combine(candidate, "image", "image_flags_hd.xml");
-            StringTablePath = Path.Combine(candidate, "stringtable_tw.ini");
-        }
-
-        Debug.WriteLine($"[CountrySettingParser] 解析路径:");
-        Debug.WriteLine($"  CountrySettingsPath        = {CountrySettingsPath}");
-        Debug.WriteLine($"  ConquerCountrySettingsPath = {ConquerCountrySettingsPath}");
-        Debug.WriteLine($"  ConquerSettingsPath        = {ConquerSettingsPath}");
-        Debug.WriteLine($"  FlagsHdImagePath           = {FlagsHdImagePath}");
-        Debug.WriteLine($"  FlagsHdXmlPath             = {FlagsHdXmlPath}");
-        Debug.WriteLine($"  StringTablePath            = {StringTablePath}");
+        string root = _manager.GetActiveAssetsRoot();
+        CountrySettingsPath = Path.Combine(root, "json", "CountrySettings.json");
+        ConquerCountrySettingsPath = Path.Combine(root, "json", "ConquerCountrySettings.json");
+        ConquerSettingsPath = Path.Combine(root, "json", "ConquerSettings.json");
+        TacticalMapDir = Path.Combine(root, "image");
+        FlagsHdImagePath = Path.Combine(root, "image", "image_flags_hd.webp");
+        FlagsHdXmlPath = Path.Combine(root, "image", "image_flags_hd.xml");
+        StringTablePath = Path.Combine(root, "stringtable_tw.ini");
     }
 
     private void LoadAll()
     {
+        _countriesFile.Invalidate();
+        _conquerCountriesFile.Invalidate();
+        _conquersFile.Invalidate();
         LoadCountries();
         LoadConquerCountries();
         LoadConquers();
@@ -120,13 +93,12 @@ public class CountrySettingParser
     {
         try
         {
-            if (!File.Exists(CountrySettingsPath))
+            if (!ProjectFile.Exists(CountrySettingsPath))
             {
                 Debug.WriteLine($"[CountrySettingParser] CountrySettings.json 不存在: {CountrySettingsPath}");
                 return;
             }
-            var json = File.ReadAllText(CountrySettingsPath);
-            var data = JsonSerializer.Deserialize<List<CountrySettingData>>(json, JsonOpts);
+            var data = _countriesFile.Read(CountrySettingsPath, JsonOpts);
             if (data != null)
             {
                 _countries = data;
@@ -143,13 +115,12 @@ public class CountrySettingParser
     {
         try
         {
-            if (!File.Exists(ConquerCountrySettingsPath))
+            if (!ProjectFile.Exists(ConquerCountrySettingsPath))
             {
                 Debug.WriteLine($"[CountrySettingParser] ConquerCountrySettings.json 不存在: {ConquerCountrySettingsPath}");
                 return;
             }
-            var json = File.ReadAllText(ConquerCountrySettingsPath);
-            var data = JsonSerializer.Deserialize<List<ConquerCountrySettingData>>(json, JsonOpts);
+            var data = _conquerCountriesFile.Read(ConquerCountrySettingsPath, JsonOpts);
             if (data != null)
             {
                 _conquerCountries = data;
@@ -166,13 +137,12 @@ public class CountrySettingParser
     {
         try
         {
-            if (!File.Exists(ConquerSettingsPath))
+            if (!ProjectFile.Exists(ConquerSettingsPath))
             {
                 Debug.WriteLine($"[CountrySettingParser] ConquerSettings.json 不存在: {ConquerSettingsPath}");
                 return;
             }
-            var json = File.ReadAllText(ConquerSettingsPath);
-            var data = JsonSerializer.Deserialize<List<ConquerSettingData>>(json, JsonOpts);
+            var data = _conquersFile.Read(ConquerSettingsPath, JsonOpts);
             if (data != null)
             {
                 _conquers = data;
@@ -231,14 +201,15 @@ public class CountrySettingParser
     {
         try
         {
-            var json = JsonSerializer.Serialize(_countries, JsonOpts);
-            File.WriteAllText(CountrySettingsPath, json);
+            AtomicFile.WriteAllWithStringTable(_stringTableParser, (CountrySettingsPath, _countriesFile.Serialize(CountrySettingsPath, _countries)));
+            LastError = null;
             Debug.WriteLine($"[CountrySettingParser] 保存 CountrySettings.json 成功");
             return true;
         }
         catch (Exception ex)
         {
             Debug.WriteLine($"[CountrySettingParser] 保存 CountrySettings.json 失败: {ex.Message}");
+            LastError = ex.Message;
             return false;
         }
     }
@@ -247,43 +218,79 @@ public class CountrySettingParser
     {
         try
         {
-            var json = JsonSerializer.Serialize(_conquerCountries, JsonOpts);
-            File.WriteAllText(ConquerCountrySettingsPath, json);
+            _conquerCountriesFile.Save(ConquerCountrySettingsPath, _conquerCountries);
+            LastError = null;
             Debug.WriteLine($"[CountrySettingParser] 保存 ConquerCountrySettings.json 成功");
             return true;
         }
         catch (Exception ex)
         {
             Debug.WriteLine($"[CountrySettingParser] 保存 ConquerCountrySettings.json 失败: {ex.Message}");
+            LastError = ex.Message;
             return false;
         }
     }
 
     public void Reload()
     {
+        ResolvePaths();
+        _stringTableParser = null;
+        _countries.Clear();
+        _conquerCountries.Clear();
+        _conquers.Clear();
         LoadAll();
+    }
+
+    public bool SaveAll()
+    {
+        try
+        {
+            AtomicFile.WriteAllWithStringTable(_stringTableParser,
+                (CountrySettingsPath, _countriesFile.Serialize(CountrySettingsPath, _countries)),
+                (ConquerCountrySettingsPath, _conquerCountriesFile.Serialize(ConquerCountrySettingsPath, _conquerCountries)));
+            LastError = null;
+            return true;
+        }
+        catch (Exception ex) { LastError = ex.Message; return false; }
     }
 
     public bool AddCountry(CountrySettingData country)
     {
         if (GetCountryById(country.Id) != null)
         {
+            LastError = $"国家 ID {country.Id} 已存在。";
             Debug.WriteLine($"[CountrySettingParser] 添加国家失败: ID {country.Id} 已存在");
             return false;
         }
-        _countries.Add(country);
-        return SaveCountries();
+        var candidate = _countries.Append(country).ToList();
+        try
+        {
+            AtomicFile.WriteAllWithStringTable(_stringTableParser,
+                (CountrySettingsPath, _countriesFile.Serialize(CountrySettingsPath, candidate)));
+            _countries = candidate;
+            LastError = null;
+            return true;
+        }
+        catch (Exception ex) { LastError = ex.Message; return false; }
     }
 
     public bool RemoveCountry(int id)
     {
         var country = GetCountryById(id);
         if (country == null) return false;
-        _countries.Remove(country);
-        _conquerCountries.RemoveAll(cc => cc.CountryId == id);
-        SaveCountries();
-        SaveConquerCountries();
-        return true;
+        var countries = _countries.Where(c => !ReferenceEquals(c, country)).ToList();
+        var seats = _conquerCountries.Where(cc => cc.CountryId != id).ToList();
+        try
+        {
+            AtomicFile.WriteAllWithStringTable(_stringTableParser,
+                (CountrySettingsPath, _countriesFile.Serialize(CountrySettingsPath, countries)),
+                (ConquerCountrySettingsPath, _conquerCountriesFile.Serialize(ConquerCountrySettingsPath, seats)));
+            _countries = countries;
+            _conquerCountries = seats;
+            LastError = null;
+            return true;
+        }
+        catch (Exception ex) { LastError = ex.Message; return false; }
     }
 
     public int GetNextCountryId()
@@ -326,11 +333,13 @@ public class CountrySettingParser
             var parser = GetStringTableParser();
             parser.SetValue($"country_{countryId}", realName);
             parser.Save();
+            LastError = null;
             return true;
         }
         catch (Exception ex)
         {
             Debug.WriteLine($"[CountrySettingParser] 设置真实名称失败: {ex.Message}");
+            LastError = ex.Message;
             return false;
         }
     }
@@ -360,11 +369,11 @@ public class CountrySettingParser
         return SaveCountries();
     }
 
-    public static void ClearInstance()
+    public static void ClearInstance(bool preserveChanges = false)
     {
         lock (_lock)
         {
-            _instance = null;
+            if (!preserveChanges || _instance?.HasChanges != true) _instance = null;
         }
     }
 }

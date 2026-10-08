@@ -1,4 +1,6 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using SkiaSharp;
+using WC4MapEditor.Core.Parsers;
 
 namespace WC4MapEditor.Rendering.Imaging;
 
@@ -8,11 +10,11 @@ public class ImageEditorService : IImageEditorService
 
     public SKBitmap? LoadSourceImage(string path)
     {
-        if (string.IsNullOrEmpty(path) || !File.Exists(path))
+        if (string.IsNullOrEmpty(path) || !ProjectFile.Exists(path))
             return null;
         try
         {
-            return SKBitmap.Decode(path);
+            return SKBitmap.Decode(ProjectFile.ResolveRead(path));
         }
         catch
         {
@@ -119,7 +121,7 @@ public class ImageEditorService : IImageEditorService
             using var data = image.Encode(format, quality);
             if (data == null)
                 return false;
-            File.WriteAllBytes(path, data.ToArray());
+            AtomicFile.Write(path, data.ToArray());
             return true;
         }
         catch
@@ -128,46 +130,46 @@ public class ImageEditorService : IImageEditorService
         }
     }
 
-    public ImageEditorSaveResult SaveGeneralImages(SKBitmap canvasImage, SKBitmap? circleCropped, string baseName, string outputDir, int resize1W, int resize1H, int resize2W, int resize2H)
+    public ImageEditorSaveResult SaveGeneralImages(SKBitmap canvasImage, SKBitmap? circleCropped, string baseName, string outputDir, int resize1W, int resize1H, int resize2W, int resize2H, string? headsDir = null)
     {
         var result = new ImageEditorSaveResult();
         try
         {
-            System.IO.Directory.CreateDirectory(outputDir);
-
-            string generalPath = System.IO.Path.Combine(outputDir, $"general_{baseName}.png");
-            if (!SaveImage(canvasImage, generalPath, SKEncodedImageFormat.Png, 100))
+            AtlasCompositeRenderer.ValidateBaseName(baseName);
+            headsDir ??= Path.GetFileName(Path.TrimEndingDirectorySeparator(outputDir)).Equals("generalphoto", StringComparison.OrdinalIgnoreCase)
+                ? Path.Combine(Path.GetDirectoryName(outputDir)!, "heads") : outputDir;
+            static string SelectPath(string directory, string name)
             {
-                result.ErrorMessage = $"保存 general_{baseName}.png 失败";
-                return result;
+                string webp = Path.Combine(directory, name + ".webp");
+                return ProjectFile.Exists(webp) ? webp : Path.Combine(directory, name + ".png");
             }
-            result.GeneralPath = generalPath;
-
+            string generalPath = SelectPath(outputDir, $"general_{baseName}");
+            string? circlePath = null, headPath = null;
+            var files = new List<(string Path, byte[] Bytes)> { (generalPath, AtlasCompositeRenderer.Encode(canvasImage, generalPath)) };
             if (circleCropped != null)
             {
                 if (resize1W > 0 && resize1H > 0)
                 {
                     using var resized1 = ResizeImage(circleCropped, resize1W, resize1H);
-                    if (resized1 != null)
-                    {
-                        string circlePath = System.IO.Path.Combine(outputDir, $"general_circle_{baseName}.png");
-                        if (SaveImage(resized1, circlePath, SKEncodedImageFormat.Png, 100))
-                            result.CirclePath = circlePath;
-                    }
+                    if (resized1 == null) throw new IOException("圆形头像缩放失败。");
+                    circlePath = SelectPath(headsDir, $"general_circle_{baseName}");
+                    files.Add((circlePath, AtlasCompositeRenderer.Encode(resized1, circlePath)));
                 }
+                else throw new ArgumentException("圆形头像尺寸必须大于零。");
 
                 if (resize2W > 0 && resize2H > 0)
                 {
                     using var resized2 = ResizeImage(circleCropped, resize2W, resize2H);
-                    if (resized2 != null)
-                    {
-                        string headPath = System.IO.Path.Combine(outputDir, $"head_{baseName}.png");
-                        if (SaveImage(resized2, headPath, SKEncodedImageFormat.Png, 100))
-                            result.HeadPath = headPath;
-                    }
+                    if (resized2 == null) throw new IOException("战术头像缩放失败。");
+                    headPath = SelectPath(headsDir, $"head_{baseName}");
+                    files.Add((headPath, AtlasCompositeRenderer.Encode(resized2, headPath)));
                 }
+                else throw new ArgumentException("战术头像尺寸必须大于零。");
             }
-
+            AtomicFile.WriteAll(files.ToArray());
+            result.GeneralPath = generalPath;
+            result.CirclePath = circlePath;
+            result.HeadPath = headPath;
             result.Success = true;
             return result;
         }

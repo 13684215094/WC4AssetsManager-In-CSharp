@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using SkiaSharp;
 using WC4MapEditor.Core.Models;
+using WC4MapEditor.Core.Assets;
 using WC4MapEditor.Rendering.Helpers;
 
 namespace WC4MapEditor.Rendering.Skia;
@@ -12,6 +13,7 @@ public class LandTerrainsRender : IDisposable
     private static readonly double HEX_VERTICAL_SPACING = BASE_HEX_SIZE * Math.Sqrt(3);
 
     private readonly TerrainHelper _terrainHelper;
+    private long _resourceRevision = -1;
     private readonly ReaderWriterLockSlim _stateLock = new();
 
     private double _offsetX = 50.0;
@@ -117,6 +119,16 @@ public class LandTerrainsRender : IDisposable
     public void Render(SKCanvas canvas, MapData mapData)
     {
         if (mapData == null) return;
+        if (_resourceRevision != AssetManager.Default.Revision)
+        {
+            lock (_sourceLock)
+            {
+                foreach (var image in _terrainSource.Values) image.Dispose();
+                _terrainSource.Clear();
+                _terrainSourceSize.Clear();
+            }
+            _resourceRevision = AssetManager.Default.Revision;
+        }
 
         double offsetX, offsetY, zoomLevel;
         int vpW, vpH;
@@ -156,7 +168,7 @@ public class LandTerrainsRender : IDisposable
             double centerX = offsetX + col * hexSpacingX;
             float fCenterX = (float)centerX;
             if (fCenterX + hexSize < fBoundsX || fCenterX - hexSize > fBoundsR) continue;
-            double centerYBase = offsetY + (col % 2) * (hexSpacingY / 2);
+            double centerYBase = offsetY + (mapData.IsOddColumn(col) ? 1 : 0) * (hexSpacingY / 2);
 
             for (int row = startRow; row <= endRow; row++)
             {

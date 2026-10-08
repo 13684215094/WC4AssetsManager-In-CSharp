@@ -12,7 +12,6 @@ public sealed class BuildingDeployMode : IModeHandler
     // 上次通过 Enter 选中的建筑所在格子序号（-1 表示尚未选中）。
     // 用坐标而非列表索引递推，避免"新增建筑被追加到列表末尾"打乱遍历顺序。
     private int _lastSelectedBuildingCoord = -1;
-    private bool _copiedLevelsOnly;
     private readonly Random _random = new();
 
     // 按格子序号升序的建筑列表缓存；Buildings 集合增删改时通过 CollectionChanged 失效
@@ -92,27 +91,16 @@ public sealed class BuildingDeployMode : IModeHandler
         {
             case "apply":
                 {
-                    var oldBelong = mapData?.GetBelongValue(col, row);
+                    if (mapData == null) return false;
                     var provinceBelong = GetProvinceCapitalBelong(col, row, context);
-
-                    context.RecordEntityChange($"放置建筑 ({col},{row})",
+                    ModifierResult result = default;
+                    modified = context.RecordBuildingsSnapshot($"放置建筑 ({col},{row})",
                         () =>
                         {
-                            building.Apply(col, row);
-                            if (provinceBelong >= 0)
-                            {
-                                belong.SetBelongByCountryId(col, row, provinceBelong);
-                            }
-                        },
-                        () =>
-                        {
-                            building.Remove(col, row);
-                            if (oldBelong.HasValue)
-                            {
-                                belong.SetBelongByCountryId(col, row, oldBelong.Value);
-                            }
+                            result = building.Apply(col, row);
+                            if (result.Success && provinceBelong >= 0) mapData.SetBelongValue(col, row, provinceBelong);
                         });
-                    modified = true;
+                    context.RaiseStatusMessage?.Invoke(result.Message);
                     break;
                 }
 
@@ -130,13 +118,11 @@ public sealed class BuildingDeployMode : IModeHandler
                         var count = building.CopyBuildingGroup(selector.SelectedHexes);
                         if (count > 0)
                         {
-                            _copiedLevelsOnly = false;
                             context.RaiseStatusMessage?.Invoke($"已复制 {count} 个建筑数据（多选）");
                             return true;
                         }
                     }
                     var result = building.CopyBuilding(col, row);
-                    _copiedLevelsOnly = false;
                     context.RaiseStatusMessage?.Invoke(result.Message);
                     return result.Success;
                 }
@@ -144,7 +130,6 @@ public sealed class BuildingDeployMode : IModeHandler
             case "copy_levels":
                 {
                     var result = building.CopyBuildingLevels(col, row);
-                    _copiedLevelsOnly = true;
                     context.RaiseStatusMessage?.Invoke(result.Message);
                     return result.Success;
                 }
@@ -155,10 +140,12 @@ public sealed class BuildingDeployMode : IModeHandler
 
                     if (building.HasCopiedGroup)
                     {
-                        var count = building.PasteBuildingGroup(col, row);
+                        int count = 0;
+                        modified = context.RecordBuildingsSnapshot("粘贴建筑组",
+                            () => count = building.PasteBuildingGroup(col, row));
                         if (count > 0)
                         {
-                            context.NotifyDataModified?.Invoke();
+                            if (modified) context.NotifyDataModified?.Invoke();
                             context.RaiseStatusMessage?.Invoke($"已粘贴 {count} 个建筑数据（多选）");
                             return true;
                         }
@@ -166,31 +153,16 @@ public sealed class BuildingDeployMode : IModeHandler
                         return false;
                     }
 
-                    var oldBelong = mapData.GetBelongValue(col, row);
                     var provinceBelong = GetProvinceCapitalBelong(col, row, context);
-
-                    if (_copiedLevelsOnly)
-                    {
-                        var result = building.PasteBuildingLevels(col, row);
-                        context.RaiseStatusMessage?.Invoke(result.Message);
-                        return result.Success;
-                    }
-
-                    context.RecordEntityChange($"粘贴建筑 ({col},{row})",
+                    ModifierResult result = default;
+                    modified = context.RecordBuildingsSnapshot($"粘贴建筑 ({col},{row})",
                         () =>
                         {
-                            building.PasteBuilding(col, row);
-                            if (provinceBelong >= 0)
-                            {
-                                belong.SetBelongByCountryId(col, row, provinceBelong);
-                            }
-                        },
-                        () =>
-                        {
-                            building.Remove(col, row);
-                            belong.SetBelongByCountryId(col, row, oldBelong);
+                            result = building.PasteBuilding(col, row);
+                            if (result.Success && building.Clipboard == BuildingModifier.ClipboardKind.Single && provinceBelong >= 0)
+                                mapData.SetBelongValue(col, row, provinceBelong);
                         });
-                    modified = true;
+                    context.RaiseStatusMessage?.Invoke(result.Message);
                     break;
                 }
 
@@ -224,7 +196,7 @@ public sealed class BuildingDeployMode : IModeHandler
                     if (context.DialogService != null)
                     {
                         var confirmed = await context.DialogService.ShowConfirmDialogAsync(
-                            "确认操作", "确定要删除所有建筑吗？\n此操作不可撤销！", "确定", "取消");
+                            "确认操作", "确定要删除所有建筑吗？", "确定", "取消");
                         if (!confirmed) return false;
                     }
 
@@ -235,10 +207,10 @@ public sealed class BuildingDeployMode : IModeHandler
                         {
                             foreach (var b in oldBuildings)
                             {
-                                var c = HexCoord.FromIndex(b.Coordinate, mapData.MapWidth);
+                                var c = mapData.ToLocalCoordinate(b.Coordinate);
                                 building.Apply(c.Col, c.Row, b);
                             }
-                        });
+                        }, 256L + 40L * oldBuildings.Count);
                     modified = true;
                     break;
                 }
@@ -530,21 +502,7 @@ public sealed class BuildingDeployMode : IModeHandler
 
     private int GetProvinceCapitalBelong(int col, int row, ModeContext context)
     {
-        var mapData = context.MapData;
-        if (mapData == null) return -1;
-
-        var province = mapData.GetProvinceRef(col, row);
-        if (province.ProvinceValue == 0 || province.ProvinceValue == 0xFFFF) return -1;
-
-        int capitalIndex = province.ProvinceValue;
-
-        if (capitalIndex >= 0 && capitalIndex < mapData.MapWidth * mapData.MapHeight)
-        {
-            var capitalCoord = HexCoord.FromIndex(capitalIndex, mapData.MapWidth);
-            return mapData.GetBelongValue(capitalCoord.Col, capitalCoord.Row);
-        }
-
-        return -1;
+        return context.MapData?.GetProvinceCapitalBelong(col, row) ?? -1;
     }
 
     /// <summary>
@@ -588,8 +546,8 @@ public sealed class BuildingDeployMode : IModeHandler
         var selectedBuilding = ordered[pos];
         _lastSelectedBuildingCoord = selectedBuilding.Coordinate;
 
-        var col = selectedBuilding.Coordinate % mapData.MapWidth;
-        var row = selectedBuilding.Coordinate / mapData.MapWidth;
+        var selectedCoord = mapData.ToLocalCoordinate(selectedBuilding.Coordinate);
+        int col = selectedCoord.Col, row = selectedCoord.Row;
 
         var selector = HexSelector.Instance;
         selector.ClearSelection();
@@ -616,7 +574,7 @@ public sealed class BuildingDeployMode : IModeHandler
         var mapData = context.MapData;
         if (mapData == null) return;
 
-        int coord = row * mapData.MapWidth + col;
+        int coord = mapData.ToRecordCoordinate(col, row);
         if (coord < 0 || coord > ushort.MaxValue)
         {
             context.RaiseStatusMessage?.Invoke("建筑坐标必须在 0..65535 范围内，未创建建筑。");
@@ -626,7 +584,7 @@ public sealed class BuildingDeployMode : IModeHandler
         // 检查当前格子是否已有建筑，有则编辑现有建筑，无则创建新建筑
         var existingBuilding = mapData.GetBuildingAt(col, row);
         bool isNew = existingBuilding == null;
-        var building = isNew ? Building.CreateDefault(coord) : existingBuilding.Value;
+        var building = existingBuilding ?? Building.CreateDefault(coord);
 
         var (confirmed, resultBuilding) = await context.DialogService.ShowBuildingSettingDialogAsync(building, isNew: isNew);
         if (confirmed)

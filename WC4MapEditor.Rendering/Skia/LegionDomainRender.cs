@@ -146,7 +146,7 @@ public class LegionDomainRender : IDisposable
                 if (provinceValue == 0 || provinceValue == 0xFFFF) continue;
 
                 int capitalIndex = provinceValue;
-                if (capitalIndex < 0 || capitalIndex >= mapWidth * mapHeight) continue;
+                if (!mapData.TryGetLocalCoordinate(capitalIndex, out _)) continue;
 
                 int belongValue = GetBelongValue(capitalIndex, mapData);
                 if (belongValue < 0 || belongValue == 255) continue;
@@ -155,7 +155,7 @@ public class LegionDomainRender : IDisposable
                 if (color == default) continue;
 
                 float x = (float)(_offsetX + col * hexSpacingX);
-                float y = (float)(_offsetY + (col % 2) * (hexSpacingY / 2) + row * hexSpacingY);
+                float y = (float)(_offsetY + (mapData.IsOddColumn(col) ? 1 : 0) * (hexSpacingY / 2) + row * hexSpacingY);
 
                 if (!_colorGroups.TryGetValue(color, out var positions))
                 {
@@ -179,59 +179,7 @@ public class LegionDomainRender : IDisposable
     }
 
     private static int GetBelongValue(int index, MapData mapData)
-    {
-        if (mapData.Belongs == null || mapData.Belongs.Count == 0) return -1;
-
-        int mapWidth = mapData.MapWidth;
-        int mapHeight = mapData.MapHeight;
-        if (mapWidth == 0 || mapHeight == 0) return -1;
-
-        int row = index / mapWidth;
-        int col = index % mapWidth;
-
-        int mapClipX = mapData.Header?.MapClipX ?? 0;
-        int mapClipY = mapData.Header?.MapClipY ?? 0;
-
-        if (mapClipY > 0 && row < mapClipY) return -1;
-        if (mapClipX > 0 && col < mapClipX) return -1;
-
-        int conquestWidth = mapData.Header?.MapLength ?? 0;
-        if (conquestWidth <= 0) conquestWidth = mapWidth - mapClipX;
-
-        int actualCol = col - mapClipX;
-        int actualRow = row - mapClipY;
-
-        if (actualCol >= conquestWidth)
-        {
-            actualCol -= conquestWidth;
-            actualRow++;
-        }
-
-        int actualIndex = actualRow * conquestWidth + actualCol;
-
-        if (actualIndex < 0 || actualIndex >= mapData.Belongs.Count) return -1;
-
-        string belongStr = mapData.Belongs[actualIndex];
-        if (string.IsNullOrEmpty(belongStr)) return -1;
-
-        try
-        {
-            if (belongStr.StartsWith("&H", StringComparison.OrdinalIgnoreCase))
-                return Convert.ToInt32(belongStr.Substring(2), 16);
-
-            if (int.TryParse(belongStr, System.Globalization.NumberStyles.HexNumber, null, out int hexResult))
-                return hexResult;
-
-            if (int.TryParse(belongStr, out int result))
-                return result;
-
-            return Convert.ToInt32(belongStr, 16);
-        }
-        catch
-        {
-            return -1;
-        }
-    }
+        => mapData.GetBelongAtRecordCoordinate(index);
 
     private SKColor GetLegionColor(int belongValue, MapData mapData)
     {

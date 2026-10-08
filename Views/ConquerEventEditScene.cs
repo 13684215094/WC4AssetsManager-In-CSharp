@@ -17,8 +17,17 @@ namespace WC4MapEditor.Views;
 /// 列表 + 属性面板完整 CRUD；名称/描述写入 stringtable 的
 /// conquest_event_{Id} / conquest_event_intro_{Id}。
 /// </summary>
-public class ConquerEventEditScene : UserControl
+public class ConquerEventEditScene : UserControl, IUnsavedScene
 {
+    public bool HasUnsavedChanges => _parser.HasChanges;
+    public bool SaveChanges()
+    {
+        if (_parser.SaveAll()) return true;
+        MessageBox.Show(_parser.LastError ?? "保存失败，修改仍保留。", "保存失败", MessageBoxButton.OK, MessageBoxImage.Error);
+        return false;
+    }
+    public void DiscardChanges() => _parser.Reload();
+
     private readonly MainWindow _window;
     private readonly ConquerEventSettingParser _parser = ConquerEventSettingParser.Instance;
 

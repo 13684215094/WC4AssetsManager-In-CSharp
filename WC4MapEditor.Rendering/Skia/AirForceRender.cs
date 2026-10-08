@@ -1,7 +1,8 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Diagnostics;
 using System.IO;
 using SkiaSharp;
-using WC4MapEditor.Core.Config;
+using WC4MapEditor.Rendering.Imaging;
 using WC4MapEditor.Core.Helpers;
 using WC4MapEditor.Core.Models;
 
@@ -37,6 +38,7 @@ public class AirForceRender : IDisposable
 
     private readonly Dictionary<int, SKImage> _unitTypeIconCache = new();
     private readonly Dictionary<string, SKImage> _flagImageCache = new();
+    private long _flagResourceRevision = -1;
 
     private readonly List<(SKPoint Position, float Size, SKImage? Image)> _iconPositions = new();
     private readonly List<(SKPoint Position, string Text, float Size, SKColor Color)> _typeTexts = new();
@@ -80,23 +82,19 @@ public class AirForceRender : IDisposable
         {
             try
             {
-                string infoMarkPath = ConfigManager.Instance.GetInformationMarkPath();
+                using var sprites = new ProjectSpriteLoader();
 
                 foreach (var kvp in UnitTypeNames)
                 {
-                    string iconPath = Path.Combine(infoMarkPath, $"airforce_{kvp.Key:X2}.png");
-                    if (File.Exists(iconPath))
+                    if (sprites.LoadImage($"airforce_{kvp.Key:X2}.png") is { } sprite1)
                     {
-                        using var stream = File.OpenRead(iconPath);
-                        _unitTypeIconCache[kvp.Key] = SKImage.FromEncodedData(stream);
+                        _unitTypeIconCache[kvp.Key] = sprite1;
                     }
                 }
 
-                string defaultIconPath = Path.Combine(infoMarkPath, "airforce_default.png");
-                if (File.Exists(defaultIconPath))
+                if (sprites.LoadImage("airforce_default.png") is { } sprite2)
                 {
-                    using var stream = File.OpenRead(defaultIconPath);
-                    _unitTypeIconCache[0] = SKImage.FromEncodedData(stream);
+                    _unitTypeIconCache[0] = sprite2;
                 }
                 else
                 {
@@ -139,6 +137,13 @@ public class AirForceRender : IDisposable
 
     private SKImage GetFlagImage(int countryId, int targetSize)
     {
+        long revision = Core.Assets.AssetManager.Default.Revision;
+        if (_flagResourceRevision != revision)
+        {
+            foreach (var image in _flagImageCache.Values) image.Dispose();
+            _flagImageCache.Clear();
+            _flagResourceRevision = revision;
+        }
         string cacheKey = $"{countryId}_{targetSize}";
         if (_flagImageCache.TryGetValue(cacheKey, out var cached)) return cached;
 
@@ -147,27 +152,18 @@ public class AirForceRender : IDisposable
             SKImage? flagImage = null;
 
             var tacticalCache = TacticalMapImageCache.Instance;
-            if (tacticalCache.IsInitialized)
+            var tacticalImage = tacticalCache.GetImage($"flag_{countryId}.png");
+            if (tacticalImage != null)
             {
-                var tacticalImage = tacticalCache.GetImage($"flag_{countryId}.png");
-                if (tacticalImage != null)
-                    flagImage = ResizeImage(tacticalImage, targetSize, targetSize);
+                flagImage = ResizeImage(tacticalImage, targetSize, targetSize);
             }
 
             if (flagImage == null)
             {
-                string basePath = Path.Combine(ConfigManager.Instance.GetStageMarkPath(), "CountryFlag");
-                string flagPath = Path.Combine(basePath, $"flag_{countryId}.png");
-                if (!File.Exists(flagPath) && (countryId == 0 || countryId == 255))
-                    flagPath = Path.Combine(basePath, "flag_1.png");
-
-                if (File.Exists(flagPath))
-                {
-                    using var stream = File.OpenRead(flagPath);
-                    using var original = SKImage.FromEncodedData(stream);
-                    if (original != null)
-                        flagImage = ResizeImage(original, targetSize, targetSize);
-                }
+                using var sprites = new ProjectSpriteLoader();
+                using var original = sprites.LoadImage($"flag_{countryId}.png")
+                    ?? (countryId is 0 or 255 ? sprites.LoadImage("flag_1.png") : null);
+                if (original != null) flagImage = ResizeImage(original, targetSize, targetSize);
             }
 
             flagImage ??= CreateDefaultFlagImage(targetSize);
@@ -377,8 +373,8 @@ public class AirForceRender : IDisposable
     {
         if (_mapData == null || _mapData.MapWidth <= 0 || _mapData.MapHeight <= 0) return null;
 
-        int row = coordinate / _mapData.MapWidth;
-        int col = coordinate % _mapData.MapWidth;
+        if (!_mapData.TryGetLocalCoordinate(coordinate, out var coord)) return null;
+        int col = coord.Col, row = coord.Row;
 
         if (row < 0 || row >= _mapData.MapHeight || col < 0 || col >= _mapData.MapWidth) return null;
 

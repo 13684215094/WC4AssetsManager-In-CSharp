@@ -198,7 +198,7 @@ public sealed class SelectionRender : IDisposable
             if (coord.Col < 0 || coord.Col >= mapWidth || coord.Row < 0 || coord.Row >= mapHeight) continue;
 
             double centerX = offsetX + coord.Col * hexSpacingX;
-            double centerY = offsetY + (coord.Col % 2) * (hexSpacingY / 2) + coord.Row * hexSpacingY;
+            double centerY = offsetY + ((coord.Col + (mapData?.HexColumnOffset ?? 0)) & 1) * (hexSpacingY / 2) + coord.Row * hexSpacingY;
 
             if (centerX + hexSize < 0 || centerX - hexSize > vpW || centerY + hexSize < 0 || centerY - hexSize > vpH) continue;
 

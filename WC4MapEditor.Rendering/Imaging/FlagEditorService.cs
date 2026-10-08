@@ -1,9 +1,9 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Diagnostics;
 using SkiaSharp;
 using WC4MapEditor.Core.Assets;
-using WC4MapEditor.Core.Config;
 using WC4MapEditor.Core.Parsers;
-using WC4MapEditor.Core.Parsers.Country;
+using WC4MapEditor.Core.Parsers.HdAtlas;
 
 namespace WC4MapEditor.Rendering.Imaging;
 
@@ -11,44 +11,39 @@ public class FlagEditorService : IFlagEditorService
 {
     private static readonly SKSamplingOptions HighQuality = new(SKFilterMode.Linear, SKMipmapMode.Linear);
 
-    private SKBitmap? _flagOverlayImage;
-    private bool _flagOverlayLoaded;
+    private readonly string? _overlayImagePath;
 
-    /// <summary>
-    /// 懒加载 Texture/FlagOverlay/flagoverlay.png。
-    /// 原先由 ConfigManager 承载，因涉及 SkiaSharp 类型已下沉到成像层。
-    /// </summary>
-    private SKBitmap? GetFlagOverlayImage()
+    public FlagEditorService(string? overlayImagePath = null) => _overlayImagePath = overlayImagePath;
+
+    private SKBitmap GetFlagOverlayImage(int countryId)
     {
-        if (_flagOverlayLoaded) return _flagOverlayImage;
-        _flagOverlayLoaded = true;
-
-        try
+        if (_overlayImagePath != null)
+            return ProjectImageDecoder.Decode(ProjectFile.ReadAllBytes(_overlayImagePath));
+        foreach (string atlas in new[] { "tacticalmap", "image/image_flags_hd" })
         {
-            string path = Path.Combine(ConfigManager.Instance.GetTexturePath("FlagOverlay"), "flagoverlay.png");
-            if (!File.Exists(path))
-            {
-                Debug.WriteLine($"[FlagEditorService] flagoverlay.png 不存在: {path}");
-                return null;
-            }
-
-            using var stream = File.OpenRead(path);
-            _flagOverlayImage = SKBitmap.Decode(stream);
-            Debug.WriteLine($"[FlagEditorService] 加载 flagoverlay.png: {_flagOverlayImage?.Width}x{_flagOverlayImage?.Height}");
+            var parser = HdAtlasParser.Get(atlas);
+            if (parser.SurfaceData == null) continue;
+            var template = parser.ImageDefinitions
+                .Where(def => def.Name.StartsWith("flag_", StringComparison.OrdinalIgnoreCase) && def.Width == 52 && def.Height == 54)
+                .OrderBy(def => def.Name == $"flag_{countryId}.png" ? 0 : def.Name == "flag_1.png" ? 1 : 2)
+                .ThenBy(def => def.Name, StringComparer.Ordinal).FirstOrDefault();
+            if (template == null) continue;
+            using var page = ProjectImageDecoder.Decode(parser.SurfaceData);
+            var overlay = BitmapPixels.Crop(page, template.X, template.Y, template.Width, template.Height);
+            using var canvas = new SKCanvas(overlay);
+            using var paint = new SKPaint { BlendMode = SKBlendMode.Clear, IsAntialias = true };
+            // Remove the country's design while keeping the selected project's outer ring and shadow.
+            canvas.DrawCircle(26.5f, 25.5f, 23.5f, paint);
+            return overlay;
         }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"[FlagEditorService] 加载 flagoverlay.png 失败: {ex.Message}");
-        }
-
-        return _flagOverlayImage;
+        throw new InvalidDataException("当前项目没有 52×54 国旗模板，无法提取边框。请先导入兼容的国旗图块。");
     }
 
     public SKBitmap? LoadSourceImage(string path)
     {
         try
         {
-            using var stream = File.OpenRead(path);
+            using var stream = ProjectFile.OpenRead(path);
             return SKBitmap.Decode(stream);
         }
         catch (Exception ex)
@@ -135,13 +130,12 @@ public class FlagEditorService : IFlagEditorService
         try
         {
             var dir = Path.GetDirectoryName(path);
-            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+            if (!string.IsNullOrEmpty(dir) && !ProjectFile.DirectoryExists(dir))
                 Directory.CreateDirectory(dir);
 
             using var data = image.Encode(format, quality);
             if (data == null) return false;
-            using var stream = File.OpenWrite(path);
-            data.SaveTo(stream);
+            WC4MapEditor.Core.Parsers.AtomicFile.Write(path, data.ToArray());
             return true;
         }
         catch (Exception ex)
@@ -156,32 +150,26 @@ public class FlagEditorService : IFlagEditorService
         var result = new FlagEditorSaveResult();
         try
         {
-            if (!Directory.Exists(outputDir))
-                Directory.CreateDirectory(outputDir);
-
+            AtlasCompositeRenderer.ValidateBaseName(baseName);
+            var files = new List<(string Path, byte[] Bytes)>();
             var flagPath = Path.Combine(outputDir, $"flag_{baseName}.png");
-            if (!SaveImage(canvasImage, flagPath, SKEncodedImageFormat.Png, 100))
-            {
-                result.ErrorMessage = "保存国旗图片失败";
-                return result;
-            }
-            result.FlagPath = flagPath;
+            files.Add((flagPath, AtlasCompositeRenderer.Encode(canvasImage, flagPath)));
+            string? circlePath = null, smallPath = null;
 
             if (circleCropped != null)
             {
-                var circlePath = Path.Combine(outputDir, $"flag_circle_{baseName}.png");
-                if (SaveImage(circleCropped, circlePath, SKEncodedImageFormat.Png, 100))
-                    result.CirclePath = circlePath;
+                circlePath = Path.Combine(outputDir, $"flag_circle_{baseName}.png");
+                files.Add((circlePath, AtlasCompositeRenderer.Encode(circleCropped, circlePath)));
 
                 using var resizedSmall = ResizeImage(circleCropped, resize2W, resize2H);
-                if (resizedSmall != null)
-                {
-                    var smallPath = Path.Combine(outputDir, $"f_{baseName}.png");
-                    if (SaveImage(resizedSmall, smallPath, SKEncodedImageFormat.Png, 100))
-                        result.SmallPath = smallPath;
-                }
+                if (resizedSmall == null) throw new IOException("小国旗缩放失败。");
+                smallPath = Path.Combine(outputDir, $"f_{baseName}.png");
+                files.Add((smallPath, AtlasCompositeRenderer.Encode(resizedSmall, smallPath)));
             }
-
+            WC4MapEditor.Core.Parsers.AtomicFile.WriteAll(files.ToArray());
+            result.FlagPath = flagPath;
+            result.CirclePath = circlePath;
+            result.SmallPath = smallPath;
             result.Success = true;
             return result;
         }
@@ -452,218 +440,70 @@ public class FlagEditorService : IFlagEditorService
     public FlagMakerResult MakeFlagWorkflow(SKBitmap workingCanvas, int countryId, string outputDir)
     {
         var result = new FlagMakerResult();
-
         try
         {
-            Debug.WriteLine($"[FlagEditorService] MakeFlagWorkflow开始: countryId={countryId}, outputDir={outputDir}");
-            Debug.WriteLine($"[FlagEditorService] 画布: {workingCanvas.Width}x{workingCanvas.Height}");
-
-            if (!Directory.Exists(outputDir))
-                Directory.CreateDirectory(outputDir);
-
-            const int canvasSize = 150;
-            const int circleTargetSize = 47;
-
-            // 步骤1: 画布内容裁剪为150x150圆形，压缩为47x47圆形
-            Debug.WriteLine($"[FlagEditorService] 步骤1: 裁剪画布为150x150圆形并压缩为47x47");
-            var circle47 = CropAndResizeCircle(workingCanvas, 0, 0, canvasSize, circleTargetSize);
-            if (circle47 == null)
+            using var circle = CropAndResizeCircle(workingCanvas, 0, 0, 150, 47)
+                ?? throw new InvalidOperationException("圆形国旗裁剪失败。");
+            using var overlay = GetFlagOverlayImage(countryId);
+            using var flag = CreateMaskedFlag(circle, overlay) ?? throw new InvalidOperationException("国旗遮罩生成失败。");
+            using var small = ResizeImage(flag, 37, 38) ?? throw new InvalidOperationException("小国旗缩放失败。");
+            var files = new List<(string Path, byte[] Bytes)>();
+            var (tacticalImage, tacticalXml) = FindTacticalMapFiles();
+            if (tacticalImage != null && tacticalXml != null)
             {
-                result.ErrorMessage = "裁剪圆形失败";
-                Debug.WriteLine($"[FlagEditorService] 错误: {result.ErrorMessage}");
-                return result;
+                var editor = new TacticalMapEditor();
+                if (!editor.LoadFromFiles(tacticalImage, tacticalXml)) throw new InvalidDataException("战术国旗图集加载失败。");
+                files.AddRange(editor.PrepareImagesAndArrange(
+                    [($"flag_{countryId}.png", flag), ($"f_{countryId:D2}.png", small)], tacticalImage, tacticalXml));
+                result.FlagPath = $"tacticalmap:flag_{countryId}.png";
+                result.SmallFlagPath = $"tacticalmap:f_{countryId:D2}.png";
             }
-            Debug.WriteLine($"[FlagEditorService] circle47: {circle47.Width}x{circle47.Height}");
-
-            using (circle47)
+            else
             {
-                // 步骤2: 创建52x54透明画布，贴circle47到(3,2)，贴overlay到(0,0)
-                Debug.WriteLine($"[FlagEditorService] 步骤2: 创建52x54透明画布，贴circle47到(3,2)，贴overlay到(0,0)");
-                var overlay = GetFlagOverlayImage();
-                if (overlay == null)
-                {
-                    result.ErrorMessage = "flagoverlay.png 未加载";
-                    Debug.WriteLine($"[FlagEditorService] 错误: {result.ErrorMessage}");
-                    return result;
-                }
-                Debug.WriteLine($"[FlagEditorService] overlay: {overlay.Width}x{overlay.Height}");
-
-                var maskedFlag = CreateMaskedFlag(circle47, overlay);
-                if (maskedFlag == null)
-                {
-                    result.ErrorMessage = "创建遮罩国旗失败";
-                    Debug.WriteLine($"[FlagEditorService] 错误: {result.ErrorMessage}");
-                    return result;
-                }
-                Debug.WriteLine($"[FlagEditorService] maskedFlag: {maskedFlag.Width}x{maskedFlag.Height}");
-
-                using (maskedFlag)
-                {
-                    // 步骤3: 将52x54压缩为37x38小国旗
-                    Debug.WriteLine($"[FlagEditorService] 步骤3: 将52x54压缩为37x38小国旗");
-                    using var smallFlag = ResizeImage(maskedFlag, 37, 38);
-                    Debug.WriteLine($"[FlagEditorService] smallFlag: {smallFlag?.Width}x{smallFlag?.Height}");
-
-                    // 步骤4: 通过tacticalmap模块添加大国旗flag_{id}.png并整理布局
-                    Debug.WriteLine($"[FlagEditorService] 步骤4: 通过tacticalmap模块添加大国旗flag_{countryId}.png");
-                    var (tacticalImagePath, tacticalXmlPath) = FindTacticalMapFiles();
-
-                    if (!string.IsNullOrEmpty(tacticalImagePath) && !string.IsNullOrEmpty(tacticalXmlPath))
-                    {
-                        Debug.WriteLine($"[FlagEditorService] 使用路径: img={tacticalImagePath}, xml={tacticalXmlPath}");
-                        var tmEditor = new TacticalMapEditor();
-                        var loadOk = tmEditor.LoadFromFiles(tacticalImagePath, tacticalXmlPath);
-                        Debug.WriteLine($"[FlagEditorService] TacticalMapEditor加载: {loadOk}");
-
-                        if (loadOk)
-                        {
-                            // 步骤4+5: 批量添加大国旗和小国旗到tacticalmap并整理布局
-                            Debug.WriteLine($"[FlagEditorService] 步骤4+5: 批量添加大国旗和小国旗并整理布局");
-                            var imagesToAdd = new List<(string name, SKBitmap image)>();
-
-                            var bigFlagCopy = maskedFlag.Copy();
-                            imagesToAdd.Add(($"flag_{countryId}.png", bigFlagCopy));
-
-                            SKBitmap? smallFlagCopy = null;
-                            if (smallFlag != null)
-                            {
-                                smallFlagCopy = smallFlag.Copy();
-                                imagesToAdd.Add(($"f_{countryId:D2}.png", smallFlagCopy));
-                            }
-
-                            var batchOk = tmEditor.AddImagesAndArrange(imagesToAdd, tacticalImagePath, tacticalXmlPath);
-                            Debug.WriteLine($"[FlagEditorService] 批量添加并整理布局结果: {batchOk}");
-
-                            bigFlagCopy.Dispose();
-                            smallFlagCopy?.Dispose();
-
-                            result.FlagPath = $"tacticalmap:flag_{countryId}.png";
-                            result.SmallFlagPath = $"tacticalmap:f_{countryId:D2}.png";
-                            Debug.WriteLine($"[FlagEditorService] TacticalMap整合完成");
-                        }
-                    }
-                    else
-                    {
-                        Debug.WriteLine($"[FlagEditorService] TacticalMap文件不存在，回退到独立文件保存");
-                        var flagPath = Path.Combine(outputDir, $"flag_{countryId}.png");
-                        SaveImage(maskedFlag, flagPath, SKEncodedImageFormat.Png, 100);
-                        result.FlagPath = flagPath;
-                        Debug.WriteLine($"[FlagEditorService] 保存大国旗: {flagPath}");
-
-                        if (smallFlag != null)
-                        {
-                            var smallFlagPath = Path.Combine(outputDir, $"f_{countryId:D2}.png");
-                            SaveImage(smallFlag, smallFlagPath, SKEncodedImageFormat.Png, 100);
-                            result.SmallFlagPath = smallFlagPath;
-                            Debug.WriteLine($"[FlagEditorService] 保存小国旗: {smallFlagPath}");
-                        }
-                    }
-
-                    // 步骤6: 将处理后的52x54国旗(maskedFlag)加入HD UI图集
-                    Debug.WriteLine($"[FlagEditorService] 步骤6: 将处理后的国旗加入HD UI图集");
-                    var (hdImagePath, hdXmlPath) = FindHdAtlasFiles();
-
-                    Debug.WriteLine($"[FlagEditorService] HD文件检查: img={hdImagePath}, xml={hdXmlPath}");
-                    Debug.WriteLine($"[FlagEditorService] HD文件存在: img={File.Exists(hdImagePath ?? "")}, xml={File.Exists(hdXmlPath ?? "")}");
-
-                    if (!string.IsNullOrEmpty(hdImagePath) && !string.IsNullOrEmpty(hdXmlPath)
-                        && File.Exists(hdImagePath) && File.Exists(hdXmlPath))
-                    {
-                        var hdEditor = new HdAtlasEditor();
-                        var hdLoadOk = hdEditor.LoadFromFiles(hdImagePath, hdXmlPath);
-                        Debug.WriteLine($"[FlagEditorService] HdAtlasEditor加载: {hdLoadOk}");
-
-                        if (hdLoadOk)
-                        {
-                            var hdFlagCopy = maskedFlag.Copy();
-                            var hdOk = hdEditor.AddImageAndSave(countryId, hdFlagCopy, hdImagePath, hdXmlPath);
-                            hdFlagCopy.Dispose();
-                            Debug.WriteLine($"[FlagEditorService] HD国旗添加结果: {hdOk}");
-                            result.HdFlagPath = $"hdatlas:flag_{countryId}.png";
-                        }
-                    }
-                    else
-                    {
-                        var hdFlagPath = Path.Combine(outputDir, $"flag_hd_{countryId}.png");
-                        SaveImage(maskedFlag, hdFlagPath, SKEncodedImageFormat.Png, 100);
-                        result.HdFlagPath = hdFlagPath;
-                        Debug.WriteLine($"[FlagEditorService] HD图集文件不存在，保存到: {hdFlagPath}");
-                    }
-                }
+                if (tacticalImage != null || tacticalXml != null) throw new InvalidDataException("战术国旗图集缺少图片或 XML。");
+                result.FlagPath = Path.Combine(outputDir, $"flag_{countryId}.png");
+                result.SmallFlagPath = Path.Combine(outputDir, $"f_{countryId:D2}.png");
+                files.Add((result.FlagPath, AtlasCompositeRenderer.Encode(flag, result.FlagPath)));
+                files.Add((result.SmallFlagPath, AtlasCompositeRenderer.Encode(small, result.SmallFlagPath)));
             }
-
+            var (hdImage, hdXml) = FindHdAtlasFiles();
+            if (hdImage != null && hdXml != null)
+            {
+                var editor = new TacticalMapEditor();
+                if (!editor.LoadFromFiles(hdImage, hdXml)) throw new InvalidDataException("HD 国旗图集加载失败。");
+                files.AddRange(editor.PrepareImagesAndArrange([($"flag_{countryId}.png", flag)], hdImage, hdXml));
+                result.HdFlagPath = $"hdatlas:flag_{countryId}.png";
+            }
+            else
+            {
+                if (hdImage != null || hdXml != null) throw new InvalidDataException("HD 国旗图集缺少图片或 XML。");
+                result.HdFlagPath = Path.Combine(outputDir, $"flag_hd_{countryId}.png");
+                files.Add((result.HdFlagPath, AtlasCompositeRenderer.Encode(flag, result.HdFlagPath)));
+            }
+            WC4MapEditor.Core.Parsers.AtomicFile.WriteAll(files.ToArray());
             result.Success = true;
-            Debug.WriteLine($"[FlagEditorService] MakeFlagWorkflow完成: Success={result.Success}");
-            return result;
         }
         catch (Exception ex)
         {
+            result.FlagPath = result.SmallFlagPath = result.HdFlagPath = null;
             result.ErrorMessage = ex.Message;
-            Debug.WriteLine($"[FlagEditorService] MakeFlagWorkflow异常: {ex}");
-            return result;
         }
+        return result;
     }
 
-    private (string? imagePath, string? xmlPath) FindTacticalMapFiles()
+    private static (string? imagePath, string? xmlPath) FindTacticalMapFiles()
+        => FindAtlasFiles("tacticalmap");
+
+    private static (string? imagePath, string? xmlPath) FindHdAtlasFiles()
+        => FindAtlasFiles("image/image_flags_hd");
+
+    private static (string? imagePath, string? xmlPath) FindAtlasFiles(string stem)
     {
-        string? imagePath = null;
-        string? xmlPath = null;
-
-        var am = AssetManager.Default;
-        if (am.IsLoaded)
-        {
-            var imgEntry = am.Find("tacticalmap.webp") ?? am.Find("tacticalmap.png");
-            var xmlEntry = am.Find("tacticalmap.xml");
-
-            if (imgEntry != null) imagePath = imgEntry.FullPath;
-            if (xmlEntry != null) xmlPath = xmlEntry.FullPath;
-        }
-
-        if (!string.IsNullOrEmpty(imagePath) && !string.IsNullOrEmpty(xmlPath))
-            return (imagePath, xmlPath);
-
-        var parser = CountrySettingParser.Instance;
-        var tacticalMapDir = parser.TacticalMapDir;
-
-        if (string.IsNullOrEmpty(tacticalMapDir))
-            return (null, null);
-
-        var dirs = new[] { tacticalMapDir, Path.GetDirectoryName(tacticalMapDir) ?? "" };
-        var imgExts = new[] { ".png", ".webp" };
-
-        foreach (var dir in dirs)
-        {
-            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) continue;
-            foreach (var ext in imgExts)
-            {
-                var imgPath = Path.Combine(dir, $"tacticalmap{ext}");
-                var xmlPath2 = Path.Combine(dir, "tacticalmap.xml");
-                if (File.Exists(imgPath) && File.Exists(xmlPath2))
-                    return (imgPath, xmlPath2);
-            }
-        }
-
-        return (null, null);
-    }
-
-    private (string? imagePath, string? xmlPath) FindHdAtlasFiles()
-    {
-        var parser = CountrySettingParser.Instance;
-        var hdImagePath = parser.FlagsHdImagePath;
-        var hdXmlPath = parser.FlagsHdXmlPath;
-
-        if (!string.IsNullOrEmpty(hdImagePath) && !string.IsNullOrEmpty(hdXmlPath))
-        {
-            if (File.Exists(hdImagePath) && File.Exists(hdXmlPath))
-                return (hdImagePath, hdXmlPath);
-
-            var dir = Path.GetDirectoryName(hdImagePath) ?? "";
-            var pngPath = Path.Combine(dir, "image_flags_hd.png");
-            if (File.Exists(pngPath) && File.Exists(hdXmlPath))
-                return (pngPath, hdXmlPath);
-        }
-
-        return (null, null);
+        string root = AssetManager.Default.GetActiveAssetsRoot();
+        string xml = Path.Combine(root, stem + ".xml");
+        string? image = ProjectTextureLoader.FindPath(stem);
+        if (ProjectFile.Exists(xml)) image = HdAtlasParser.Get(stem).ImagePath ?? image;
+        return (ProjectFile.Exists(image) ? image : null, ProjectFile.Exists(xml) ? xml : null);
     }
 
     // ========== 涂鸦引擎 ==========

@@ -1,3 +1,4 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -39,7 +40,20 @@ public class GeneralSettingParser
     private bool _portraitsLoaded;
     private readonly Dictionary<GeneralSettingData, (JsonObject Original, JsonObject Baseline, int Id)> _original = new();
     private XDocument _portraitDocument = new(new XElement("Portraits"));
+    private readonly FileVersionGuard _generalVersion = new();
+    private readonly FileVersionGuard _portraitVersion = new();
+    private JsonArray _generalBaseline = new();
+    private byte[] _portraitBaseline = [];
     public string? LastError { get; private set; }
+    public bool HasChanges
+    {
+        get
+        {
+            try { return _generalsLoaded && !JsonNode.DeepEquals(BuildGenerals(), _generalBaseline) ||
+                _portraitsLoaded && !ProjectFile.ContentEquals(PortraitPosPath, BuildPortraits(), _portraitBaseline); }
+            catch (Exception ex) when (ex is InvalidOperationException or JsonException or ArgumentException) { return true; }
+        }
+    }
 
     private List<GeneralSettingData> _data = new();
     public IReadOnlyList<GeneralSettingData> All => _data;
@@ -72,36 +86,11 @@ public class GeneralSettingParser
 
     private void ResolvePaths()
     {
-        // 如果 AssetManager 未扫描，先尝试默认路径扫描
-        if (_explicitRoot == null && !_manager.IsLoaded)
-        {
-            try { _manager.ScanDefault(); } catch { /* 静默处理 */ }
-        }
-
-        var root = _explicitRoot ?? _manager.AssetsRoot;
-        if (!string.IsNullOrEmpty(root) && Directory.Exists(root))
-        {
-            ConfigPath = Path.Combine(root, "json", "GeneralSettings.json");
-            PortraitPosPath = Path.Combine(root, "config", "def_portraitpos.xml");
-            GeneralPhotoDir = Path.Combine(root, "image", "generalphoto");
-            HeadsDir = Path.Combine(root, "image", "heads");
-        }
-        else
-        {
-            // 兜底：从执行目录向上搜索 Resource/WC4DATA/assets
-            string candidate = _explicitRoot ?? AssetManager.GetDefaultAssetsPath();
-
-            ConfigPath = Path.Combine(candidate, "json", "GeneralSettings.json");
-            PortraitPosPath = Path.Combine(candidate, "config", "def_portraitpos.xml");
-            GeneralPhotoDir = Path.Combine(candidate, "image", "generalphoto");
-            HeadsDir = Path.Combine(candidate, "image", "heads");
-        }
-
-        Debug.WriteLine($"[GeneralSettingParser] 解析路径:");
-        Debug.WriteLine($"  ConfigPath      = {ConfigPath}");
-        Debug.WriteLine($"  PortraitPosPath = {PortraitPosPath}");
-        Debug.WriteLine($"  GeneralPhotoDir = {GeneralPhotoDir}");
-        Debug.WriteLine($"  HeadsDir        = {HeadsDir}");
+        string root = _explicitRoot ?? _manager.GetActiveAssetsRoot();
+        ConfigPath = Path.Combine(root, "json", "GeneralSettings.json");
+        PortraitPosPath = Path.Combine(root, "config", "def_portraitpos.xml");
+        GeneralPhotoDir = Path.Combine(root, "image", "generalphoto");
+        HeadsDir = Path.Combine(root, "image", "heads");
     }
 
     public void LoadAll()
@@ -114,13 +103,21 @@ public class GeneralSettingParser
 
     public void Reload() => LoadAll();
 
+    public static void ClearInstance(bool preserveChanges = false)
+    {
+        lock (_lock)
+        {
+            if (!preserveChanges || _instance?.HasChanges != true) _instance = null;
+        }
+    }
+
     // ============================== GeneralSettings.json ==============================
     public void LoadGeneralSettings()
     {
         _generalsLoaded = false;
         try
         {
-            var json = File.ReadAllText(ConfigPath);
+            var json = ProjectFile.ReadAllText(ConfigPath).TrimStart('\uFEFF');
             var rows = JsonNode.Parse(json, documentOptions: new JsonDocumentOptions
             { AllowTrailingCommas = true, CommentHandling = JsonCommentHandling.Skip }) as JsonArray
                 ?? throw new InvalidDataException("GeneralSettings.json must contain an array.");
@@ -131,6 +128,8 @@ public class GeneralSettingParser
             for (int i = 0; i < loaded.Count; i++)
                 _original.Add(loaded[i], ((JsonObject)rows[i]!, JsonSerializer.SerializeToNode(loaded[i], JsonOpts)!.AsObject(), loaded[i].Id));
             _data = loaded;
+            _generalBaseline = (JsonArray)rows.DeepClone();
+            _generalVersion.Capture(ConfigPath);
             _generalsLoaded = true;
             _manager.InvalidateData();
             Debug.WriteLine($"[GeneralSettingParser] 已加载 {_data.Count} 个将领配置");
@@ -147,12 +146,25 @@ public class GeneralSettingParser
 
     public int GetNextId() => _data.Count == 0 ? 1001 : checked(_data.Max(g => g.Id) + 1);
 
-    public JsonArray GetSnapshot() => JsonNode.Parse(SerializeGenerals())!.AsArray();
+    public JsonArray GetSnapshot() => BuildGenerals();
 
-    private byte[] SerializeGenerals()
+    private byte[] SerializeGenerals(bool acceptSave = true)
     {
         VerifyAssetRoot();
         if (!_generalsLoaded) throw new InvalidOperationException("GeneralSettings was not loaded successfully; saving is disabled.");
+        _generalVersion.Verify();
+        var output = BuildGenerals();
+        byte[] bytes = System.Text.Encoding.UTF8.GetBytes(output.ToJsonString(JsonOpts));
+        if (acceptSave) ResourceSaveTracker.Register(bytes, _generalVersion.Verify, saved =>
+        {
+            _generalVersion.AcceptSaved(saved);
+            _generalBaseline = output;
+        });
+        return bytes;
+    }
+
+    private JsonArray BuildGenerals()
+    {
         var output = new JsonArray();
         foreach (var general in _data)
         {
@@ -173,15 +185,16 @@ public class GeneralSettingParser
             }
             else output.Add(current);
         }
-        return System.Text.Encoding.UTF8.GetBytes(output.ToJsonString(JsonOpts));
+        return output;
     }
 
     private void VerifyAssetRoot()
     {
-        if (_explicitRoot == null && _manager.IsLoaded &&
-            !string.Equals(Path.GetFullPath(Path.Combine(_manager.AssetsRoot, "json", "GeneralSettings.json")),
-                Path.GetFullPath(ConfigPath), OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
-            throw new InvalidOperationException("The active assets directory changed. Reload this editor before saving.");
+        if (_explicitRoot == null &&
+            (!_manager.IsLoaded || _manager.IsLoaded &&
+                !string.Equals(Path.GetFullPath(Path.Combine(_manager.AssetsRoot, "json", "GeneralSettings.json")),
+                    Path.GetFullPath(ConfigPath), OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)))
+            throw new InvalidOperationException("The active assets directory changed or was closed. Reload this editor before saving.");
     }
 
     public bool SaveGeneralSettings(string? outputPath = null)
@@ -189,7 +202,7 @@ public class GeneralSettingParser
         try
         {
             var path = outputPath ?? ConfigPath;
-            var bytes = SerializeGenerals();
+            var bytes = SerializeGenerals(SamePath(path, ConfigPath));
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
             AtomicFile.Write(path, bytes);
             _manager.InvalidateData();
@@ -211,14 +224,16 @@ public class GeneralSettingParser
         _portraitsLoaded = false;
         try
         {
-            if (!File.Exists(PortraitPosPath))
+            if (!ProjectFile.Exists(PortraitPosPath))
             {
                 _portraits.Clear();
                 _portraitDocument = new XDocument(new XElement("Portraits"));
+                _portraitBaseline = BuildPortraits();
+                _portraitVersion.Capture(PortraitPosPath);
                 _portraitsLoaded = true;
                 return;
             }
-            var doc = XDocument.Load(PortraitPosPath);
+            var doc = XDocument.Load(ProjectFile.ResolveRead(PortraitPosPath));
             var root = doc.Element("Portraits");
             if (root == null) throw new InvalidDataException("Expected a Portraits root.");
             var portraits = new Dictionary<string, PortraitPosEntry>(StringComparer.OrdinalIgnoreCase);
@@ -240,6 +255,8 @@ public class GeneralSettingParser
             _portraitDocument = doc;
             _portraits.Clear();
             foreach (var item in portraits) _portraits[item.Key] = item.Value;
+            _portraitBaseline = BuildPortraits();
+            _portraitVersion.Capture(PortraitPosPath);
             _portraitsLoaded = true;
             Debug.WriteLine($"[GeneralSettingParser] 已加载 {_portraits.Count} 个 PortraitPos");
         }
@@ -272,7 +289,7 @@ public class GeneralSettingParser
         try
         {
             var path = outputPath ?? PortraitPosPath;
-            var bytes = SerializePortraits();
+            var bytes = SerializePortraits(SamePath(path, PortraitPosPath));
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
             AtomicFile.Write(path, bytes);
             LastError = null;
@@ -287,10 +304,22 @@ public class GeneralSettingParser
         }
     }
 
-    private byte[] SerializePortraits()
+    private byte[] SerializePortraits(bool acceptSave = true)
     {
         VerifyAssetRoot();
         if (!_portraitsLoaded) throw new InvalidOperationException("PortraitPos was not loaded successfully; saving is disabled.");
+        _portraitVersion.Verify();
+        byte[] bytes = BuildPortraits();
+        if (acceptSave) ResourceSaveTracker.Register(bytes, _portraitVersion.Verify, saved =>
+        {
+            _portraitVersion.AcceptSaved(saved);
+            _portraitBaseline = bytes;
+        });
+        return bytes;
+    }
+
+    private byte[] BuildPortraits()
+    {
         var doc = new XDocument(_portraitDocument);
         var root = doc.Root!;
         foreach (var element in root.Elements("general").ToList())
@@ -321,6 +350,9 @@ public class GeneralSettingParser
         doc.Save(stream);
         return stream.ToArray();
     }
+
+    private static bool SamePath(string left, string right) => string.Equals(Path.GetFullPath(left), Path.GetFullPath(right),
+        OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
 
     // ============================== 复合操作（新增/删除 同步两边） ==============================
     public (GeneralSettingData g, PortraitPosEntry p) AddNewGeneral(string name, string ename, int? id = null)
@@ -373,7 +405,8 @@ public class GeneralSettingParser
             var portraits = SerializePortraits();
             Directory.CreateDirectory(Path.GetDirectoryName(ConfigPath)!);
             Directory.CreateDirectory(Path.GetDirectoryName(PortraitPosPath)!);
-            AtomicFile.WriteAll((ConfigPath, generals), (PortraitPosPath, portraits));
+            AtomicFile.WriteAll(_portraits.Count == 0 && !ProjectFile.Exists(PortraitPosPath)
+                ? [(ConfigPath, generals)] : [(ConfigPath, generals), (PortraitPosPath, portraits)]);
             _manager.InvalidateData();
             LastError = null;
             return true;
@@ -408,17 +441,17 @@ public class GeneralSettingParser
     {
         if (string.IsNullOrEmpty(ename)) return null;
         var f1 = Path.Combine(GeneralPhotoDir, $"general_{ename}.webp");
-        if (File.Exists(f1)) return f1;
+        if (ProjectFile.Exists(f1)) return f1;
         var f2 = Path.Combine(GeneralPhotoDir, $"general_{ename}.png");
-        return File.Exists(f2) ? f2 : null;
+        return ProjectFile.Exists(f2) ? f2 : null;
     }
 
     public string? GetHeadPath(string ename)
     {
         if (string.IsNullOrEmpty(ename)) return null;
         var f1 = Path.Combine(HeadsDir, $"general_circle_{ename}.webp");
-        if (File.Exists(f1)) return f1;
+        if (ProjectFile.Exists(f1)) return f1;
         var f2 = Path.Combine(HeadsDir, $"general_circle_{ename}.png");
-        return File.Exists(f2) ? f2 : null;
+        return ProjectFile.Exists(f2) ? f2 : null;
     }
 }

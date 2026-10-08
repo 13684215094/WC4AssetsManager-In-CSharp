@@ -1,7 +1,8 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Diagnostics;
 using System.IO;
 using SkiaSharp;
-using WC4MapEditor.Core.Config;
+using WC4MapEditor.Rendering.Imaging;
 using WC4MapEditor.Core.Helpers;
 using WC4MapEditor.Core.Models;
 
@@ -14,7 +15,6 @@ public class TrapRender : IDisposable
     private const double FLAG_SIZE_RATIO = 0.5;
     private const double BASE_RADIUS = 15.0;
     private const double BASE_HEX_SIZE = 20.0;
-    private static readonly double HEX_HORIZONTAL_SPACING = BASE_HEX_SIZE * 1.5;
     private static readonly double HEX_VERTICAL_SPACING = BASE_HEX_SIZE * Math.Sqrt(3);
 
     private readonly Camera _camera;
@@ -27,6 +27,7 @@ public class TrapRender : IDisposable
     private SKImage? _landTrapImage;
     private SKImage? _seaTrapImage;
     private readonly Dictionary<string, SKImage> _flagImageCache = new();
+    private long _flagResourceRevision = -1;
 
     private readonly List<SKRect> _spriteRects = new();
     private readonly List<SKRotationScaleMatrix> _transforms = new();
@@ -59,26 +60,23 @@ public class TrapRender : IDisposable
                 _seaTrapImage?.Dispose();
                 _landTrapImage = null;
                 _seaTrapImage = null;
+                foreach (var flag in _flagImageCache.Values) flag.Dispose();
                 _flagImageCache.Clear();
 
-                string infoMarkPath = ConfigManager.Instance.GetInformationMarkPath();
+                using var sprites = new ProjectSpriteLoader();
 
-                string landTrapPath = Path.Combine(infoMarkPath, "land_trap.png");
-                if (File.Exists(landTrapPath))
+                if (sprites.LoadImage("land_trap.png") is { } sprite1)
                 {
-                    using var stream = File.OpenRead(landTrapPath);
-                    _landTrapImage = SKImage.FromEncodedData(stream);
+                    _landTrapImage = sprite1;
                 }
                 else
                 {
                     _landTrapImage = CreateDefaultTrapImage(SKColors.Red);
                 }
 
-                string seaTrapPath = Path.Combine(infoMarkPath, "sea_trap.png");
-                if (File.Exists(seaTrapPath))
+                if (sprites.LoadImage("sea_trap.png") is { } sprite2)
                 {
-                    using var stream = File.OpenRead(seaTrapPath);
-                    _seaTrapImage = SKImage.FromEncodedData(stream);
+                    _seaTrapImage = sprite2;
                 }
                 else
                 {
@@ -106,6 +104,13 @@ public class TrapRender : IDisposable
 
     private SKImage GetFlagImage(int countryId, int targetSize)
     {
+        long revision = Core.Assets.AssetManager.Default.Revision;
+        if (_flagResourceRevision != revision)
+        {
+            foreach (var image in _flagImageCache.Values) image.Dispose();
+            _flagImageCache.Clear();
+            _flagResourceRevision = revision;
+        }
         string cacheKey = $"{countryId}_{targetSize}";
         if (_flagImageCache.TryGetValue(cacheKey, out var cached)) return cached;
 
@@ -114,27 +119,18 @@ public class TrapRender : IDisposable
             SKImage? flagImage = null;
 
             var tacticalCache = TacticalMapImageCache.Instance;
-            if (tacticalCache.IsInitialized)
+            var tacticalImage = tacticalCache.GetImage($"flag_{countryId}.png");
+            if (tacticalImage != null)
             {
-                var tacticalImage = tacticalCache.GetImage($"flag_{countryId}.png");
-                if (tacticalImage != null)
-                    flagImage = ResizeImage(tacticalImage, targetSize, targetSize);
+                flagImage = ResizeImage(tacticalImage, targetSize, targetSize);
             }
 
             if (flagImage == null)
             {
-                string basePath = Path.Combine(ConfigManager.Instance.GetStageMarkPath(), "CountryFlag");
-                string flagPath = Path.Combine(basePath, $"flag_{countryId}.png");
-                if (!File.Exists(flagPath) && (countryId == 0 || countryId == 255))
-                    flagPath = Path.Combine(basePath, "flag_1.png");
-
-                if (File.Exists(flagPath))
-                {
-                    using var stream = File.OpenRead(flagPath);
-                    using var original = SKImage.FromEncodedData(stream);
-                    if (original != null)
-                        flagImage = ResizeImage(original, targetSize, targetSize);
-                }
+                using var sprites = new ProjectSpriteLoader();
+                using var original = sprites.LoadImage($"flag_{countryId}.png")
+                    ?? (countryId is 0 or 255 ? sprites.LoadImage("flag_1.png") : null);
+                if (original != null) flagImage = ResizeImage(original, targetSize, targetSize);
             }
 
             flagImage ??= CreateDefaultFlagImage(targetSize);
@@ -238,9 +234,6 @@ public class TrapRender : IDisposable
 
             foreach (var trap in _mapData.Traps)
             {
-                if (trap.Coordinate < 0 || trap.Coordinate >= _mapData.MapWidth * _mapData.MapHeight)
-                    continue;
-
                 var screenPos = CalculateScreenPosition(trap.Coordinate);
                 if (screenPos == null) continue;
                 if (!IsInVisibleBounds(screenPos.Value, visibleBounds)) continue;
@@ -341,8 +334,8 @@ public class TrapRender : IDisposable
     {
         if (_mapData == null || _mapData.MapWidth <= 0 || _mapData.MapHeight <= 0) return null;
 
-        int row = coordinate / _mapData.MapWidth;
-        int col = coordinate % _mapData.MapWidth;
+        if (!_mapData.TryGetLocalCoordinate(coordinate, out var coord)) return null;
+        int col = coord.Col, row = coord.Row;
 
         if (row < 0 || row >= _mapData.MapHeight || col < 0 || col >= _mapData.MapWidth) return null;
 
@@ -354,7 +347,8 @@ public class TrapRender : IDisposable
     {
         try
         {
-            var terrain = _mapData.GetTerrain(hexIndex);
+            if (!_mapData.TryGetLocalCoordinate(hexIndex, out var cell)) return false;
+            var terrain = _mapData.GetTerrain(cell.Col, cell.Row);
             return terrain.TileType1 == 1;
         }
         catch { return false; }

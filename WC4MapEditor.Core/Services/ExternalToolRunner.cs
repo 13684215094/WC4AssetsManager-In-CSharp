@@ -1,3 +1,4 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
@@ -5,8 +6,8 @@ using System.Text;
 namespace WC4MapEditor.Core.Services;
 
 /// <summary>
-/// Core/Lib 目录下打包外部工具（OCR 识别、zme 建筑脚本生成）的调用封装。
-/// 工具随程序输出到 bin/Lib，无需用户额外安装 Python。
+/// 可选外部工具（OCR 识别、zme 建筑脚本生成）的调用封装。
+/// 安装在程序目录的 Lib 中；当前源码不包含工具二进制文件。
 /// </summary>
 public static class ExternalToolRunner
 {
@@ -22,16 +23,16 @@ public static class ExternalToolRunner
         var baseDir = AppContext.BaseDirectory;
 
         var direct = Path.Combine(baseDir, LibFolderName);
-        if (Directory.Exists(direct)) return direct;
+        if (ProjectFile.DirectoryExists(direct)) return direct;
 
         var current = baseDir;
         for (int i = 0; i < 6 && !string.IsNullOrEmpty(current); i++)
         {
             var inCore = Path.Combine(current, "WC4MapEditor.Core", LibFolderName);
-            if (Directory.Exists(inCore)) return inCore;
+            if (ProjectFile.DirectoryExists(inCore)) return inCore;
 
             var nearby = Path.Combine(current, LibFolderName);
-            if (File.Exists(Path.Combine(nearby, OcrExeName))) return nearby;
+            if (ProjectFile.Exists(Path.Combine(nearby, OcrExeName))) return nearby;
 
             current = Path.GetDirectoryName(current);
         }
@@ -45,11 +46,13 @@ public static class ExternalToolRunner
         if (lib == null) return null;
 
         var path = Path.Combine(lib, exeName);
-        return File.Exists(path) ? path : null;
+        return ProjectFile.Exists(path) ? path : null;
     }
 
     public static bool IsOcrAvailable => ResolveToolPath(OcrExeName) != null;
     public static bool IsGenBuildingsAvailable => ResolveToolPath(GenBuildingsExeName) != null;
+    public static string? UnavailableReason => IsOcrAvailable && IsGenBuildingsAvailable ? null :
+        "文字识别生成建筑为可选扩展，需在程序目录的 Lib 中安装 ocr_map.exe 和 gen_buildings_zme.exe；当前发布不包含这两个工具。";
 
     /// <summary>运行外部工具并捕获输出。</summary>
     public static async Task<(int ExitCode, string StdOut, string StdErr)> RunAsync(
@@ -103,14 +106,14 @@ public static class ExternalToolRunner
         if (exe == null)
             return (false, $"未找到 {OcrExeName}（应位于 Lib 目录）", outputJsonPath);
 
-        if (!File.Exists(imagePath))
+        if (!ProjectFile.Exists(imagePath))
             return (false, $"图片不存在: {imagePath}", outputJsonPath);
 
         // --quiet：关闭进度条等控制台输出。
         // 打包后的 Python 工具在 stdout 被重定向为管道时会退回系统区域编码（中文 Windows 为 GBK），
         // 而进度条使用的 ░ / █ 无法用 GBK 编码，会抛 UnicodeEncodeError 使进程直接崩溃。
         // 静默模式下唯一的输出是一行结果数量（纯 ASCII），因此可彻底规避该问题。
-        var args = new List<string> { imagePath, "-o", outputJsonPath, "--quiet" };
+        var args = new List<string> { ProjectFile.ResolveRead(imagePath), "-o", outputJsonPath, "--quiet" };
         if (!string.IsNullOrWhiteSpace(model)) { args.Add("-m"); args.Add(model); }
         if (!string.IsNullOrWhiteSpace(language)) { args.Add("-l"); args.Add(language); }
 
@@ -119,7 +122,7 @@ public static class ExternalToolRunner
         if (code != 0)
             return (false, $"OCR 识别失败（退出码 {code}）: {Tail(stdErr, stdOut)}", outputJsonPath);
 
-        if (!File.Exists(outputJsonPath))
+        if (!ProjectFile.Exists(outputJsonPath))
             return (false, $"OCR 未生成结果文件: {outputJsonPath}", outputJsonPath);
 
         return (true, "OCR 识别完成", outputJsonPath);
@@ -137,15 +140,15 @@ public static class ExternalToolRunner
         if (exe == null)
             return (false, $"未找到 {GenBuildingsExeName}（应位于 Lib 目录）", outputZmePath);
 
-        if (!File.Exists(mapJsonPath))
+        if (!ProjectFile.Exists(mapJsonPath))
             return (false, $"地图网格 JSON 不存在: {mapJsonPath}", outputZmePath);
-        if (!File.Exists(geoJsonPath))
+        if (!ProjectFile.Exists(geoJsonPath))
             return (false, $"OCR 结果不存在: {geoJsonPath}", outputZmePath);
 
         var args = new List<string>
         {
-            mapJsonPath,
-            geoJsonPath,
+            ProjectFile.ResolveRead(mapJsonPath),
+            ProjectFile.ResolveRead(geoJsonPath),
             imageWidth.ToString(CultureInfo.InvariantCulture),
             imageHeight.ToString(CultureInfo.InvariantCulture),
             "-t", buildingType.ToString(CultureInfo.InvariantCulture),
@@ -165,7 +168,7 @@ public static class ExternalToolRunner
         if (code != 0)
             return (false, $"生成 zme 失败（退出码 {code}）: {Tail(stdErr, stdOut)}", outputZmePath);
 
-        if (!File.Exists(outputZmePath))
+        if (!ProjectFile.Exists(outputZmePath))
             return (false, $"未生成 zme 文件: {outputZmePath}", outputZmePath);
 
         return (true, Tail(stdOut, stdErr), outputZmePath);
