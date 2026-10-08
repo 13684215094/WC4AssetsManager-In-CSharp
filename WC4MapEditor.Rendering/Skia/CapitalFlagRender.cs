@@ -1,7 +1,8 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Diagnostics;
 using System.IO;
 using SkiaSharp;
-using WC4MapEditor.Core.Config;
+using WC4MapEditor.Rendering.Imaging;
 using WC4MapEditor.Core.Parsers;
 using WC4MapEditor.Core.Models;
 
@@ -11,7 +12,7 @@ namespace WC4MapEditor.Rendering.Skia;
 /// 首都国旗渲染层 - 对齐 VB 版 LegionModifier.DrawCapitalFlagsOnMap。
 /// <para>
 /// 遍历 <see cref="MapData.Capitals"/>，在每个首都格上绘制该格所属军团国家 ID 的国旗：
-/// 优先取战术地图解析出的 flag_{countryId}.png，其次回退到 StageMark/CountryFlag 下的文件。
+/// 优先取战术地图解析出的 flag_{countryId}.png，其次读取项目 HD 国旗图集。
 /// </para>
 /// <para>
 /// 归属值按本项目约定解释为 <see cref="MapData.Legions"/> 的索引；
@@ -51,6 +52,7 @@ public sealed class CapitalFlagRender : IDisposable
     private readonly HashSet<int> _ownedImages = new();
 
     private readonly object _flagCacheLock = new();
+    private long _resourceRevision = -1;
 
     public bool EnableCapitalFlagRender
     {
@@ -142,21 +144,19 @@ public sealed class CapitalFlagRender : IDisposable
         for (int i = 0; i < capitals.Count; i++)
         {
             int hexIndex = capitals[i].Coordinate;
-            if (hexIndex < 0 || hexIndex >= totalCells) continue;
-
-            int col = hexIndex % mapWidth;
-            int row = hexIndex / mapWidth;
+            if (!mapData.TryGetLocalCoordinate(hexIndex, out var coord)) continue;
+            int col = coord.Col, row = coord.Row;
 
             if (IsTileClipped(mapData, col, row)) continue;
 
             // 与地形/领域/归属国旗层共用同一套屏幕坐标公式
             float x = (float)(offsetX + col * hexSpacingX);
-            float y = (float)(offsetY + (col % 2) * (hexSpacingY / 2) + row * hexSpacingY);
+            float y = (float)(offsetY + (mapData.IsOddColumn(col) ? 1 : 0) * (hexSpacingY / 2) + row * hexSpacingY);
 
             // 国旗尺寸固定，视口外直接跳过
             if (x + half < 0 || x - half > viewportWidth || y + half < 0 || y - half > viewportHeight) continue;
 
-            int countryId = ResolveCapitalCountryId(mapData, col, row, hexIndex);
+            int countryId = ResolveCapitalCountryId(mapData, col, row, row * mapWidth + col);
             var flag = countryId >= 0 ? GetFlagImage(countryId) : null;
 
             if (flag != null)
@@ -223,6 +223,7 @@ public sealed class CapitalFlagRender : IDisposable
     /// <summary>地图裁剪区之外的格子不绘制（与归属国旗层一致）</summary>
     private static bool IsTileClipped(MapData mapData, int col, int row)
     {
+        if (mapData.UsesExternalCoordinates) return false;
         int clipX = mapData.Header?.MapClipX ?? 0;
         int clipY = mapData.Header?.MapClipY ?? 0;
         if (clipY > 0 && row < clipY) return true;
@@ -231,25 +232,30 @@ public sealed class CapitalFlagRender : IDisposable
     }
 
     /// <summary>
-    /// 取国旗图片：优先战术地图解析出的 flag_{countryId}.png，其次 CountryFlag 目录下的文件。
+    /// 取国旗图片：优先战术地图解析出的 flag_{countryId}.png，其次项目 HD 国旗图集。
     /// 战术地图缓存返回的是共享对象，不归本层所有，Dispose 时不能释放。
     /// </summary>
     private SKImage? GetFlagImage(int countryId)
     {
         lock (_flagCacheLock)
         {
+            long revision = Core.Assets.AssetManager.Default.Revision;
+            if (_resourceRevision != revision)
+            {
+                InvalidateCache();
+                _resourceRevision = revision;
+            }
             if (_flagCache.TryGetValue(countryId, out var cached)) return cached;
 
             SKImage? image = null;
             try
             {
                 var cache = TacticalMapImageCache.Instance;
-                if (cache.IsInitialized)
-                    image = cache.GetImage($"flag_{countryId}.png");
+                image = cache.GetImage($"flag_{countryId}.png");
 
                 if (image == null)
                 {
-                    image = LoadFlagImageFromFile(countryId);
+                    image = LoadProjectFlag(countryId);
                     if (image != null) _ownedImages.Add(countryId);
                 }
             }
@@ -263,34 +269,11 @@ public sealed class CapitalFlagRender : IDisposable
         }
     }
 
-    private static SKImage? LoadFlagImageFromFile(int countryId)
+    private static SKImage? LoadProjectFlag(int countryId)
     {
-        try
-        {
-            string flagPath = GetFlagPath(countryId);
-            if (!File.Exists(flagPath)) return null;
-
-            using var stream = File.OpenRead(flagPath);
-            // 与归属国旗层保持一致：不 Dispose bitmap，确保 SKImage 背后的像素仍然有效
-            var bitmap = SKBitmap.Decode(stream);
-            return bitmap == null ? null : SKImage.FromBitmap(bitmap);
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private static string GetFlagPath(int countryId)
-    {
-        string basePath = Path.Combine(ConfigManager.Instance.GetStageMarkPath(), "CountryFlag");
-        string flagPath = Path.Combine(basePath, $"flag_{countryId}.png");
-
-        // 对齐归属国旗层：无国家(0/255)时回退到 flag_1
-        if (!File.Exists(flagPath) && (countryId == 0 || countryId == 255))
-            flagPath = Path.Combine(basePath, "flag_1.png");
-
-        return flagPath;
+        using var sprites = new ProjectSpriteLoader();
+        return sprites.LoadImage($"flag_{countryId}.png", "image/image_flags_hd")
+            ?? (countryId is 0 or 255 ? sprites.LoadImage("flag_1.png", "image/image_flags_hd") : null);
     }
 
     public void Dispose()

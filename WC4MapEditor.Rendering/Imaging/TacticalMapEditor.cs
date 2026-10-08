@@ -1,3 +1,4 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Diagnostics;
 using System.Xml;
 using SkiaSharp;
@@ -121,6 +122,7 @@ public class OrthographicCamera
 
 public class TacticalMapObject
 {
+    internal string? OriginalName { get; set; }
     public string Name { get; set; } = "";
     public int X { get; set; }
     public int Y { get; set; }
@@ -167,6 +169,7 @@ public class TacticalMapObject
     {
         return new TacticalMapObject
         {
+            OriginalName = src.OriginalName,
             Name = src.Name,
             X = src.X,
             Y = src.Y,
@@ -187,6 +190,7 @@ public class TacticalMapEditor
     private string? _xmlFilePath;
     private string? _textureName;
     private byte[]? _imageData;
+    private XmlDocument? _xmlDocument;
     private readonly List<TacticalMapObject> _objects = new();
     private readonly Dictionary<string, TacticalMapObject> _objectByName = new();
 
@@ -198,113 +202,82 @@ public class TacticalMapEditor
     public int ImageWidth { get; private set; }
     public int ImageHeight { get; private set; }
     public bool IsLoaded { get; private set; }
+    public bool IsAtlas { get; private set; }
+    public string? LastError { get; private set; }
 
     public event Action? DataChanged;
 
     public bool LoadFromFiles(string imageFilePath, string? xmlFilePath = null)
     {
+        LastError = null;
+        Reset();
         try
         {
+            byte[] data = ProjectFile.ReadAllBytes(imageFilePath);
+            using var bitmap = ProjectImageDecoder.Decode(data);
+            if (bitmap == null) throw new InvalidDataException("Unsupported or damaged image.");
+            string? xml = xmlFilePath ?? FindAssociatedXml(imageFilePath);
+            if (xml != null) ParseXmlConfig(xml);
+            _imageData = data;
             _imageFilePath = imageFilePath;
-            _xmlFilePath = xmlFilePath;
-
-            _imageData = File.ReadAllBytes(imageFilePath);
-            if (_imageData.Length == 0)
-            {
-                Debug.WriteLine("[TacticalMapEditor] 图片文件为空");
-                return false;
-            }
-
-            if (!string.IsNullOrEmpty(xmlFilePath) && File.Exists(xmlFilePath))
-            {
-                ParseXmlConfig(xmlFilePath);
-            }
-            else
-            {
-                string? autoXml = FindAssociatedXml(imageFilePath);
-                if (autoXml != null)
-                {
-                    _xmlFilePath = autoXml;
-                    ParseXmlConfig(autoXml);
-                }
-            }
-
+            _xmlFilePath = xml;
+            ImageWidth = bitmap.Width;
+            ImageHeight = bitmap.Height;
             IsLoaded = true;
-
-            // 从图片数据获取尺寸（与Scene中 _sourceBitmap.Width/Height 一致）
-            try
-            {
-                using var stream = new MemoryStream(_imageData);
-                using var bitmap = SKBitmap.Decode(stream);
-                if (bitmap != null)
-                {
-                    ImageWidth = bitmap.Width;
-                    ImageHeight = bitmap.Height;
-                }
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"[TacticalMapEditor] 获取图片尺寸失败: {ex.Message}");
-            }
-
-            Debug.WriteLine($"[TacticalMapEditor] 加载完成: {_objects.Count} 个对象, 图片 {imageFilePath}, 尺寸 {ImageWidth}x{ImageHeight}");
             return true;
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"[TacticalMapEditor] 加载失败: {ex.Message}");
+            Reset();
+            LastError = ex.Message;
+            Debug.WriteLine($"[TacticalMapEditor] Load failed: {ex.Message}");
             return false;
         }
     }
 
     public bool LoadFromParser(TacticalMapParser parser, string? imageFilePath = null)
     {
+        LastError = null;
+        Reset();
         try
         {
-            _imageData = parser.SurfaceData;
-            if (_imageData == null || _imageData.Length == 0)
-            {
-                Debug.WriteLine("[TacticalMapEditor] Parser 无图片数据");
-                return false;
-            }
-
-            _imageFilePath = imageFilePath;
-            _objects.Clear();
-            _objectByName.Clear();
-
+            byte[] data = parser.SurfaceData ?? throw new InvalidDataException("No image data.");
+            using var bitmap = ProjectImageDecoder.Decode(data);
+            if (bitmap == null) throw new InvalidDataException("Unsupported or damaged image.");
             foreach (var def in parser.ImageDefinitions)
             {
                 var obj = new TacticalMapObject(def);
+                if (string.IsNullOrWhiteSpace(obj.Name) || !_objectByName.TryAdd(obj.Name, obj))
+                    throw new InvalidDataException("Atlas object names must be unique.");
                 _objects.Add(obj);
-                _objectByName[obj.Name] = obj;
             }
-
+            _imageData = data;
+            IsAtlas = true;
+            _imageFilePath = imageFilePath;
+            ImageWidth = bitmap.Width;
+            ImageHeight = bitmap.Height;
             IsLoaded = true;
-
-            // 从图片数据获取尺寸
-            try
-            {
-                using var stream = new MemoryStream(_imageData);
-                using var bitmap = SKBitmap.Decode(stream);
-                if (bitmap != null)
-                {
-                    ImageWidth = bitmap.Width;
-                    ImageHeight = bitmap.Height;
-                }
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"[TacticalMapEditor] 获取图片尺寸失败: {ex.Message}");
-            }
-
-            Debug.WriteLine($"[TacticalMapEditor] 从Parser加载: {_objects.Count} 个对象, 尺寸 {ImageWidth}x{ImageHeight}");
             return true;
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"[TacticalMapEditor] 从Parser加载失败: {ex.Message}");
+            Reset();
+            LastError = ex.Message;
+            Debug.WriteLine($"[TacticalMapEditor] Load failed: {ex.Message}");
             return false;
         }
+    }
+
+    private void Reset()
+    {
+        IsLoaded = false;
+        IsAtlas = false;
+        ImageWidth = ImageHeight = 0;
+        _imageFilePath = _xmlFilePath = _textureName = null;
+        _imageData = null;
+        _xmlDocument = null;
+        _objects.Clear();
+        _objectByName.Clear();
     }
 
     public void SetImageSize(int width, int height)
@@ -318,69 +291,41 @@ public class TacticalMapEditor
         string dir = Path.GetDirectoryName(imageFilePath) ?? "";
         string name = Path.GetFileNameWithoutExtension(imageFilePath);
         string xmlPath = Path.Combine(dir, name + ".xml");
-        if (File.Exists(xmlPath)) return xmlPath;
+        if (ProjectFile.Exists(xmlPath)) return xmlPath;
         return null;
     }
 
     private void ParseXmlConfig(string xmlPath)
     {
-        try
+        string text = ProjectFile.ReadAllText(xmlPath).TrimStart('\uFEFF').Trim();
+        if (text.StartsWith("<?xml", StringComparison.Ordinal))
         {
-            string xmlContent = File.ReadAllText(xmlPath);
-            string tempXml = $"<root>{xmlContent}</root>";
-            XmlDocument xmlDoc = new();
-            xmlDoc.LoadXml(tempXml);
-
-            _objects.Clear();
-            _objectByName.Clear();
-
-            XmlNodeList? imageNodes = xmlDoc.SelectNodes("//Images/Image");
-            if (imageNodes == null) return;
-
-            foreach (XmlNode imageNode in imageNodes)
+            int end = text.IndexOf("?>", StringComparison.Ordinal);
+            if (end < 0) throw new InvalidDataException("Invalid XML declaration.");
+            text = text[(end + 2)..];
+        }
+        var document = new XmlDocument { PreserveWhitespace = true, XmlResolver = null };
+        document.LoadXml($"<root>{text}</root>");
+        if (document.SelectSingleNode("//Images") == null) throw new InvalidDataException("Missing atlas Images element.");
+        var nodes = document.SelectNodes("//Images/Image") ?? throw new InvalidDataException("Missing atlas images.");
+        foreach (XmlElement node in nodes)
+        {
+            int Read(string name, bool optional = false)
+                => int.TryParse(node.GetAttribute(name), out int value) ? value
+                    : optional && !node.HasAttribute(name) ? 0 : throw new InvalidDataException($"Invalid atlas attribute: {name}");
+            var obj = new TacticalMapObject
             {
-                if (imageNode.Attributes == null) continue;
-
-                var obj = new TacticalMapObject();
-
-                var nameAttr = imageNode.Attributes["name"];
-                if (nameAttr != null) obj.Name = nameAttr.Value;
-
-                var xAttr = imageNode.Attributes["x"];
-                if (xAttr != null && int.TryParse(xAttr.Value, out int x)) obj.X = x;
-
-                var yAttr = imageNode.Attributes["y"];
-                if (yAttr != null && int.TryParse(yAttr.Value, out int y)) obj.Y = y;
-
-                var wAttr = imageNode.Attributes["w"];
-                if (wAttr != null && int.TryParse(wAttr.Value, out int w)) obj.Width = w;
-
-                var hAttr = imageNode.Attributes["h"];
-                if (hAttr != null && int.TryParse(hAttr.Value, out int h)) obj.Height = h;
-
-                var refxAttr = imageNode.Attributes["refx"];
-                if (refxAttr != null && int.TryParse(refxAttr.Value, out int refx)) obj.RefX = refx;
-
-                var refyAttr = imageNode.Attributes["refy"];
-                if (refyAttr != null && int.TryParse(refyAttr.Value, out int refy)) obj.RefY = refy;
-
-                if (!string.IsNullOrEmpty(obj.Name) && obj.Width > 0 && obj.Height > 0)
-                {
-                    _objects.Add(obj);
-                    _objectByName[obj.Name] = obj;
-                }
-            }
-
-            XmlNode? textureNode = xmlDoc.SelectSingleNode("//Texture");
-            if (textureNode?.Attributes?["name"] != null)
-                _textureName = textureNode.Attributes["name"].Value;
-
-            Debug.WriteLine($"[TacticalMapEditor] 解析XML: {_objects.Count} 个对象");
+                OriginalName = node.GetAttribute("name"),
+                Name = node.GetAttribute("name"), X = Read("x"), Y = Read("y"),
+                Width = Read("w"), Height = Read("h"), RefX = Read("refx", true), RefY = Read("refy", true)
+            };
+            if (string.IsNullOrWhiteSpace(obj.Name) || obj.Width <= 0 || obj.Height <= 0 || !_objectByName.TryAdd(obj.Name, obj))
+                throw new InvalidDataException("Invalid or duplicate atlas object.");
+            _objects.Add(obj);
         }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"[TacticalMapEditor] 解析XML失败: {ex.Message}");
-        }
+        _textureName = (document.SelectSingleNode("//Texture") as XmlElement)?.GetAttribute("name");
+        _xmlDocument = document;
+        IsAtlas = true;
     }
 
     public TacticalMapObject? GetObject(string name)
@@ -493,6 +438,7 @@ public class TacticalMapEditor
         }
         _objects.Add(newObj);
         _objectByName[newObj.Name] = newObj;
+        IsAtlas = true;
 
         // 画布自动扩大（如果超过当前画布宽/高）
         int reqW = Math.Max(1, newObj.X + newObj.Width + 4);
@@ -504,6 +450,35 @@ public class TacticalMapEditor
         return (newObj, isUpdate);
     }
 
+    public (TacticalMapObject obj, bool isUpdate) ImportImage(string name, SKBitmap image, int x = 0, int y = 0)
+    {
+        var previous = GetObject(name);
+        return AddOrReplaceObject(new TacticalMapObject
+        {
+            Name = name, OriginalName = previous?.OriginalName,
+            X = x, Y = y, Width = image.Width, Height = image.Height,
+            RefX = previous?.RefX ?? 0, RefY = previous?.RefY ?? 0
+        });
+    }
+
+    public void UpdateObject(TacticalMapObject target, TacticalMapObject values)
+    {
+        if (!_objects.Contains(target)) throw new InvalidOperationException("图块不属于当前文档。");
+        if (string.IsNullOrWhiteSpace(values.Name) || values.Width <= 0 || values.Height <= 0 || values.X < 0 || values.Y < 0)
+            throw new ArgumentException("图块名称、坐标或尺寸无效。");
+        if (_objects.Any(obj => !ReferenceEquals(obj, target) && obj.Name == values.Name))
+            throw new ArgumentException($"图块名称已存在：{values.Name}");
+        target.Name = values.Name;
+        target.X = values.X;
+        target.Y = values.Y;
+        target.Width = values.Width;
+        target.Height = values.Height;
+        target.RefX = values.RefX;
+        target.RefY = values.RefY;
+        RebuildNameIndex();
+        DataChanged?.Invoke();
+    }
+
     public List<TacticalMapObject> SearchObjects(string keyword)
     {
         if (string.IsNullOrEmpty(keyword)) return _objects.ToList();
@@ -511,65 +486,76 @@ public class TacticalMapEditor
         return _objects.Where(o => o.Name.ToLowerInvariant().Contains(lower)).ToList();
     }
 
+    public byte[] SerializeXml(string? imagePath = null)
+    {
+        if (!IsLoaded) throw new InvalidOperationException("Load an image successfully before saving.");
+        var document = _xmlDocument != null ? (XmlDocument)_xmlDocument.CloneNode(true) : new XmlDocument();
+        if (document.DocumentElement == null) document.AppendChild(document.CreateElement("root"));
+        var texture = document.SelectSingleNode("//Texture") as XmlElement;
+        string textureName = imagePath != null ? Path.GetFileName(imagePath) : _textureName ?? "";
+        if (!string.IsNullOrEmpty(textureName))
+        {
+            if (texture == null)
+            {
+                texture = document.CreateElement("Texture");
+                document.DocumentElement!.PrependChild(texture);
+            }
+            texture.SetAttribute("name", textureName);
+        }
+        var images = document.SelectSingleNode("//Images") as XmlElement;
+        if (images == null)
+        {
+            images = document.CreateElement("Images");
+            document.DocumentElement!.AppendChild(images);
+        }
+        var originals = images.ChildNodes.OfType<XmlElement>().Where(node => node.Name == "Image")
+            .ToDictionary(node => node.GetAttribute("name"), StringComparer.Ordinal);
+        foreach (var node in originals.Values) images.RemoveChild(node);
+        foreach (var obj in _objects)
+        {
+            var original = originals.GetValueOrDefault(obj.OriginalName ?? obj.Name);
+            var node = original != null ? (XmlElement)original.CloneNode(true) : document.CreateElement("Image");
+            node.SetAttribute("name", obj.Name);
+            foreach (var (name, value) in new[] { ("x", obj.X), ("y", obj.Y), ("w", obj.Width), ("h", obj.Height), ("refx", obj.RefX), ("refy", obj.RefY) })
+                node.SetAttribute(name, value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            images.AppendChild(node);
+        }
+        var sb = new System.Text.StringBuilder();
+        using (var writer = XmlWriter.Create(sb, new XmlWriterSettings { OmitXmlDeclaration = true, ConformanceLevel = ConformanceLevel.Fragment }))
+            foreach (XmlNode node in document.DocumentElement!.ChildNodes) node.WriteTo(writer);
+        return System.Text.Encoding.UTF8.GetBytes(sb.ToString());
+    }
+
     public bool SaveXml(string? outputPath = null)
     {
         try
         {
-            string path = outputPath ?? _xmlFilePath ?? throw new InvalidOperationException("无XML文件路径");
-            // 对齐 Py 版（tacticalmap_editor.py Line 2338-2353）：
-            //   磁盘文件格式 = 两个平级节点 <Texture/> + <Images> 直接拼接（WC4 历史遗留，没有外层 <Root>）。
-            //   .NET XmlWriter 强制"一个文档只能有一个根节点"，直接写两个会报错/提前截断（=之前只写了<Texture>就没了的根因）。
-            //   解决方案：分两次独立 XmlWriter，每次只写一个合法根，再用字符串拼接写盘。
-            var sb = new System.Text.StringBuilder();
-            var settings = new XmlWriterSettings
-            {
-                Indent = true,
-                IndentChars = "  ",
-                OmitXmlDeclaration = true
-            };
-
-            // ===== 1) 写 <Texture> =====
-            if (!string.IsNullOrEmpty(_textureName))
-            {
-                using (var sw = new System.IO.StringWriter(sb))
-                using (var w = XmlWriter.Create(sw, settings))
-                {
-                    w.WriteStartElement("Texture");
-                    w.WriteAttributeString("name", _textureName);
-                    w.WriteEndElement();
-                }
-                sb.AppendLine(); // 节点之间换行，对齐 Py 的 prettyxml 输出
-            }
-
-            // ===== 2) 写 <Images> + 内部 <Image> 列表 =====
-            using (var sw = new System.IO.StringWriter(sb))
-            using (var w = XmlWriter.Create(sw, settings))
-            {
-                w.WriteStartElement("Images");
-                foreach (var obj in _objects)
-                {
-                    w.WriteStartElement("Image");
-                    w.WriteAttributeString("name", obj.Name);
-                    w.WriteAttributeString("x", obj.X.ToString());
-                    w.WriteAttributeString("y", obj.Y.ToString());
-                    w.WriteAttributeString("w", obj.Width.ToString());
-                    w.WriteAttributeString("h", obj.Height.ToString());
-                    w.WriteAttributeString("refx", obj.RefX.ToString());
-                    w.WriteAttributeString("refy", obj.RefY.ToString());
-                    w.WriteEndElement();
-                }
-                w.WriteEndElement();
-            }
-
-            // 写盘
-            System.IO.File.WriteAllText(path, sb.ToString(), System.Text.Encoding.UTF8);
-            Debug.WriteLine($"[TacticalMapEditor] XML已保存: {path}, 对象数={_objects.Count}");
+            string path = outputPath ?? _xmlFilePath ?? throw new InvalidOperationException("No XML path.");
+            AtomicFile.Write(path, SerializeXml());
+            _xmlFilePath = path;
             return true;
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"[TacticalMapEditor] 保存XML失败: {ex.Message}");
+            Debug.WriteLine($"[TacticalMapEditor] XML save failed: {ex.Message}");
             return false;
+        }
+    }
+
+    public void MarkSaved(string imagePath, string? xmlPath, byte[] imageData)
+    {
+        _imageFilePath = imagePath;
+        _xmlFilePath = xmlPath;
+        _textureName = Path.GetFileName(imagePath);
+        _imageData = imageData;
+        // Keep metadata aligned with renamed objects for the next save.
+        if (xmlPath != null)
+        {
+            var document = new XmlDocument { PreserveWhitespace = true, XmlResolver = null };
+            document.LoadXml("<root>" + System.Text.Encoding.UTF8.GetString(SerializeXml(imagePath)) + "</root>");
+            _xmlDocument = document;
+            IsAtlas = true;
+            foreach (var obj in _objects) obj.OriginalName = obj.Name;
         }
     }
 
@@ -592,6 +578,7 @@ public class TacticalMapEditor
         }
         var dup = new TacticalMapObject
         {
+            OriginalName = src.OriginalName,
             Name = finalName,
             X = Math.Max(0, src.X + offsetX),
             Y = Math.Max(0, src.Y + offsetY),
@@ -603,6 +590,9 @@ public class TacticalMapEditor
         };
         _objects.Add(dup);
         _objectByName[finalName] = dup;
+        IsAtlas = true;
+        ImageWidth = Math.Max(ImageWidth, dup.X + dup.Width);
+        ImageHeight = Math.Max(ImageHeight, dup.Y + dup.Height);
         DataChanged?.Invoke();
         return dup;
     }
@@ -615,6 +605,7 @@ public class TacticalMapEditor
             obj.Name = GenerateUniqueName(obj.Name);
         _objects.Add(obj);
         _objectByName[obj.Name] = obj;
+        IsAtlas = true;
         DataChanged?.Invoke();
     }
 
@@ -857,8 +848,7 @@ public class TacticalMapEditor
             {
                 try
                 {
-                    using var stream = new MemoryStream(_imageData);
-                    using var originalAtlas = SKBitmap.Decode(stream);
+                    using var originalAtlas = ProjectImageDecoder.Decode(_imageData);
                     if (originalAtlas != null)
                     {
                         canvas.DrawBitmap(originalAtlas, 0, 0);
@@ -905,9 +895,8 @@ public class TacticalMapEditor
         try
         {
             string path = outputPath ?? _imageFilePath ?? throw new InvalidOperationException("无图片文件路径");
-            using var data = atlasSurface.Encode(SKEncodedImageFormat.Png, 100);
-            if (data == null) return false;
-            File.WriteAllBytes(path, data.ToArray());
+            if (!IsLoaded) return false;
+            AtomicFile.Write(path, AtlasCompositeRenderer.Encode(atlasSurface, path));
             Debug.WriteLine($"[TacticalMapEditor] 图集表面已保存: {path}");
             return true;
         }
@@ -933,114 +922,65 @@ public class TacticalMapEditor
     {
         try
         {
-            var imageList = images.ToList();
-            if (imageList.Count == 0) return true;
-
-            var newNames = new HashSet<string>(imageList.Select(i => i.name));
-
-            // 1. 保存已有对象的旧位置（从原图集裁剪像素时需要原始坐标）
-            var oldPositions = new Dictionary<string, (int X, int Y, int W, int H)>();
-            foreach (var obj in _objects)
-            {
-                if (!newNames.Contains(obj.Name))
-                    oldPositions[obj.Name] = (obj.X, obj.Y, obj.Width, obj.Height);
-            }
-
-            // 2. 批量添加/替换对象定义
-            foreach (var (name, image) in imageList)
-            {
-                var newObj = new TacticalMapObject
-                {
-                    Name = name,
-                    Width = image.Width,
-                    Height = image.Height,
-                    // 新增图片的参考点保持 (0,0)，不自动取图片中心
-                    RefX = 0,
-                    RefY = 0
-                };
-                AddOrReplaceObject(newObj, preserveExistingPosition: true);
-            }
-
-            // 3. 整理布局（自动避免重叠，只修改对象的 X/Y 坐标）
-            var (newW, newH, _, _) = ArrangeObjects(ImageWidth, ImageHeight, padding: 2);
-            ImageWidth = newW;
-            ImageHeight = newH;
-
-            // 4. 加载原图集（一次性解码，不创建每个对象的独立SKBitmap缓存）
-            SKBitmap? origAtlas = null;
-            if (_imageData != null && _imageData.Length > 0)
-            {
-                using var stream = new MemoryStream(_imageData);
-                origAtlas = SKBitmap.Decode(stream);
-            }
-
-            // 5. 重建新图集：从原图集按旧位置裁剪像素 → 绘制到新位置
-            var atlasInfo = new SKImageInfo(newW, newH, SKColorType.Rgba8888, SKAlphaType.Premul);
-            var atlasSurface = new SKBitmap(atlasInfo);
-            using (var canvas = new SKCanvas(atlasSurface))
-            {
-                canvas.Clear(SKColors.Transparent);
-
-                // 5a. 绘制已有对象：直接从 origAtlas 按旧(X,Y)裁剪，画到新(X,Y)
-                if (origAtlas != null)
-                {
-                    foreach (var obj in _objects)
-                    {
-                        if (newNames.Contains(obj.Name)) continue;
-                        if (!oldPositions.TryGetValue(obj.Name, out var oldPos)) continue;
-
-                        int srcX = Math.Max(0, Math.Min(oldPos.X, origAtlas.Width - 1));
-                        int srcY = Math.Max(0, Math.Min(oldPos.Y, origAtlas.Height - 1));
-                        int srcW = Math.Min(oldPos.W, origAtlas.Width - srcX);
-                        int srcH = Math.Min(oldPos.H, origAtlas.Height - srcY);
-                        if (srcW <= 0 || srcH <= 0) continue;
-
-                        var srcRect = new SKRectI(srcX, srcY, srcX + srcW, srcY + srcH);
-                        var dstRect = new SKRect(obj.X, obj.Y, obj.X + srcW, obj.Y + srcH);
-                        canvas.DrawBitmap(origAtlas, srcRect, dstRect);
-                    }
-                }
-
-                // 5b. 绘制新对象：使用传入的 image
-                foreach (var (name, image) in imageList)
-                {
-                    var obj = FindByName(name);
-                    if (obj == null) continue;
-                    canvas.DrawBitmap(image, obj.X, obj.Y);
-                }
-            }
-
-            origAtlas?.Dispose();
-
-            // 6. 保存图集图片
-            string imgPath = imageOutputPath ?? _imageFilePath ?? throw new InvalidOperationException("无图片输出路径");
-            using (atlasSurface)
-            {
-                if (!SaveAtlasSurface(atlasSurface, imgPath))
-                {
-                    Debug.WriteLine("[TacticalMapEditor] 保存图集图片失败");
-                    return false;
-                }
-            }
-
-            // 7. 保存XML配置
-            string xmlPath = xmlOutputPath ?? _xmlFilePath ?? Path.Combine(Path.GetDirectoryName(imgPath) ?? "", Path.GetFileNameWithoutExtension(imgPath) + ".xml");
-            if (!SaveXml(xmlPath))
-            {
-                Debug.WriteLine("[TacticalMapEditor] 保存XML配置失败");
-                return false;
-            }
-
-            // 8. 更新内存中的图集数据
-            _imageData = File.ReadAllBytes(imgPath);
-
-            Debug.WriteLine($"[TacticalMapEditor] 成功批量添加 {imageList.Count} 张图片，整理布局完成");
+            var files = PrepareImagesAndArrange(images, imageOutputPath, xmlOutputPath);
+            AtomicFile.WriteAll(files);
+            LoadFromFiles(files[0].Path, files[1].Path);
             return true;
         }
-        catch (Exception ex)
+        catch (Exception ex) { Debug.WriteLine($"[TacticalMapEditor] Import failed: {ex.Message}"); return false; }
+    }
+
+    public (string Path, byte[] Bytes)[] PrepareImagesAndArrange(IEnumerable<(string name, SKBitmap image)> images,
+        string? imageOutputPath = null, string? xmlOutputPath = null)
+    {
+        var before = _objects.Select(TacticalMapObject.Clone).ToList();
+        int width = ImageWidth, height = ImageHeight;
+        bool isAtlas = IsAtlas;
+        var pixels = new Dictionary<string, SKBitmap>(StringComparer.Ordinal);
+        try
         {
-            Debug.WriteLine($"[TacticalMapEditor] 批量添加图片到图集失败: {ex.Message}");
-            return false;
+            if (!IsLoaded || _imageData == null) throw new InvalidOperationException("Load an atlas before importing images.");
+            var imported = images.ToList();
+            if (imported.Count == 0) throw new ArgumentException("No images were supplied.");
+            if (imported.Select(item => item.name).Distinct(StringComparer.Ordinal).Count() != imported.Count)
+                throw new InvalidDataException("Imported names must be unique.");
+            using var source = ProjectImageDecoder.Decode(_imageData);
+            var replacements = imported.ToDictionary(item => item.name, item => item.image, StringComparer.Ordinal);
+            foreach (var obj in _objects)
+            {
+                if (replacements.ContainsKey(obj.Name)) continue;
+                var subset = new SKBitmap();
+                if (!source.ExtractSubset(subset, new SKRectI(obj.X, obj.Y, obj.X + obj.Width, obj.Y + obj.Height)))
+                {
+                    subset.Dispose();
+                    throw new InvalidDataException($"Invalid source rectangle: {obj.Name}");
+                }
+                pixels.Add(obj.Name, subset);
+            }
+            foreach (var (name, image) in imported)
+            {
+                ImportImage(name, image);
+                pixels.Add(name, image.Copy());
+            }
+            var (newW, newH, _, unplaced) = ArrangeObjects(ImageWidth, ImageHeight, padding: 2);
+            if (unplaced.Count != 0) throw new InvalidOperationException("Some atlas objects could not be arranged.");
+            using var blank = new SKBitmap(newW, newH);
+            using var surface = AtlasCompositeRenderer.Compose(blank, _objects, pixels, isAtlas: true);
+            string imagePath = imageOutputPath ?? _imageFilePath ?? throw new InvalidOperationException("No image output path.");
+            string xmlPath = xmlOutputPath ?? _xmlFilePath ?? Path.ChangeExtension(imagePath, ".xml");
+            byte[] imageBytes = AtlasCompositeRenderer.Encode(surface, imagePath);
+            return [(imagePath, imageBytes), (xmlPath, SerializeXml(imagePath))];
+        }
+        finally
+        {
+            _objects.Clear();
+            _objects.AddRange(before);
+            RebuildNameIndex();
+            ImageWidth = width;
+            ImageHeight = height;
+            IsAtlas = isAtlas;
+            foreach (var bitmap in pixels.Values) bitmap.Dispose();
         }
     }
+
 }

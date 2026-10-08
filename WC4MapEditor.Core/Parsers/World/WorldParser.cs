@@ -1,3 +1,4 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Buffers.Binary;
 using System.Diagnostics;
 using WC4MapEditor.Core.Models;
@@ -10,7 +11,7 @@ public static class WorldParser
 
     public static MapData LoadFromFile(string filePath)
     {
-        using var stream = File.OpenRead(filePath);
+        using var stream = ProjectFile.OpenRead(filePath);
         MapLimits.FileSize(stream.Length);
         var data = new byte[(int)stream.Length];
         stream.ReadExactly(data);
@@ -98,7 +99,7 @@ public static class WorldParser
             int count2 = (value2 / 125) + 1;
             int repeatCount = count1 * count2;
 
-            using (var fs = new FileStream(hdFilePath, FileMode.Create, FileAccess.Write))
+            using (var fs = new MemoryStream())
             {
                 byte[] value1Bytes = BitConverter.GetBytes(value1);
                 fs.Write(value1Bytes, 0, value1Bytes.Length);
@@ -109,6 +110,7 @@ public static class WorldParser
                 byte[] pattern = BitConverter.GetBytes(0xFFFFFFFE);
                 for (int i = 0; i < repeatCount; i++)
                     fs.Write(pattern, 0, pattern.Length);
+                AtomicFile.Write(hdFilePath, fs.ToArray());
             }
 
             Debug.WriteLine($"[WorldParser] HD文件创建成功：{hdFilePath}");

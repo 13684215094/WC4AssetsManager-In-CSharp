@@ -1,3 +1,4 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -33,6 +34,7 @@ public class EventBuffSettingParser
         }
     }
 
+    private readonly JsonTableFile<EventBuffData> _buffsFile = new();
     private readonly AssetManager _manager = AssetManager.Default;
     private List<EventBuffData> _buffs = new();
     private StringTableParser? _stringTable;
@@ -41,6 +43,9 @@ public class EventBuffSettingParser
     public IReadOnlyList<EventBuffData> Items => _buffs;
     public string ConfigPath { get; private set; } = "";
     public string StringTablePath { get; private set; } = "";
+
+    public bool HasChanges => _buffsFile.HasChanges(_buffs) || _stringTable?.IsDirty == true;
+    public string? LastError { get; private set; }
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -59,39 +64,14 @@ public class EventBuffSettingParser
 
     private void ResolvePaths()
     {
-        if (!_manager.IsLoaded)
-        {
-            try { _manager.ScanDefault(); } catch { }
-        }
-
-        var root = _manager.AssetsRoot;
-        if (!string.IsNullOrEmpty(root) && Directory.Exists(root))
-        {
-            ConfigPath = Path.Combine(root, "json", "EventBuffSettings.json");
-            StringTablePath = Path.Combine(root, "stringtable_tw.ini");
-        }
-        else
-        {
-            var baseDir = AppContext.BaseDirectory;
-            string? candidate = null;
-            string? current = baseDir;
-            for (int i = 0; i < 5 && !string.IsNullOrEmpty(current); i++)
-            {
-                var test = Path.Combine(current, "Resource", "WC4DATA", "assets");
-                if (Directory.Exists(test)) { candidate = test; break; }
-                current = Path.GetDirectoryName(current);
-            }
-            candidate ??= Path.GetFullPath(Path.Combine(baseDir ?? "", "..", "..", "..", "..", "Resource", "WC4DATA", "assets"));
-
-            ConfigPath = Path.Combine(candidate, "json", "EventBuffSettings.json");
-            StringTablePath = Path.Combine(candidate, "stringtable_tw.ini");
-        }
-
-        Debug.WriteLine($"[EventBuffSettingParser] ConfigPath={ConfigPath} StringTablePath={StringTablePath}");
+        string root = _manager.GetActiveAssetsRoot();
+        ConfigPath = Path.Combine(root, "json", "EventBuffSettings.json");
+        StringTablePath = Path.Combine(root, "stringtable_tw.ini");
     }
 
     public void LoadAll()
     {
+        _buffsFile.Invalidate();
         LoadBuffs();
         _stringTable = new StringTableParser(StringTablePath);
     }
@@ -100,13 +80,12 @@ public class EventBuffSettingParser
     {
         try
         {
-            if (!File.Exists(ConfigPath))
+            if (!ProjectFile.Exists(ConfigPath))
             {
                 Debug.WriteLine($"[EventBuffSettingParser] 文件不存在: {ConfigPath}");
                 return;
             }
-            var json = File.ReadAllText(ConfigPath);
-            var data = JsonSerializer.Deserialize<List<EventBuffData>>(json, JsonOpts);
+            var data = _buffsFile.Read(ConfigPath, JsonOpts);
             if (data != null) _buffs = data;
         }
         catch (Exception ex)
@@ -164,14 +143,15 @@ public class EventBuffSettingParser
     {
         try
         {
-            var json = JsonSerializer.Serialize(_buffs, JsonOpts);
-            File.WriteAllText(ConfigPath, json);
-            _stringTable?.Save();
+            AtomicFile.WriteAllWithStringTable(_stringTable,
+                (ConfigPath, _buffsFile.Serialize(ConfigPath, _buffs)));
             Debug.WriteLine($"[EventBuffSettingParser] 保存成功: {ConfigPath}");
+            LastError = null;
             return true;
         }
         catch (Exception ex)
         {
+            LastError = ex.Message;
             Debug.WriteLine($"[EventBuffSettingParser] 保存失败: {ex.Message}");
             return false;
         }
@@ -179,9 +159,12 @@ public class EventBuffSettingParser
 
     public void Reload() => LoadAll();
 
-    public static void ClearInstance()
+    public static void ClearInstance(bool preserveChanges = false)
     {
-        lock (_lock) { _instance = null; }
+        lock (_lock)
+        {
+            if (!preserveChanges || _instance?.HasChanges != true) _instance = null;
+        }
     }
 }
 

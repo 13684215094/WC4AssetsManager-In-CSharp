@@ -1,98 +1,64 @@
+using System.Diagnostics;
 using System.IO;
-using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using SkiaSharp;
+using WC4MapEditor.Core.Assets;
 using WC4MapEditor.Core.Parsers.HdAtlas;
+using WC4MapEditor.Rendering.Imaging;
 
 namespace WC4MapEditor.Views.Assist;
 
-/// <summary>
-/// HD 图集图块加载器（供各编辑场景共用，如建筑的 <c>building_{Id}.png</c>）。
-/// 做法与 <see cref="FlagImageLoader"/> 一致：整张图集只解码一次，
-/// 按图块定义裁剪后转成 WPF 可显示的 <see cref="BitmapSource"/>，并按图块名缓存。
-/// </summary>
 internal static class HdAtlasImageLoader
 {
-    private sealed class AtlasCache
+    private sealed class AtlasCache(SKBitmap surface)
     {
-        public SKBitmap? Surface;
-        public readonly Dictionary<string, BitmapSource?> Tiles = new(StringComparer.OrdinalIgnoreCase);
+        public SKBitmap Surface { get; } = surface;
+        public Dictionary<string, BitmapSource> Tiles { get; } = new(StringComparer.OrdinalIgnoreCase);
     }
 
+    private static readonly object Gate = new();
     private static readonly Dictionary<string, AtlasCache> Caches = new(StringComparer.OrdinalIgnoreCase);
+    private static long _revision = -1;
 
-    /// <summary>按图集名与图块名获取图块；找不到返回 null。</summary>
     public static BitmapSource? Load(string atlasBase, string imageName)
     {
-        var cache = GetAtlas(atlasBase);
-        if (cache.Tiles.TryGetValue(imageName, out var cached)) return cached;
-
-        BitmapSource? result = null;
-        try
-        {
-            var parser = HdAtlasParser.Get(atlasBase);
-            var def = parser.GetImageDef(imageName);
-            if (def != null && cache.Surface != null)
-            {
-                int x = Math.Max(0, def.X);
-                int y = Math.Max(0, def.Y);
-                int w = Math.Min(def.Width, cache.Surface.Width - x);
-                int h = Math.Min(def.Height, cache.Surface.Height - y);
-                if (w > 0 && h > 0)
-                {
-                    // 预乘 Bgra8888 与 WPF 的 Pbgra32 布局一致
-                    var info = new SKImageInfo(w, h, SKColorType.Bgra8888, SKAlphaType.Premul);
-                    using var subset = new SKBitmap(info);
-                    using (var canvas = new SKCanvas(subset))
-                    {
-                        canvas.Clear(SKColors.Transparent);
-                        canvas.DrawBitmap(cache.Surface, new SKRectI(x, y, x + w, y + h), new SKRectI(0, 0, w, h));
-                    }
-
-                    var bmp = BitmapSource.Create(w, h, 96, 96, PixelFormats.Pbgra32, null,
-                        subset.GetPixels(), h * subset.RowBytes, subset.RowBytes);
-                    bmp.Freeze();
-                    result = bmp;
-                }
-            }
-        }
-        catch
-        {
-            result = null;
-        }
-
-        cache.Tiles[imageName] = result;
-        return result;
+        try { return LoadRequired(atlasBase, imageName); }
+        catch (Exception ex) { Debug.WriteLine($"[HdAtlasImageLoader] {ex.Message}"); return null; }
     }
 
-    /// <summary>地图/资源上下文切换后可调用，释放并清空全部图集缓存。</summary>
+    public static BitmapSource LoadRequired(string atlasBase, string imageName)
+    {
+        lock (Gate)
+        {
+            if (_revision != AssetManager.Default.Revision)
+            {
+                ClearCache();
+                _revision = AssetManager.Default.Revision;
+            }
+            var parser = HdAtlasParser.Get(atlasBase);
+            if (!parser.IsLoaded) throw new InvalidDataException(parser.LastError ?? $"图集加载失败：{atlasBase}");
+            var def = parser.GetImageDef(imageName) ?? parser.GetImageDef(imageName + ".png") ?? parser.GetImageDef(imageName + ".webp")
+                ?? throw new FileNotFoundException($"当前项目图集中没有 {imageName}：{atlasBase}");
+            if (!Caches.TryGetValue(atlasBase, out var cache))
+            {
+                cache = new AtlasCache(ProjectImageDecoder.Decode(parser.SurfaceData!));
+                Caches.Add(atlasBase, cache);
+            }
+            if (cache.Tiles.TryGetValue(def.Name, out var tile)) return tile;
+            using var subset = BitmapPixels.Crop(cache.Surface, def.X, def.Y, def.Width, def.Height);
+            tile = SkiaBitmapSource.Create(subset);
+            cache.Tiles.Add(def.Name, tile);
+            return tile;
+        }
+    }
+
     public static void ClearCache()
     {
-        foreach (var cache in Caches.Values) cache.Surface?.Dispose();
-        Caches.Clear();
-    }
-
-    private static AtlasCache GetAtlas(string atlasBase)
-    {
-        if (Caches.TryGetValue(atlasBase, out var existing)) return existing;
-
-        var cache = new AtlasCache();
-        try
+        lock (Gate)
         {
-            var parser = HdAtlasParser.Get(atlasBase);
-            var data = parser.SurfaceData;
-            if (data != null && data.Length > 0)
-            {
-                using var stream = new MemoryStream(data);
-                cache.Surface = SKBitmap.Decode(stream);
-            }
+            foreach (var cache in Caches.Values) cache.Surface.Dispose();
+            Caches.Clear();
+            _revision = -1;
         }
-        catch
-        {
-            cache.Surface = null;
-        }
-
-        Caches[atlasBase] = cache;
-        return cache;
     }
 }

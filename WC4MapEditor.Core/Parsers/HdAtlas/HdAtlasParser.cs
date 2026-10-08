@@ -1,3 +1,4 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Diagnostics;
 using System.Xml;
 using WC4MapEditor.Core.Assets;
@@ -19,8 +20,8 @@ public class HdAtlasImageDef
 }
 
 /// <summary>
-/// 通用 HD 图集解析器：读取 assets 根目录下的 <c>{baseName}.xml</c> 与
-/// <c>{baseName}.png/.webp/...</c>，对外提供图块定义与大图字节。
+/// 通用图集解析器：支持 assets 内相对路径、image/ 目录与 XML 相对纹理页，
+/// 对外提供图块定义、大图字节及资源缺失原因。
 /// 与 <see cref="TacticalMapParser"/> 同一套解析约定，但以图集名参数化，
 /// 因此可同时服务于 buildings_hd / image_flags_hd / image_countrytech_hd 等任意图集。
 /// 实例按图集名做静态缓存，避免重复读盘。
@@ -29,12 +30,19 @@ public class HdAtlasParser
 {
     private static readonly object _lock = new();
     private static readonly Dictionary<string, HdAtlasParser> _cache = new(StringComparer.OrdinalIgnoreCase);
+    private static long _cacheRevision = -1;
 
     /// <summary>按图集名（不带扩展名）获取解析器，首次访问时加载。</summary>
     public static HdAtlasParser Get(string baseName)
     {
         lock (_lock)
         {
+            long revision = AssetManager.Default.Revision;
+            if (_cacheRevision != revision)
+            {
+                _cache.Clear();
+                _cacheRevision = revision;
+            }
             if (_cache.TryGetValue(baseName, out var cached)) return cached;
             var parser = new HdAtlasParser(baseName);
             parser.Load();
@@ -48,7 +56,15 @@ public class HdAtlasParser
         lock (_lock) { _cache.Clear(); }
     }
 
-    private static readonly string[] ImageExtensions = { ".png", ".webp", ".jpg", ".jpeg", ".bmp" };
+    /// <summary>Probe a fallback atlas without reporting an absent optional XML as a load failure.</summary>
+    public static HdAtlasParser? GetOptional(string baseName)
+    {
+        if (!AssetManager.Default.IsLoaded) return null;
+        string path = ResolveXmlPath(AssetManager.Default.GetActiveAssetsRoot(), baseName);
+        return ProjectFile.Exists(path) ? Get(baseName) : null;
+    }
+
+    private static readonly string[] ImageExtensions = { ".webp", ".png", ".pkm", ".jpg", ".jpeg", ".bmp" };
 
     private readonly string _baseName;
     private readonly List<HdAtlasImageDef> _definitions = new();
@@ -57,7 +73,10 @@ public class HdAtlasParser
     public string BaseName => _baseName;
     public IReadOnlyList<HdAtlasImageDef> ImageDefinitions => _definitions;
     public byte[]? SurfaceData => _surfaceData;
-    public bool IsLoaded => _surfaceData != null && _surfaceData.Length > 0;
+    public string? XmlPath { get; private set; }
+    public string? ImagePath { get; private set; }
+    public string? LastError { get; private set; }
+    public bool IsLoaded => LastError == null && _surfaceData is { Length: > 0 };
 
     private HdAtlasParser(string baseName) => _baseName = baseName;
 
@@ -66,126 +85,94 @@ public class HdAtlasParser
         try
         {
             var manager = AssetManager.Default;
-            if (!manager.IsLoaded)
-            {
-                try { manager.ScanDefault(); } catch { /* ignore */ }
-            }
-
-            var root = manager.AssetsRoot;
-
-            // 1) 读取图集 xml（AssetManager 优先，其次直接读盘）
-            string? xmlText = null;
-            if (manager.IsLoaded)
-            {
-                var xmlEntry = manager.Find($"{_baseName}.xml");
-                if (xmlEntry != null) xmlText = manager.ReadText(xmlEntry);
-            }
-            else if (!string.IsNullOrEmpty(root))
-            {
-                var xmlPath = Path.Combine(root, _baseName + ".xml");
-                if (File.Exists(xmlPath)) xmlText = File.ReadAllText(xmlPath);
-            }
-
-            if (!string.IsNullOrEmpty(xmlText)) ParseXml(xmlText);
-
-            // 2) 纹理页：优先 <Texture name="xxx.png"/> 声明的名字，否则退回图集名
-            var stems = new List<string>();
-            if (!string.IsNullOrEmpty(xmlText))
-            {
-                var m = System.Text.RegularExpressions.Regex.Match(
-                    xmlText,
-                    "<Texture\\b[^>]*\\bname\\s*=\\s*\"([^\"]+)\"",
-                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-                if (m.Success)
-                {
-                    var tex = m.Groups[1].Value.Replace('\\', '/');
-                    var file = tex.Split('/')[^1];
-                    int dot = file.LastIndexOf('.');
-                    if (dot > 0) file = file.Substring(0, dot);
-                    if (file.Length > 0) stems.Add(file);
-                }
-            }
-            stems.Add(_baseName);
-
-            foreach (var stem in stems)
-            {
-                if (TryLoadImage(manager, root, stem)) break;
-            }
+            var root = manager.GetActiveAssetsRoot();
+            XmlPath = ResolveXmlPath(root, _baseName);
+            if (!ProjectFile.Exists(XmlPath)) throw new FileNotFoundException($"项目缺少图集：{_baseName}.xml");
+            var document = ResourceXml.ParseFragments(ProjectFile.ReadAllText(XmlPath));
+            ParseXml(document);
+            var textures = document.SelectNodes("//Texture")!;
+            if (textures.Count > 1) throw new InvalidDataException("暂不支持含多张纹理页的图集。");
+            string texture = (textures.Count == 0 ? null : textures[0]?.Attributes?["name"]?.Value)
+                ?? (Path.GetFileNameWithoutExtension(XmlPath) + ".png");
+            if (string.IsNullOrWhiteSpace(texture)) throw new InvalidDataException("图集 Texture.name 为空。");
+            texture = texture.Replace('\\', '/');
+            string directory = Path.GetDirectoryName(XmlPath)!;
+            ImagePath = FindImage(root, directory, texture);
+            if (ImagePath == null) throw new FileNotFoundException($"图集缺少对应图片：{texture}（支持 WebP / PNG / PKM）");
+            _surfaceData = ProjectFile.ReadAllBytes(ImagePath);
 
             Debug.WriteLine($"[HdAtlasParser] {_baseName}: {_definitions.Count} 个图块, 图片 {_surfaceData?.Length ?? 0} bytes");
         }
         catch (Exception ex)
         {
+            LastError = ex.Message;
+            _surfaceData = null;
             Debug.WriteLine($"[HdAtlasParser] 加载 {_baseName} 失败: {ex.Message}");
         }
     }
 
-    private bool TryLoadImage(AssetManager manager, string root, string stem)
+    private static string ResolveXmlPath(string root, string baseName)
     {
-        if (manager.IsLoaded)
-        {
-            foreach (var ext in ImageExtensions)
-            {
-                var entry = manager.Find(stem + ext);
-                if (entry != null)
-                {
-                    _surfaceData = manager.ReadBytes(entry);
-                    return true;
-                }
-            }
-        }
-        if (!string.IsNullOrEmpty(root) && Directory.Exists(root))
-        {
-            foreach (var ext in ImageExtensions)
-            {
-                var path = Path.Combine(root, stem + ext);
-                if (File.Exists(path))
-                {
-                    _surfaceData = File.ReadAllBytes(path);
-                    return true;
-                }
-            }
-        }
-        return false;
+        string name = baseName.Replace('\\', '/');
+        if (name.EndsWith(".xml", StringComparison.OrdinalIgnoreCase)) name = name[..^4];
+        string path = ResolveWithin(root, name + ".xml");
+        // Bare UI atlas names conventionally live in image/. Explicit paths stay exact.
+        return !ProjectFile.Exists(path) && !name.Contains('/')
+            ? ResolveWithin(root, "image/" + name + ".xml") : path;
     }
 
-    private void ParseXml(string xmlContent)
+    private static string ResolveWithin(string root, string relative)
     {
-        try
-        {
-            // 图集 xml 没有统一根节点，统一包一层，保持与 TacticalMapParser 相同的选择路径
-            var xmlDoc = new XmlDocument();
-            xmlDoc.LoadXml($"<root>{xmlContent}</root>");
-
-            var imageNodes = xmlDoc.SelectNodes("//Images/Image");
-            if (imageNodes == null) return;
-
-            foreach (XmlNode node in imageNodes)
-            {
-                if (node.Attributes == null) continue;
-
-                var def = new HdAtlasImageDef
-                {
-                    Name = node.Attributes["name"]?.Value ?? "",
-                    X = ParseInt(node.Attributes["x"]?.Value),
-                    Y = ParseInt(node.Attributes["y"]?.Value),
-                    Width = ParseInt(node.Attributes["w"]?.Value),
-                    Height = ParseInt(node.Attributes["h"]?.Value),
-                    RefX = ParseInt(node.Attributes["refx"]?.Value),
-                    RefY = ParseInt(node.Attributes["refy"]?.Value)
-                };
-
-                if (!string.IsNullOrEmpty(def.Name) && def.Width > 0 && def.Height > 0)
-                    _definitions.Add(def);
-            }
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"[HdAtlasParser] 解析 {_baseName}.xml 失败: {ex.Message}");
-        }
+        if (Path.IsPathRooted(relative) || relative.Contains(':'))
+            throw new InvalidDataException("图集资源必须使用项目内的相对路径。");
+        string path = Path.GetFullPath(Path.Combine(root, relative.Replace('/', Path.DirectorySeparatorChar)));
+        if (!GameProjectWorkspace.IsWithin(path, root)) throw new InvalidDataException("图集资源路径超出 assets。");
+        return path;
     }
 
-    private static int ParseInt(string? s) => int.TryParse(s, out var v) ? v : 0;
+    private static string? FindImage(string root, string directory, string texture)
+    {
+        if (Path.IsPathRooted(texture) || texture.Contains(':'))
+            throw new InvalidDataException("纹理必须使用项目内的相对路径。");
+        var directories = texture.Contains('/') && !texture.StartsWith("../", StringComparison.Ordinal)
+            ? new[] { directory, root }.Distinct() : new[] { directory };
+        foreach (string baseDirectory in directories)
+        {
+            string stem = Path.ChangeExtension(texture, null);
+            foreach (string extension in ImageExtensions)
+            {
+                string relative = Path.GetRelativePath(root, baseDirectory).Replace('\\', '/') + "/" + stem + extension;
+                string path = ResolveWithin(root, relative);
+                if (ProjectFile.Exists(path)) return path;
+            }
+        }
+        return null;
+    }
+
+    private void ParseXml(XmlDocument document)
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var definitions = new List<HdAtlasImageDef>();
+        foreach (XmlElement node in document.SelectNodes("//Images/Image | //SubTexture")!)
+        {
+            var def = new HdAtlasImageDef
+            {
+                Name = node.GetAttribute("name"), X = Read("x"), Y = Read("y"),
+                Width = Read(node.HasAttribute("w") ? "w" : "width"),
+                Height = Read(node.HasAttribute("h") ? "h" : "height"),
+                RefX = Read("refx", true), RefY = Read("refy", true)
+            };
+            if (string.IsNullOrWhiteSpace(def.Name) || def.X < 0 || def.Y < 0 ||
+                def.Width <= 0 || def.Height <= 0 || !names.Add(def.Name))
+                throw new InvalidDataException($"图集存在无效或重复图块：{def.Name}");
+            definitions.Add(def);
+
+            int Read(string attribute, bool optional = false) => int.TryParse(node.GetAttribute(attribute), out int value)
+                ? value : optional && !node.HasAttribute(attribute) ? 0
+                : throw new InvalidDataException($"图集属性无效：{attribute}");
+        }
+        _definitions.AddRange(definitions);
+    }
 
     public HdAtlasImageDef? GetImageDef(string name)
     {

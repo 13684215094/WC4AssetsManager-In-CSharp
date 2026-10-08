@@ -1,7 +1,8 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Diagnostics;
 using System.IO;
 using SkiaSharp;
-using WC4MapEditor.Core.Config;
+using WC4MapEditor.Rendering.Imaging;
 using WC4MapEditor.Core.Helpers;
 using WC4MapEditor.Core.Models;
 
@@ -82,15 +83,13 @@ public class WeatherRender : IDisposable
         {
             try
             {
-                string infoMarkPath = ConfigManager.Instance.GetInformationMarkPath();
+                using var sprites = new ProjectSpriteLoader();
 
                 foreach (var kvp in WeatherTypeIcons)
                 {
-                    string iconPath = Path.Combine(infoMarkPath, $"{kvp.Value}.png");
-                    if (File.Exists(iconPath))
+                    if (sprites.LoadImage($"{kvp.Value}.png") is { } sprite1)
                     {
-                        using var stream = File.OpenRead(iconPath);
-                        _weatherIconCache[kvp.Key] = SKImage.FromEncodedData(stream);
+                        _weatherIconCache[kvp.Key] = sprite1;
                     }
                 }
 

@@ -1,3 +1,4 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Text.Encodings.Web;
@@ -34,6 +35,11 @@ public class ArmyGroupSettingParser
         }
     }
 
+    private readonly JsonTableFile<ArmyGroupSettingData> _armyGroupsFile = new();
+    private readonly JsonTableFile<ArmyGroupReinforcementData> _reinforcementsFile = new();
+    private readonly JsonTableFile<EventSettingData> _eventsFile = new();
+    private readonly JsonTableFile<EventStageSettingData> _stagesFile = new();
+    private readonly JsonTableFile<EventCalendarSettingData> _calendarsFile = new();
     private readonly AssetManager _manager = AssetManager.Default;
     private List<ArmyGroupSettingData> _armyGroups = new();
     private List<ArmyGroupReinforcementData> _reinforcements = new();
@@ -56,6 +62,9 @@ public class ArmyGroupSettingParser
     public string EventCalendarPath { get; private set; } = "";
     public string StringTablePath { get; private set; } = "";
 
+    public bool HasChanges => _armyGroupsFile.HasChanges(_armyGroups) || _reinforcementsFile.HasChanges(_reinforcements) || _eventsFile.HasChanges(_events) || _stagesFile.HasChanges(_stages) || _calendarsFile.HasChanges(_calendars) || _stringTable?.IsDirty == true;
+    public string? LastError { get; private set; }
+
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
         WriteIndented = true,
@@ -75,57 +84,40 @@ public class ArmyGroupSettingParser
 
     private void ResolvePaths()
     {
-        if (!_manager.IsLoaded)
-        {
-            try { _manager.ScanDefault(); } catch { }
-        }
-
-        var root = _manager.AssetsRoot;
-        if (string.IsNullOrEmpty(root) || !Directory.Exists(root))
-        {
-            var baseDir = AppContext.BaseDirectory;
-            string? candidate = null;
-            string? current = baseDir;
-            for (int i = 0; i < 5 && !string.IsNullOrEmpty(current); i++)
-            {
-                var test = Path.Combine(current, "Resource", "WC4DATA", "assets");
-                if (Directory.Exists(test)) { candidate = test; break; }
-                current = Path.GetDirectoryName(current);
-            }
-            candidate ??= Path.GetFullPath(Path.Combine(baseDir ?? "", "..", "..", "..", "..", "Resource", "WC4DATA", "assets"));
-            root = candidate;
-        }
-
+        string root = _manager.GetActiveAssetsRoot();
         ConfigPath = Path.Combine(root, "json", "ArmyGroupSettings.json");
         ReinforcementPath = Path.Combine(root, "json", "ArmyGroupReinforcementSettings.json");
         EventPath = Path.Combine(root, "json", "EventSettings.json");
         EventStagePath = Path.Combine(root, "json", "EventStageSettings.json");
         EventCalendarPath = Path.Combine(root, "json", "EventCalendarSettings.json");
         StringTablePath = Path.Combine(root, "stringtable_tw.ini");
-        Debug.WriteLine($"[ArmyGroupSettingParser] ConfigPath={ConfigPath}");
     }
 
     public void LoadAll()
     {
-        _armyGroups = LoadTable<ArmyGroupSettingData>(ConfigPath, _armyGroups);
-        _reinforcements = LoadTable<ArmyGroupReinforcementData>(ReinforcementPath, _reinforcements);
-        _events = LoadTable<EventSettingData>(EventPath, _events);
-        _stages = LoadTable<EventStageSettingData>(EventStagePath, _stages);
-        _calendars = LoadTable<EventCalendarSettingData>(EventCalendarPath, _calendars);
+        _armyGroupsFile.Invalidate();
+        _reinforcementsFile.Invalidate();
+        _eventsFile.Invalidate();
+        _stagesFile.Invalidate();
+        _calendarsFile.Invalidate();
+        _armyGroups = LoadTable(ConfigPath, _armyGroups, _armyGroupsFile);
+        _reinforcements = LoadTable(ReinforcementPath, _reinforcements, _reinforcementsFile);
+        _events = LoadTable(EventPath, _events, _eventsFile);
+        _stages = LoadTable(EventStagePath, _stages, _stagesFile);
+        _calendars = LoadTable(EventCalendarPath, _calendars, _calendarsFile);
         _stringTable = new StringTableParser(StringTablePath);
     }
 
-    private List<T> LoadTable<T>(string path, List<T> fallback)
+    private List<T> LoadTable<T>(string path, List<T> fallback, JsonTableFile<T> table) where T : class
     {
         try
         {
-            if (!File.Exists(path))
+            if (!ProjectFile.Exists(path))
             {
                 Debug.WriteLine($"[ArmyGroupSettingParser] 文件不存在: {path}");
                 return new List<T>();
             }
-            var json = File.ReadAllText(path);
-            return JsonSerializer.Deserialize<List<T>>(json, JsonOpts) ?? new List<T>();
+            return table.Read(path, JsonOpts);
         }
         catch (Exception ex)
         {
@@ -195,17 +187,19 @@ public class ArmyGroupSettingParser
     {
         try
         {
-            File.WriteAllText(ConfigPath, JsonSerializer.Serialize(_armyGroups, JsonOpts));
-            File.WriteAllText(ReinforcementPath, JsonSerializer.Serialize(_reinforcements, JsonOpts));
-            File.WriteAllText(EventPath, JsonSerializer.Serialize(_events, JsonOpts));
-            File.WriteAllText(EventStagePath, JsonSerializer.Serialize(_stages, JsonOpts));
-            File.WriteAllText(EventCalendarPath, JsonSerializer.Serialize(_calendars, JsonOpts));
-            _stringTable?.Save();
+            AtomicFile.WriteAllWithStringTable(_stringTable,
+                (ConfigPath, _armyGroupsFile.Serialize(ConfigPath, _armyGroups)),
+                (ReinforcementPath, _reinforcementsFile.Serialize(ReinforcementPath, _reinforcements)),
+                (EventPath, _eventsFile.Serialize(EventPath, _events)),
+                (EventStagePath, _stagesFile.Serialize(EventStagePath, _stages)),
+                (EventCalendarPath, _calendarsFile.Serialize(EventCalendarPath, _calendars)));
             Debug.WriteLine("[ArmyGroupSettingParser] 五表保存成功");
+            LastError = null;
             return true;
         }
         catch (Exception ex)
         {
+            LastError = ex.Message;
             Debug.WriteLine($"[ArmyGroupSettingParser] 保存失败: {ex.Message}");
             return false;
         }
@@ -213,9 +207,12 @@ public class ArmyGroupSettingParser
 
     public void Reload() => LoadAll();
 
-    public static void ClearInstance()
+    public static void ClearInstance(bool preserveChanges = false)
     {
-        lock (_lock) { _instance = null; }
+        lock (_lock)
+        {
+            if (!preserveChanges || _instance?.HasChanges != true) _instance = null;
+        }
     }
 }
 

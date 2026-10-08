@@ -1,6 +1,8 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.IO;
 using SkiaSharp;
-using WC4MapEditor.Core.Config;
+using WC4MapEditor.Rendering.Imaging;
+using WC4MapEditor.Core.Parsers.HdAtlas;
 using WC4MapEditor.Core.Parsers;
 using WC4MapEditor.Core.Models;
 
@@ -98,6 +100,7 @@ public class BelongFlagRender : IDisposable
 
     public void PreloadAtlas(MapData mapData)
     {
+        RefreshResources();
         if (_atlasInitialized) return;
         InitializeFlagAtlas(mapData);
     }
@@ -105,6 +108,7 @@ public class BelongFlagRender : IDisposable
     public void Render(SKCanvas canvas, MapData mapData)
     {
         if (!EnableBelongFlagRender || canvas == null || mapData == null) return;
+        RefreshResources();
 
         _stateLock.EnterReadLock();
         try
@@ -172,7 +176,7 @@ public class BelongFlagRender : IDisposable
                     }
                     else
                     {
-                        flagImage = LoadFlagImageFromFile(countryId);
+                        flagImage = LoadProjectFlag(countryId);
                         fromCache = false;
                     }
 
@@ -261,25 +265,7 @@ public class BelongFlagRender : IDisposable
 
     private static int GetHexIndex(int col, int row, MapData mapData)
     {
-        int mapClipX = mapData.Header?.MapClipX ?? 0;
-        int mapClipY = mapData.Header?.MapClipY ?? 0;
-
-        if (mapClipY > 0 && row < mapClipY) return -1;
-        if (mapClipX > 0 && col < mapClipX) return -1;
-
-        int conquestWidth = mapData.Header?.MapLength ?? 0;
-        if (conquestWidth <= 0) conquestWidth = mapData.MapWidth - mapClipX;
-
-        int actualCol = col - mapClipX;
-        int actualRow = row - mapClipY;
-
-        if (actualCol >= conquestWidth)
-        {
-            actualCol -= conquestWidth;
-            actualRow++;
-        }
-
-        return actualRow * conquestWidth + actualCol;
+        return mapData.GetBelongIndex(col, row);
     }
 
     private static int GetCountryId(int hexIndex, MapData mapData)
@@ -329,55 +315,37 @@ public class BelongFlagRender : IDisposable
     private static bool FlagExists(int countryId)
     {
         var cache = TacticalMapImageCache.Instance;
-        if (cache.IsInitialized && cache.HasImage($"flag_{countryId}.png"))
+        if (cache.HasImage($"flag_{countryId}.png"))
             return true;
 
-        var tacticalMapParser = ConfigManager.Instance.TacticalMapParser;
-        if (tacticalMapParser != null && tacticalMapParser.HasImage($"flag_{countryId}.png"))
-            return true;
-
-        return File.Exists(GetFlagPath(countryId));
-    }
-
-    private static string GetFlagPath(int countryId)
-    {
-        string basePath = Path.Combine(ConfigManager.Instance.GetStageMarkPath(), "CountryFlag");
-        string flagPath = Path.Combine(basePath, $"flag_{countryId}.png");
-
-        if (!File.Exists(flagPath) && (countryId == 0 || countryId == 255))
-            flagPath = Path.Combine(basePath, "flag_1.png");
-
-        return flagPath;
+        var hd = HdAtlasParser.Get("image/image_flags_hd");
+        return hd.HasImage($"flag_{countryId}.png") || countryId is 0 or 255 && hd.HasImage("flag_1.png");
     }
 
     private static SKImage? LoadFlagImage(int countryId)
     {
         var cache = TacticalMapImageCache.Instance;
-        if (cache.IsInitialized)
-        {
-            var flagImage = cache.GetImage($"flag_{countryId}.png");
-            if (flagImage != null) return flagImage;
-        }
+        var flagImage = cache.GetImage($"flag_{countryId}.png");
+        if (flagImage != null) return flagImage;
 
-        return LoadFlagImageFromFile(countryId);
+        return LoadProjectFlag(countryId);
     }
 
-    private static SKImage? LoadFlagImageFromFile(int countryId)
+    private long _resourceRevision = -1;
+
+    private void RefreshResources()
     {
-        string flagPath = GetFlagPath(countryId);
-        try
-        {
-            if (File.Exists(flagPath))
-            {
-                using var stream = File.OpenRead(flagPath);
-                var bitmap = SKBitmap.Decode(stream);
-                if (bitmap != null) return SKImage.FromBitmap(bitmap);
-            }
-        }
-        catch
-        {
-        }
-        return null;
+        long revision = Core.Assets.AssetManager.Default.Revision;
+        if (_resourceRevision == revision) return;
+        InvalidateCache();
+        _resourceRevision = revision;
+    }
+
+    private static SKImage? LoadProjectFlag(int countryId)
+    {
+        using var sprites = new ProjectSpriteLoader();
+        return sprites.LoadImage($"flag_{countryId}.png", "image/image_flags_hd")
+            ?? (countryId is 0 or 255 ? sprites.LoadImage("flag_1.png", "image/image_flags_hd") : null);
     }
 
     private static int CalculateAtlasSize(int totalCount)
@@ -406,8 +374,8 @@ public class BelongFlagRender : IDisposable
         int startRow = Math.Max(0, (int)((-_offsetY) / hexSpacingY) - 2);
         int endRow = Math.Min(mapData.MapHeight - 1, (int)((_viewportHeight - _offsetY) / hexSpacingY) + 2);
 
-        int mapClipX = mapData.Header?.MapClipX ?? 0;
-        int mapClipY = mapData.Header?.MapClipY ?? 0;
+        int mapClipX = mapData.UsesExternalCoordinates ? 0 : mapData.Header?.MapClipX ?? 0;
+        int mapClipY = mapData.UsesExternalCoordinates ? 0 : mapData.Header?.MapClipY ?? 0;
 
         for (int col = startCol; col <= endCol; col++)
         {
@@ -442,7 +410,7 @@ public class BelongFlagRender : IDisposable
             if (!_flagAtlasMap.ContainsKey(countryId)) continue;
 
             double centerX = _offsetX + col * HEX_HORIZONTAL_SPACING * _zoomLevel;
-            double centerY = _offsetY + (col % 2) * (hexHeight / 2) + row * hexHeight;
+            double centerY = _offsetY + (mapData.IsOddColumn(col) ? 1 : 0) * (hexHeight / 2) + row * hexHeight;
 
             _spriteRects.Add(_flagAtlasMap[countryId]);
 

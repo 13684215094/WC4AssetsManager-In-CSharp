@@ -1,3 +1,4 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.CommandLine;
 using WC4MapEditor.Core.Config;
 using WC4MapEditor.Core.Models;
@@ -364,7 +365,7 @@ public sealed class CliCommandHost : ICommandHost
                     return;
                 }
 
-                int coordIndex = row * mapData.MapWidth + col;
+                int coordIndex = mapData.ToRecordCoordinate(col, row);
                 if (coordIndex > ushort.MaxValue)
                 {
                     _output.WriteLine("建筑坐标超过 65535，未添加建筑。");
@@ -613,8 +614,8 @@ public sealed class CliCommandHost : ICommandHost
                 {
                     foreach (var b in mapData.Buildings)
                     {
-                        int col = b.Coordinate % mapData.MapWidth;
-                        int row = b.Coordinate / mapData.MapWidth;
+                        var localCoord = mapData.ToLocalCoordinate(b.Coordinate);
+                        int col = localCoord.Col, row = localCoord.Row;
                         if (mapData.GetBelongValue(col, row) != legionId)
                         {
                             mapData.SetBelongValue(col, row, legionId);
@@ -878,8 +879,8 @@ public sealed class CliCommandHost : ICommandHost
                     foreach (var building in mapData.Buildings)
                     {
                         if (building.Name != cityId.Value) continue;
-                        int col = building.Coordinate % mapData.MapWidth;
-                        int row = building.Coordinate / mapData.MapWidth;
+                        var localCoord = mapData.ToLocalCoordinate(building.Coordinate);
+                        int col = localCoord.Col, row = localCoord.Row;
                         belong.SetBelongByCountryId(col, row, belongId);
                         count++;
                     }
@@ -1121,18 +1122,20 @@ public sealed class CliCommandHost : ICommandHost
         {
             WithModifiers((mapData, mgr) =>
             {
-                var armies = mapData.Armies;
-                _output.WriteLine($"部队总数: {armies.Count}");
-                if (armies.Count > 0)
+                var armies = mapData.Header.BtlVersion == 3
+                    ? mapData.ArmiesV3.Select(army => (army.UnitType, Coordinate: (int)army.Coordinate, army.LegionId)).ToArray()
+                    : mapData.Armies.Select(army => (army.UnitType, Coordinate: (int)army.Coordinate, army.LegionId)).ToArray();
+                _output.WriteLine($"部队总数: {armies.Length}");
+                if (armies.Length > 0)
                 {
                     _output.WriteLine();
                     _output.WriteLine($"{"序号",-6} {"类型",-6} {"坐标",-10} {"军团",-6}");
                     _output.WriteLine(new string('-', 30));
-                    for (int i = 0; i < armies.Count; i++)
+                    for (int i = 0; i < armies.Length; i++)
                     {
                         var army = armies[i];
-                        int col = army.Coordinate % mapData.MapWidth;
-                        int row = army.Coordinate / mapData.MapWidth;
+                        var localCoord = mapData.ToLocalCoordinate(army.Coordinate);
+                        int col = localCoord.Col, row = localCoord.Row;
                         _output.WriteLine($"{i,-6} {army.UnitType,-6} ({col},{row})    {army.LegionId,-6}");
                     }
                 }
@@ -1144,8 +1147,20 @@ public sealed class CliCommandHost : ICommandHost
         {
             WithModifiers((mapData, mgr) =>
             {
-                int count = mapData.Armies.Count;
-                mapData.Armies.Clear();
+                bool v3 = mapData.Header.BtlVersion == 3;
+                var armies = mapData.Armies.ToArray();
+                var armiesV3 = mapData.ArmiesV3.ToArray();
+                int count = v3 ? armiesV3.Length : armies.Length;
+                if (count > 0) ExecuteUndoable(new DelegateCommand("删除所有部队", () =>
+                {
+                    if (v3) mapData.ArmiesV3.Clear(); else mapData.Armies.Clear();
+                    mapData.IsModified = true;
+                }, () =>
+                {
+                    if (v3) { mapData.ArmiesV3.Clear(); foreach (var army in armiesV3) mapData.ArmiesV3.Add(army); }
+                    else { mapData.Armies.Clear(); foreach (var army in armies) mapData.Armies.Add(army); }
+                    mapData.IsModified = true;
+                }, 96L + count * (v3 ? 80L : 48L)));
                 _output.WriteLine($"已删除 {count} 个部队");
             });
         });
@@ -1175,8 +1190,8 @@ public sealed class CliCommandHost : ICommandHost
                     for (int i = 0; i < traps.Count; i++)
                     {
                         var trap = traps[i];
-                        int col = trap.Coordinate % mapData.MapWidth;
-                        int row = trap.Coordinate / mapData.MapWidth;
+                        var localCoord = mapData.ToLocalCoordinate(trap.Coordinate);
+                        int col = localCoord.Col, row = localCoord.Row;
                         _output.WriteLine($"{i,-6} ({col},{row})    {trap.LegionId,-6} {trap.Organization,-6} {trap.Health,-6}");
                     }
                 }
@@ -1189,7 +1204,15 @@ public sealed class CliCommandHost : ICommandHost
             WithModifiers((mapData, mgr) =>
             {
                 int count = mapData.Traps.Count;
-                mapData.Traps.Clear();
+                var traps = mapData.Traps.ToArray();
+                if (count > 0) ExecuteUndoable(new DelegateCommand("删除所有陷阱", () =>
+                {
+                    mapData.Traps.Clear(); mapData.IsModified = true;
+                }, () =>
+                {
+                    mapData.Traps.Clear(); foreach (var trap in traps) mapData.Traps.Add(trap);
+                    mapData.IsModified = true;
+                }, 96L + count * 12L));
                 _output.WriteLine($"已删除 {count} 个陷阱");
             });
         });
@@ -1260,7 +1283,7 @@ public sealed class CliCommandHost : ICommandHost
             // Check 内部在副本上跑一遍修复逻辑，因此不会改动文件。
             try
             {
-                var ruleIssues = BTLRuleChecker.Check(File.ReadAllBytes(path!));
+                var ruleIssues = BTLRuleChecker.Check(ProjectFile.ReadAllBytes(path!));
                 Log("");
                 if (ruleIssues.Count == 0)
                 {
@@ -1315,7 +1338,7 @@ public sealed class CliCommandHost : ICommandHost
 
             try
             {
-                File.WriteAllLines(outPath, lines);
+                AtomicFile.Write(outPath, System.Text.Encoding.UTF8.GetBytes(string.Join(Environment.NewLine, lines) + Environment.NewLine));
                 _output.WriteLine($"报告已写入：{outPath}（共 {lines.Count} 行）");
             }
             catch (Exception ex)
@@ -1369,7 +1392,7 @@ public sealed class CliCommandHost : ICommandHost
                 alsoFixMapData = true;
             }
 
-            if (!File.Exists(path))
+            if (!ProjectFile.Exists(path))
             {
                 _output.WriteLine($"文件不存在: {path}");
                 return;
@@ -1377,7 +1400,7 @@ public sealed class CliCommandHost : ICommandHost
 
             try
             {
-                byte[] data = File.ReadAllBytes(path);
+                byte[] data = ProjectFile.ReadAllBytes(path);
 
                 // 规则层：建筑设施 / 单位参数 / 军团 / 归属 / 区划 等
                 int count = BTLRuleChecker.Fix(data);
@@ -1388,7 +1411,7 @@ public sealed class CliCommandHost : ICommandHost
                 if (terrainFixed > 0) count += terrainFixed;
 
                 string backup = path + ".bak";
-                File.Copy(path, backup, overwrite: false);
+                if (ProjectFile.FindProject(path) == null) File.Copy(path, backup, overwrite: false);
                 AtomicFile.Write(path, data);
 
                 _output.WriteLine($"已修复 {count} 处，结果已写回：{path}");
@@ -1496,6 +1519,13 @@ public sealed class CliCommandHost : ICommandHost
 
     public event Action? DataModified;
 
+    private static void ExecuteUndoable(IUndoableCommand command)
+    {
+        var history = CommandManager.Instance.GetContext()?.UndoManager;
+        if (history != null) history.ExecuteAndRecord(command);
+        else command.Execute();
+    }
+
     private Command BuildRunCommand()
     {
         var cmd = new Command("run", "执行脚本文件(.zme)");
@@ -1516,7 +1546,7 @@ public sealed class CliCommandHost : ICommandHost
                 return;
             }
 
-            if (!File.Exists(filePath))
+            if (!ProjectFile.Exists(filePath))
             {
                 _output.WriteLine($"[脚本] 文件不存在: {filePath}");
                 return;
@@ -1524,7 +1554,7 @@ public sealed class CliCommandHost : ICommandHost
 
             _output.WriteLine($"[脚本] 加载脚本文件: {Path.GetFileName(filePath)}");
 
-            var lines = File.ReadAllLines(filePath);
+            var lines = ProjectFile.ReadAllLines(filePath);
             int executedCount = 0;
             int skippedCount = 0;
 

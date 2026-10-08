@@ -7,6 +7,9 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using WC4MapEditor.Core.Parsers.ArmySetting;
+using WC4MapEditor.Core.Assets;
+using WC4MapEditor.Core.Models;
+using WC4MapEditor.Views.Assist;
 using WC4MapEditor.Views.Dialogs;
 
 namespace WC4MapEditor.Views;
@@ -15,8 +18,25 @@ namespace WC4MapEditor.Views;
 /// 兵种编辑场景（对应 Python 工具的 Unit 编辑器，三文件联动：
 /// ArmySettings.json + def_armypos.xml + stringtable 的 unit_name_{Id}）。
 /// </summary>
-public class ArmyEditScene : UserControl
+public class ArmyEditScene : UserControl, IUnsavedScene, IDisposable
 {
+    public bool HasUnsavedChanges => _parser.HasChanges || _invalidDraft || _numBoxes.Values.Any(box => !box.IsInputValid);
+    public bool SaveChanges()
+    {
+        if (!ApplyProp()) return false;
+        if (_parser.SaveAll()) { SetStatus($"已保存到增量输出：{_parser.ConfigPath}"); return true; }
+        MessageBox.Show(_parser.LastError ?? "保存失败，修改仍保留。", "保存失败", MessageBoxButton.OK, MessageBoxImage.Error);
+        return false;
+    }
+    public void DiscardChanges()
+    {
+        int? id = _current?.Id;
+        ShowEmpty();
+        _parser.Reload(); _current = id is int value ? _parser.GetById(value) : null;
+        if (_current == null) ShowEmpty(); else LoadUiFromCurrent();
+        RefreshList();
+    }
+
     private readonly MainWindow _window;
     private readonly ArmySettingParser _parser = ArmySettingParser.Instance;
 
@@ -27,6 +47,8 @@ public class ArmyEditScene : UserControl
 
     private ArmySettingData? _current;
     private bool _loadingUi;
+    private bool _invalidDraft;
+    private bool _refreshingList;
 
     private ScrollViewer _propScroll = null!;
     private StackPanel _propPanel = null!;
@@ -35,6 +57,8 @@ public class ArmyEditScene : UserControl
     private readonly Dictionary<string, CheckBox> _checkBoxes = new(StringComparer.Ordinal);
     private TextBox _iniNameBox = null!;
     private TextBox _jsonPreview = null!;
+    private ReferenceDetailsPanel _featureDetails = null!;
+    private ProjectDetailPreviewControl _detailPreview = null!;
 
     public ArmyEditScene(MainWindow window)
     {
@@ -53,12 +77,12 @@ public class ArmyEditScene : UserControl
     private void BuildUI()
     {
         _root = new Grid();
-        _root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(50) });
+        _root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         _root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         _root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(28) });
-        _root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(300) });
+        _root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(300), MinWidth = 180, MaxWidth = 380 });
         _root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(4) });
-        _root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        _root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star), MinWidth = 360 });
 
         var topBar = new Border
         {
@@ -67,7 +91,7 @@ public class ArmyEditScene : UserControl
             BorderThickness = new Thickness(0, 0, 0, 1)
         };
         Grid.SetRow(topBar, 0); Grid.SetColumnSpan(topBar, 3);
-        var topPanel = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 8, 0) };
+        var topPanel = new WrapPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8) };
         topPanel.Children.Add(MakeTopBtn("返回", (_, _) => _window.ReturnToMainScene()));
         topPanel.Children.Add(MakeTopBtn("新增", OnAdd));
         topPanel.Children.Add(MakeTopBtn("删除", OnDelete));
@@ -110,9 +134,7 @@ public class ArmyEditScene : UserControl
             VerticalContentAlignment = VerticalAlignment.Center,
             CaretBrush = Brushes.White
         };
-        _searchBox.Text = "搜索 (Id / 名称)...";
-        _searchBox.GotFocus += (_, _) => { if (_searchBox.Text.StartsWith("搜索")) _searchBox.Text = ""; };
-        _searchBox.LostFocus += (_, _) => { if (string.IsNullOrWhiteSpace(_searchBox.Text)) _searchBox.Text = "搜索 (Id / 名称)..."; };
+        _searchBox.ToolTip = "搜索 Id / 名称 / Army / Type";
         _searchBox.TextChanged += (_, _) => RefreshList();
         Grid.SetRow(_searchBox, 0);
         leftGrid.Children.Add(_searchBox);
@@ -145,7 +167,15 @@ public class ArmyEditScene : UserControl
         var right = new Border { Background = new SolidColorBrush(Color.FromRgb(0x1E, 0x1E, 0x1E)) };
         Grid.SetRow(right, 1); Grid.SetColumn(right, 2);
         BuildRightPanel();
-        right.Child = _propScroll;
+        _detailPreview = new ProjectDetailPreviewControl(army: true);
+        _detailPreview.ValidateRequested += () => ApplyProp();
+        _detailPreview.FeatureSelected += id =>
+        {
+            if (ApplyProp() && _window.ConfirmUnsavedDocument(this, "打开特性配置"))
+                _window.SetCurrentScene(new JsonTableEditScene(_window,
+                    System.IO.Path.Combine(AssetManager.Default.AssetsRoot, "json/ArmyFeatureSettings.json"), id));
+        };
+        right.Child = new EditorPreviewPane(_propScroll, _detailPreview);
         _root.Children.Add(right);
 
         var status = new Border
@@ -226,6 +256,27 @@ public class ArmyEditScene : UserControl
         AddSection("列表字段 (逗号分隔)");
         AddList("Feature", "特性(Feature)");
         AddList("FeatureLevel", "特性等级(FeatureLevel)");
+        _featureDetails = new ReferenceDetailsPanel(features: true);
+        _featureDetails.CanChange = ApplyProp;
+        _featureDetails.SlotsChanged += slots =>
+        {
+            if (_current == null) return;
+            _loadingUi = true;
+            try
+            {
+                _textBoxes["Feature"].Text = string.Join(", ", slots.References);
+                _textBoxes["FeatureLevel"].Text = string.Join(", ", slots.Levels);
+            }
+            finally { _loadingUi = false; }
+            ApplyProp();
+        };
+        _featureDetails.EditRequested += id =>
+        {
+            if (ApplyProp() && _window.ConfirmUnsavedDocument(this, "打开特性配置"))
+                _window.SetCurrentScene(new JsonTableEditScene(_window,
+                    System.IO.Path.Combine(AssetManager.Default.AssetsRoot, "json/ArmyFeatureSettings.json"), id));
+        };
+        _propPanel.Children.Add(_featureDetails);
         AddList("Country", "归属国家(Country)");
         AddList("FormationChance", "编队概率(FormationChance)");
 
@@ -309,6 +360,7 @@ public class ArmyEditScene : UserControl
     {
         var ctrl = new NumericUpDown { MinValue = min, MaxValue = max, Increment = inc };
         ctrl.ValueChanged += (_, _) => { if (!_loadingUi && _current != null) ApplyProp(); };
+        ctrl.InputValidityChanged += (_, _) => { if (!_loadingUi && _current != null) ApplyProp(); };
         _numBoxes[key] = ctrl;
         AddRow(label, ctrl);
         return ctrl;
@@ -369,19 +421,22 @@ public class ArmyEditScene : UserControl
     // ============================================================= 列表 =============================================================
     private void RefreshList()
     {
+        if (_refreshingList || _current != null && !ApplyProp()) return;
         var q = _searchBox.Text;
-        bool searching = !string.IsNullOrWhiteSpace(q) && !q.StartsWith("搜索");
+        bool searching = !string.IsNullOrWhiteSpace(q);
 
         var items = _parser.Items.Where(u =>
         {
             if (!searching) return true;
             if (u.Id.ToString().Contains(q)) return true;
+            if (u.Army.ToString().Contains(q) || u.Type.ToString().Contains(q)) return true;
             if ((u.Name ?? "").Contains(q, StringComparison.OrdinalIgnoreCase)) return true;
             if (_parser.GetUnitName(u.Id).Contains(q, StringComparison.OrdinalIgnoreCase)) return true;
             return false;
         });
 
         int? keepId = _current?.Id;
+        _refreshingList = true;
         _listBox.Items.Clear();
         foreach (var u in items)
         {
@@ -391,11 +446,21 @@ public class ArmyEditScene : UserControl
             _listBox.Items.Add(entry);
             if (keepId.HasValue && u.Id == keepId.Value) _listBox.SelectedItem = entry;
         }
+        _refreshingList = false;
+        ListBox_SelectionChanged(_listBox, new SelectionChangedEventArgs(ListBox.SelectionChangedEvent, Array.Empty<object>(), Array.Empty<object>()));
         SetStatus($"已加载 {_parser.Items.Count} 条兵种，列表 {_listBox.Items.Count} 条");
     }
 
     private void ListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (_refreshingList || _loadingUi) return;
+        if (_current != null && !ApplyProp())
+        {
+            _refreshingList = true;
+            _listBox.SelectedItem = e.RemovedItems.OfType<ArmyListEntry>().FirstOrDefault();
+            _refreshingList = false;
+            return;
+        }
         if (_listBox.SelectedItem is not ArmyListEntry entry) { ShowEmpty(); return; }
         _current = _parser.GetById(entry.Id);
         if (_current == null) { ShowEmpty(); return; }
@@ -410,6 +475,7 @@ public class ArmyEditScene : UserControl
         foreach (var cb in _checkBoxes.Values) cb.IsChecked = false;
         _iniNameBox.Text = "";
         _jsonPreview.Text = "";
+        _featureDetails.Update(null); _detailPreview.Clear(); _invalidDraft = false; _current = null;
         _loadingUi = false;
     }
 
@@ -458,12 +524,28 @@ public class ArmyEditScene : UserControl
         SetNum("_xml_scale", p?.Scale ?? 1.0);
 
         _loadingUi = false;
+        _invalidDraft = false;
         UpdateJsonPreview();
     }
 
-    private void ApplyProp()
+    private bool ApplyProp()
     {
-        if (_current == null) return;
+        if (_loadingUi || _current == null) return true;
+        List<int> features, levels, countries, formationChances;
+        try
+        {
+            foreach (var (key, box) in _numBoxes)
+                if (!box.IsInputValid) throw new FormatException($"{key} 数值输入无效。");
+            features = GeneralSkillRules.ParseIds(_textBoxes["Feature"].Text);
+            levels = GeneralSkillRules.ParseIds(_textBoxes["FeatureLevel"].Text);
+            countries = GeneralSkillRules.ParseIds(_textBoxes["Country"].Text);
+            formationChances = GeneralSkillRules.ParseIds(_textBoxes["FormationChance"].Text);
+        }
+        catch (FormatException ex)
+        {
+            _invalidDraft = true; SetStatus(ex.Message); _featureDetails.ShowInvalid($"特性说明未更新：{ex.Message}");
+            _detailPreview.ShowInvalidInput(ex.Message); return false;
+        }
         _current.Id = GetInt("Id");
         _current.Army = GetInt("Army");
         _current.SubType = GetInt("SubType");
@@ -491,21 +573,28 @@ public class ArmyEditScene : UserControl
         _current.MaxFormation = GetInt("MaxFormation");
         _current.Name = _textBoxes["Name"].Text;
         _current.Anim = _textBoxes["Anim"].Text;
-        _current.Feature = ParseIntList(_textBoxes["Feature"].Text);
-        _current.FeatureLevel = ParseIntList(_textBoxes["FeatureLevel"].Text);
-        _current.Country = ParseIntList(_textBoxes["Country"].Text);
-        _current.FormationChance = ParseIntList(_textBoxes["FormationChance"].Text);
+        _current.Feature = features;
+        _current.FeatureLevel = levels;
+        _current.Country = countries;
+        _current.FormationChance = formationChances;
         _current.Formation = _checkBoxes["Formation"].IsChecked == true;
 
         _parser.SetUnitName(_current.Id, _iniNameBox.Text);
-        var p = _parser.EnsurePosDefault(_current.Id);
-        p.PosX = GetInt("_xml_x");
-        p.PosY = GetInt("_xml_y");
-        p.Scale = GetNum("_xml_scale");
+        var p = _parser.GetPos(_current.Id);
+        int posX = GetInt("_xml_x"), posY = GetInt("_xml_y");
+        double scale = GetNum("_xml_scale");
+        if (p != null || posX != 0 || posY != 0 || scale != 1.0)
+        {
+            p ??= _parser.EnsurePosDefault(_current.Id);
+            p.PosX = posX;
+            p.PosY = posY;
+            p.Scale = scale;
+        }
 
         if (_listBox.SelectedItem is ArmyListEntry le && le.Id == _current.Id)
         {
             var idx = _listBox.SelectedIndex;
+            _refreshingList = true;
             _listBox.Items[idx] = new ArmyListEntry
             {
                 Id = _current.Id,
@@ -514,9 +603,12 @@ public class ArmyEditScene : UserControl
                 Type = _current.Type
             };
             _listBox.SelectedIndex = idx;
+            _refreshingList = false;
         }
-        SetStatus($"已更新兵种 {_current.Id}（未保存）");
+        SetStatus($"兵种 {_current.Id} · {(_parser.HasChanges ? "有未保存修改" : "无未保存修改")}");
         UpdateJsonPreview();
+        _invalidDraft = false;
+        return true;
     }
 
     private void SetNum(string key, double v) { if (_numBoxes.TryGetValue(key, out var b)) b.Value = v; }
@@ -525,25 +617,21 @@ public class ArmyEditScene : UserControl
 
     private static string FormatList(List<int>? list) => list == null ? "" : string.Join(", ", list);
 
-    private static List<int> ParseIntList(string? s)
-    {
-        var r = new List<int>();
-        if (string.IsNullOrWhiteSpace(s)) return r;
-        foreach (var p in s.Split(new[] { ',', ' ', ';', '\t', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries))
-            if (int.TryParse(p.Trim(), out var v)) r.Add(v);
-        return r;
-    }
-
     private void UpdateJsonPreview()
     {
         if (_current == null) { _jsonPreview.Text = ""; return; }
         try { _jsonPreview.Text = JsonSerializer.Serialize(_current, new JsonSerializerOptions { WriteIndented = true }); }
         catch { _jsonPreview.Text = "(序列化失败)"; }
+        _featureDetails.Update(_current.Feature, _current.FeatureLevel);
+        _detailPreview.UpdateArmy(_current, _iniNameBox.Text);
     }
+
+    public void Dispose() => _detailPreview.Dispose();
 
     // ============================================================= 操作 =============================================================
     private void OnAdd(object sender, RoutedEventArgs e)
     {
+        if (!ApplyProp()) return;
         int newId = _parser.GetNextId();
         ArmySettingData unit;
         var src = _current;
@@ -620,15 +708,9 @@ public class ArmyEditScene : UserControl
 
     private void OnSave(object sender, RoutedEventArgs e)
     {
-        if (_parser.SaveAll())
+        if (SaveChanges())
         {
             SetStatus($"✔ 保存成功：{_parser.ConfigPath}");
-            MessageBox.Show($"保存成功：\nArmySettings.json: {_parser.ConfigPath}\ndef_armypos.xml: {_parser.XmlPosPath}\nstringtable: {_parser.StringTablePath}",
-                "保存成功", MessageBoxButton.OK, MessageBoxImage.Information);
-        }
-        else
-        {
-            MessageBox.Show("保存失败，请检查权限或 Debug 输出", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
 
@@ -636,9 +718,9 @@ public class ArmyEditScene : UserControl
     {
         var res = MessageBox.Show("重新加载磁盘上的 ArmySettings.json 与 def_armypos.xml？未保存的更改将丢失。", "重载", MessageBoxButton.YesNo, MessageBoxImage.Question);
         if (res != MessageBoxResult.Yes) return;
+        ShowEmpty();
         _parser.LoadAll();
         RefreshList();
-        ShowEmpty();
         SetStatus("已从磁盘重新加载");
     }
 

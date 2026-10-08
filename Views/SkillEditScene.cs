@@ -7,6 +7,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using WC4MapEditor.Core.Parsers.Skill;
+using WC4MapEditor.Views.Assist;
 
 namespace WC4MapEditor.Views;
 
@@ -14,18 +15,43 @@ namespace WC4MapEditor.Views;
 /// 技能编辑场景（对应 Python 工具的 Skill 编辑器，SkillSettings.json）。
 /// 列表 + 属性面板完整 CRUD；名称/描述写入 stringtable 的 skill_name_{Type} / skill_info_{Type}。
 /// </summary>
-public class SkillEditScene : UserControl
+public class SkillEditScene : UserControl, IUnsavedScene, IDisposable
 {
+    public bool HasUnsavedChanges => _parser.HasChanges || _numBoxes.Values.Any(box => !box.IsInputValid);
+    public bool SaveChanges()
+    {
+        if (_numBoxes.Values.Any(box => !box.IsInputValid))
+        {
+            MessageBox.Show("数值输入无效，请修正后保存。", "保存已阻止", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return false;
+        }
+        ApplyProp();
+        if (_parser.SaveAll()) { SetStatus($"已保存到增量输出：{_parser.ConfigPath}"); return true; }
+        MessageBox.Show(_parser.LastError ?? "保存失败，修改仍保留。", "保存失败", MessageBoxButton.OK, MessageBoxImage.Error);
+        return false;
+    }
+    public void DiscardChanges()
+    {
+        int? id = _current?.Id;
+        _parser.Reload(); _current = id is int value ? _parser.GetById(value) : null;
+        if (_current == null) ShowEmpty(); else LoadUiFromCurrent();
+        RefreshList();
+    }
+
     private readonly MainWindow _window;
     private readonly SkillSettingParser _parser = SkillSettingParser.Instance;
 
     private Grid _root = null!;
     private ListBox _listBox = null!;
     private TextBox _searchBox = null!;
+    private sealed record SkillFamily(int? Type, string Label) { public override string ToString() => Label; }
+    private ComboBox _familyFilter = null!;
+    private readonly bool _returnToGeneral;
     private TextBlock _statusText = null!;
 
     private SkillSettingData? _current;
     private bool _loadingUi;
+    private bool _refreshingList;
 
     private ScrollViewer _propScroll = null!;
     private StackPanel _propPanel = null!;
@@ -34,16 +60,21 @@ public class SkillEditScene : UserControl
     private TextBox _iniNameBox = null!;
     private TextBox _iniDescBox = null!;
     private TextBox _jsonPreview = null!;
+    private StackPanel _skillPreview = null!;
+    private GameUiPreviewControl _gamePreview = null!;
 
-    public SkillEditScene(MainWindow window)
+    public SkillEditScene(MainWindow window, int? preferredSkillId = null, bool returnToGeneral = false)
     {
         _window = window;
+        _returnToGeneral = returnToGeneral;
         Background = new SolidColorBrush(Color.FromRgb(0x1F, 0x1F, 0x1F));
         BuildUI();
         RefreshList();
         Loaded += (_, _) => Dispatcher.BeginInvoke(() =>
         {
-            if (_parser.Items.Count > 0 && _listBox.Items.Count > 0)
+            if (preferredSkillId is int id && _parser.GetById(id) is { } skill)
+                SelectSkill(skill);
+            else if (_current == null && _parser.Items.Count > 0 && _listBox.Items.Count > 0)
                 _listBox.SelectedIndex = 0;
         }, DispatcherPriority.Loaded);
     }
@@ -52,12 +83,12 @@ public class SkillEditScene : UserControl
     private void BuildUI()
     {
         _root = new Grid();
-        _root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(50) });
+        _root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         _root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         _root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(28) });
-        _root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(280) });
+        _root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(280), MinWidth = 180, MaxWidth = 380 });
         _root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(4) });
-        _root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        _root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star), MinWidth = 360 });
 
         // 顶部工具栏
         var topBar = new Border
@@ -67,9 +98,18 @@ public class SkillEditScene : UserControl
             BorderThickness = new Thickness(0, 0, 0, 1)
         };
         Grid.SetRow(topBar, 0); Grid.SetColumnSpan(topBar, 3);
-        var topPanel = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 8, 0) };
-        topPanel.Children.Add(MakeTopBtn("返回", (_, _) => _window.ReturnToMainScene()));
+        var topPanel = new WrapPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8) };
+        topPanel.Children.Add(MakeTopBtn(_returnToGeneral ? "返回将领" : "返回", (_, _) =>
+        {
+            if (_returnToGeneral)
+            {
+                if (_window.ConfirmUnsavedDocument(this, "返回将领编辑器"))
+                    _window.SetCurrentScene(new GeneralEditScene(_window));
+            }
+            else _window.ReturnToMainScene();
+        }));
         topPanel.Children.Add(MakeTopBtn("新增", OnAdd));
+        topPanel.Children.Add(MakeTopBtn("追加下一级", OnAppendLevel));
         topPanel.Children.Add(MakeTopBtn("删除", OnDelete));
         topPanel.Children.Add(MakeTopBtn("保存", OnSave));
         topPanel.Children.Add(MakeTopBtn("重载", OnReload));
@@ -95,7 +135,7 @@ public class SkillEditScene : UserControl
         };
         Grid.SetRow(left, 1); Grid.SetColumn(left, 0);
         var leftGrid = new Grid();
-        leftGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(38) });
+        leftGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         leftGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
         _searchBox = new TextBox
@@ -110,12 +150,15 @@ public class SkillEditScene : UserControl
             VerticalContentAlignment = VerticalAlignment.Center,
             CaretBrush = Brushes.White
         };
-        _searchBox.Text = "搜索 (Id / 名称 / Type)...";
-        _searchBox.GotFocus += (_, _) => { if (_searchBox.Text.StartsWith("搜索")) _searchBox.Text = ""; };
-        _searchBox.LostFocus += (_, _) => { if (string.IsNullOrWhiteSpace(_searchBox.Text)) _searchBox.Text = "搜索 (Id / 名称 / Type)..."; };
-        _searchBox.TextChanged += (_, _) => RefreshList();
-        Grid.SetRow(_searchBox, 0);
-        leftGrid.Children.Add(_searchBox);
+        _searchBox.ToolTip = "搜索 Id / 名称 / Type / 技能介绍";
+        _searchBox.TextChanged += (_, _) => { if (!_refreshingList) RefreshList(); };
+        var filters = new StackPanel();
+        filters.Children.Add(new TextBlock { Text = "技能类型 / 等级链", Foreground = Brushes.LightGray, Margin = new Thickness(8, 6, 8, 0) });
+        filters.Children.Add(_searchBox);
+        _familyFilter = new ComboBox { Margin = new Thickness(8, 0, 8, 8) };
+        RefreshFamilies();
+        _familyFilter.SelectionChanged += (_, _) => { if (!_refreshingList) RefreshList(); };
+        filters.Children.Add(_familyFilter); leftGrid.Children.Add(filters);
 
         _listBox = new ListBox
         {
@@ -146,7 +189,19 @@ public class SkillEditScene : UserControl
         var right = new Border { Background = new SolidColorBrush(Color.FromRgb(0x1E, 0x1E, 0x1E)) };
         Grid.SetRow(right, 1); Grid.SetColumn(right, 2);
         BuildRightPanel();
-        right.Child = _propScroll;
+        _gamePreview = new GameUiPreviewControl(skillOnly: true);
+        _gamePreview.SkillSelected += id => { if (_parser.GetById(id) is { } skill) SelectSkill(skill); };
+        _gamePreview.ValidateRequested += () =>
+        {
+            if (_numBoxes.Values.Any(box => !box.IsInputValid)) _gamePreview.ShowInvalidInput("数值输入无效");
+            else { ApplyProp(); _gamePreview.UpdateSkill(_current?.Id); }
+        };
+        _gamePreview.EditLayoutRequested += (form, layout) =>
+        {
+            if (_window.ConfirmUnsavedDocument(this, "打开页面布局编辑器"))
+                _window.SetCurrentScene(new LayoutEditScene(_window, form, layout));
+        };
+        right.Child = new EditorPreviewPane(_propScroll, _gamePreview);
         _root.Children.Add(right);
 
         // 底部状态栏
@@ -180,6 +235,10 @@ public class SkillEditScene : UserControl
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             Padding = new Thickness(0, 0, 8, 0)
         };
+
+        AddSection("技能与等级链预览（未保存修改实时更新）");
+        _skillPreview = new StackPanel { Margin = new Thickness(8) };
+        _propPanel.Children.Add(_skillPreview);
 
         AddSection("文本 (stringtable)");
         AddRow("技能名 (skill_name_{Type})", AddIniText(out _iniNameBox, false));
@@ -300,6 +359,12 @@ public class SkillEditScene : UserControl
             }
             ApplyProp();
         };
+        ctrl.InputValidityChanged += (_, _) =>
+        {
+            if (_loadingUi || _current == null) return;
+            if (!ctrl.IsInputValid) _gamePreview.ShowInvalidInput($"{key}: 数值输入无效");
+            else ApplyProp();
+        };
         _numBoxes[key] = ctrl;
         AddRow(label, ctrl);
         return ctrl;
@@ -344,39 +409,70 @@ public class SkillEditScene : UserControl
     }
 
     // ============================================================= 列表 =============================================================
+    private void RefreshFamilies()
+    {
+        int? selected = (_familyFilter.SelectedItem as SkillFamily)?.Type;
+        _familyFilter.Items.Clear();
+        _familyFilter.Items.Add(new SkillFamily(null, "全部技能类型"));
+        foreach (var family in _parser.Items.GroupBy(row => row.Type).OrderBy(group => group.Key))
+            _familyFilter.Items.Add(new SkillFamily(family.Key, $"{_parser.GetSkillName(family.Key)} · Type {family.Key} · {family.Count()} 级记录"));
+        _familyFilter.SelectedItem = _familyFilter.Items.OfType<SkillFamily>().FirstOrDefault(item => item.Type == selected)
+            ?? _familyFilter.Items[0];
+    }
+
     private void RefreshList()
     {
+        if (_current != null && _numBoxes.Values.Any(box => !box.IsInputValid))
+        { SetStatus("数值输入无效，请修正后筛选技能。"); return; }
+        _refreshingList = true;
+        try { RefreshFamilies(); }
+        finally { _refreshingList = false; }
         var q = _searchBox.Text;
-        bool searching = !string.IsNullOrWhiteSpace(q) && !q.StartsWith("搜索");
+        bool searching = !string.IsNullOrWhiteSpace(q);
 
         var items = _parser.Items.Where(s =>
         {
+            if ((_familyFilter.SelectedItem as SkillFamily)?.Type is int type && s.Type != type) return false;
             if (!searching) return true;
             if (s.Id.ToString().Contains(q)) return true;
             if ((s.Name ?? "").Contains(q, StringComparison.OrdinalIgnoreCase)) return true;
             if (_parser.GetSkillName(s.Type).Contains(q, StringComparison.OrdinalIgnoreCase)) return true;
+            if (_parser.GetSkillDesc(s.Type).Contains(q, StringComparison.OrdinalIgnoreCase)) return true;
             if (s.Type.ToString().Contains(q)) return true;
             return false;
         });
 
-        int? keepId = _current?.Id;
-        _listBox.Items.Clear();
-        foreach (var s in items)
+        var previous = _current;
+        _refreshingList = true;
+        try
         {
-            var name = _parser.GetSkillName(s.Type);
-            if (string.IsNullOrEmpty(name)) name = string.IsNullOrEmpty(s.Name) ? $"技能_{s.Id}" : s.Name;
-            var entry = new SkillListEntry { Id = s.Id, Name = name, Type = s.Type, Level = s.Level };
-            _listBox.Items.Add(entry);
-            if (keepId.HasValue && s.Id == keepId.Value) _listBox.SelectedItem = entry;
+            _listBox.Items.Clear();
+            foreach (var s in items.OrderBy(row => row.Type).ThenBy(row => row.Level))
+            {
+                var name = _parser.GetSkillName(s.Type);
+                if (string.IsNullOrEmpty(name)) name = string.IsNullOrEmpty(s.Name) ? $"技能_{s.Id}" : s.Name;
+                var entry = new SkillListEntry(s, name);
+                _listBox.Items.Add(entry);
+                if (ReferenceEquals(s, previous)) _listBox.SelectedItem = entry;
+            }
         }
+        finally { _refreshingList = false; }
+        ListBox_SelectionChanged(_listBox, new SelectionChangedEventArgs(ListBox.SelectionChangedEvent, Array.Empty<object>(), Array.Empty<object>()));
         SetStatus($"已加载 {_parser.Items.Count} 条技能，列表 {_listBox.Items.Count} 条");
     }
 
     private void ListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (_refreshingList) return;
+        if (_current != null && _numBoxes.Values.Any(box => !box.IsInputValid))
+        {
+            _refreshingList = true;
+            _listBox.SelectedItem = e.RemovedItems.OfType<SkillListEntry>().FirstOrDefault();
+            _refreshingList = false;
+            SetStatus("数值输入无效，请修正后切换技能。"); return;
+        }
         if (_listBox.SelectedItem is not SkillListEntry entry) { ShowEmpty(); return; }
-        _current = _parser.GetById(entry.Id);
-        if (_current == null) { ShowEmpty(); return; }
+        _current = entry.Data;
         LoadUiFromCurrent();
     }
 
@@ -388,6 +484,9 @@ public class SkillEditScene : UserControl
         _iniNameBox.Text = "";
         _iniDescBox.Text = "";
         _jsonPreview.Text = "";
+        _skillPreview.Children.Clear();
+        _gamePreview?.Clear();
+        _current = null;
         _loadingUi = false;
     }
 
@@ -421,6 +520,11 @@ public class SkillEditScene : UserControl
     private void ApplyProp()
     {
         if (_current == null) return;
+        if (_numBoxes.Values.Any(box => !box.IsInputValid))
+        {
+            _gamePreview?.ShowInvalidInput("数值输入无效，尚未应用");
+            SetStatus("数值输入无效，尚未应用"); return;
+        }
         _current.Id = GetInt("Id");
         _current.Level = GetInt("Level");
         _current.Type = GetInt("Type");
@@ -441,17 +545,17 @@ public class SkillEditScene : UserControl
         _parser.SetSkillDesc(_current.Type, _iniDescBox.Text);
 
         // 同步列表项文字
-        if (_listBox.SelectedItem is SkillListEntry le && le.Id == _current.Id)
+        if (_listBox.SelectedItem is SkillListEntry)
         {
             var idx = _listBox.SelectedIndex;
-            _listBox.Items[idx] = new SkillListEntry
+            _refreshingList = true;
+            try
             {
-                Id = _current.Id,
-                Name = string.IsNullOrEmpty(_iniNameBox.Text) ? _current.Name : _iniNameBox.Text,
-                Type = _current.Type,
-                Level = _current.Level
-            };
-            _listBox.SelectedIndex = idx;
+                _listBox.Items[idx] = new SkillListEntry(_current,
+                    string.IsNullOrEmpty(_iniNameBox.Text) ? _current.Name : _iniNameBox.Text);
+                _listBox.SelectedIndex = idx;
+            }
+            finally { _refreshingList = false; }
         }
         SetStatus($"已更新技能 {_current.Id}（未保存）");
         UpdateJsonPreview();
@@ -465,11 +569,67 @@ public class SkillEditScene : UserControl
         if (_current == null) { _jsonPreview.Text = ""; return; }
         try { _jsonPreview.Text = JsonSerializer.Serialize(_current, new JsonSerializerOptions { WriteIndented = true }); }
         catch { _jsonPreview.Text = "(序列化失败)"; }
+        RefreshSkillPreview();
+    }
+
+    private void RefreshSkillPreview()
+    {
+        _skillPreview.Children.Clear();
+        _gamePreview?.UpdateSkill(_current?.Id);
+        if (_current == null) return;
+        var title = new WrapPanel();
+        try
+        {
+            var image = LayoutImageProvider.Resolve($"image/general_skill/general_skill_{_current.Type}.png");
+            if (image?.Ready == true)
+            {
+                using var cropped = WC4MapEditor.Rendering.Imaging.BitmapPixels.Crop(image.Page!, image.X, image.Y, image.W, image.H);
+                title.Children.Add(new Image { Source = SkiaBitmapSource.Create(cropped), Width = 64, Height = 64, Margin = new Thickness(0, 0, 12, 8) });
+            }
+        }
+        catch (Exception ex) { title.ToolTip = ex.Message; }
+        title.Children.Add(new TextBlock { Text = $"{_parser.GetSkillName(_current.Type)}  Lv{_current.Level}\n效果 {_current.SkillEffect} · 升级费用 {_current.CostMedal} 勋章",
+            Foreground = Brushes.White, TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center });
+        _skillPreview.Children.Add(title);
+        var chain = new WrapPanel { Margin = new Thickness(0, 8, 0, 8) };
+        foreach (var skill in _parser.Items.Where(item => item.Type == _current.Type).OrderBy(item => item.Level))
+        {
+            var button = new Button { Content = $"Lv{skill.Level}\n{skill.Id}", Padding = new Thickness(8), Margin = new Thickness(0, 0, 6, 6),
+                Background = skill == _current ? Brushes.DarkSlateBlue : Brushes.DimGray, Foreground = Brushes.White,
+                ToolTip = $"效果：{skill.SkillEffect}；费用：{skill.CostMedal}；UpgradeId：{skill.UpgradeId}" };
+            button.Click += (_, _) =>
+            {
+                SelectSkill(skill);
+            };
+            chain.Children.Add(button);
+        }
+        _skillPreview.Children.Add(chain);
+        _skillPreview.Children.Add(new TextBlock { Text = "追加等级会克隆链尾并连接 UpgradeId。效果、费用和评分沿用前级，请自行调整；技能等级与将领技能槽数量是不同设置。游戏升级、显示及存档效果仍需实测。",
+            Foreground = Brushes.LightGray, TextWrapping = TextWrapping.Wrap });
     }
 
     // ============================================================= 操作 =============================================================
+    private void OnAppendLevel(object sender, RoutedEventArgs e)
+    {
+        if (_current == null) return;
+        if (_numBoxes.Values.Any(box => !box.IsInputValid))
+        {
+            MessageBox.Show("数值输入无效，请修正后追加等级。", "无法追加等级", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        ApplyProp();
+        try
+        {
+            if (_current.Level >= 99) throw new InvalidOperationException("此页面的等级编辑范围为 0–99，不能继续自动追加。");
+            SelectSkill(_parser.AppendNextLevel(_current));
+            SetStatus($"已连接 Lv{_current.Level}（Id={_current.Id}），请调整效果与费用后保存。");
+        }
+        catch (Exception ex) { MessageBox.Show(_window, ex.Message, "无法追加等级", MessageBoxButton.OK, MessageBoxImage.Warning); }
+    }
     private void OnAdd(object sender, RoutedEventArgs e)
     {
+        if (_current != null && _numBoxes.Values.Any(box => !box.IsInputValid))
+        { SetStatus("数值输入无效，请修正后新增技能。"); return; }
         int newId = _parser.GetNextId();
         var skill = new SkillSettingData
         {
@@ -482,9 +642,7 @@ public class SkillEditScene : UserControl
         _parser.Items.Add(skill);
         _parser.SetSkillName(newId, $"新建技能{newId}");
         _parser.SetSkillDesc(newId, "新建描述");
-        RefreshList();
-        foreach (SkillListEntry item in _listBox.Items)
-            if (item.Id == newId) { _listBox.SelectedItem = item; break; }
+        SelectSkill(skill);
         SetStatus($"新增技能 ID={newId}（未保存）");
     }
 
@@ -503,14 +661,9 @@ public class SkillEditScene : UserControl
 
     private void OnSave(object sender, RoutedEventArgs e)
     {
-        if (_parser.SaveAll())
+        if (SaveChanges())
         {
             SetStatus($"✔ 保存成功：{_parser.ConfigPath}");
-            MessageBox.Show($"保存成功：\nSkillSettings.json: {_parser.ConfigPath}\nstringtable: {_parser.StringTablePath}", "保存成功", MessageBoxButton.OK, MessageBoxImage.Information);
-        }
-        else
-        {
-            MessageBox.Show("保存失败，请检查权限或 Debug 输出", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
 
@@ -519,6 +672,7 @@ public class SkillEditScene : UserControl
         var res = MessageBox.Show("重新加载磁盘上的 SkillSettings.json？未保存的更改将丢失。", "重载", MessageBoxButton.YesNo, MessageBoxImage.Question);
         if (res != MessageBoxResult.Yes) return;
         _parser.LoadAll();
+        _current = null;
         RefreshList();
         ShowEmpty();
         SetStatus("已从磁盘重新加载");
@@ -555,13 +709,28 @@ public class SkillEditScene : UserControl
         Debug.WriteLine($"[SkillEditScene] {s}");
     }
 
-    // ============================================================= 列表项类型 =============================================================
-    private class SkillListEntry
+    private void SelectSkill(SkillSettingData skill)
     {
-        public int Id { get; set; }
-        public string Name { get; set; } = "";
-        public int Type { get; set; }
-        public int Level { get; set; }
-        public override string ToString() => $"[{Id}] {Name}  (Type:{Type} Lv:{Level})";
+        if (_current != null && _numBoxes.Values.Any(box => !box.IsInputValid))
+        { SetStatus("数值输入无效，请修正后切换技能。"); return; }
+        _refreshingList = true;
+        try
+        {
+            _searchBox.Text = "";
+            RefreshFamilies();
+            _familyFilter.SelectedItem = _familyFilter.Items.OfType<SkillFamily>().FirstOrDefault(item => item.Type == skill.Type)
+                ?? _familyFilter.Items[0];
+        }
+        finally { _refreshingList = false; }
+        _current = skill;
+        RefreshList();
+    }
+
+    public void Dispose() => _gamePreview.Dispose();
+
+    // ============================================================= 列表项类型 =============================================================
+    private sealed record SkillListEntry(SkillSettingData Data, string Name)
+    {
+        public override string ToString() => $"[{Data.Id}] {Name}  (Type:{Data.Type} Lv:{Data.Level})";
     }
 }

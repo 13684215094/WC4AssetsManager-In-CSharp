@@ -197,7 +197,8 @@ public sealed class LegionEditMode : IModeHandler
                     if (context.MapData == null) return Task.FromResult(false);
 
                     var capital = context.GetModifier<CapitalModifier>()!;
-                    int hexIndex = row * context.MapData.MapWidth + col;
+                    int hexIndex = context.MapData.ToRecordCoordinate(col, row);
+                    if (hexIndex < 0) return Task.FromResult(false);
                     bool hadCapital = capital.GetCapitalAtPosition(hexIndex).HasValue;
 
                     // 按"添加/取消"分别记录：ToggleCapital 本身不可逆，

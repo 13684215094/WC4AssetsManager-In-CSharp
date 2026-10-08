@@ -1,3 +1,4 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
@@ -142,9 +143,9 @@ public sealed class DebugConsole : IDisposable
         try
         {
             string consoleBgPath = ConfigManager.Instance.GetConsoleBackgroundPath();
-            if (!string.IsNullOrEmpty(consoleBgPath) && File.Exists(consoleBgPath))
+            if (!string.IsNullOrEmpty(consoleBgPath) && ProjectFile.Exists(consoleBgPath))
             {
-                _backgroundImage = SKBitmap.Decode(consoleBgPath);
+                _backgroundImage = Imaging.ProjectImageDecoder.Decode(ProjectFile.ReadAllBytes(consoleBgPath));
                 _hasBackgroundImage = _backgroundImage != null;
             }
         }
@@ -328,7 +329,7 @@ public sealed class DebugConsole : IDisposable
 
     public void HideConsole()
     {
-        if (!_isVisible) return;
+        if (!_isVisible || _font == null) return;
         _isVisible = false;
         _cursorTimer?.Change(Timeout.Infinite, Timeout.Infinite);
         _currentInput = "";
@@ -615,7 +616,7 @@ public sealed class DebugConsole : IDisposable
 
     public void Render(SKCanvas canvas, int width, int height)
     {
-        if (!_isVisible) return;
+        if (!_isVisible || _font == null) return;
 
         if (_hasBackgroundImage && _backgroundImage != null)
         {
@@ -696,6 +697,7 @@ public sealed class DebugConsole : IDisposable
         _scrollBarBgPaint?.Dispose();
         _scrollBarPaint?.Dispose();
         _font?.Dispose();
+        _font = null;
         _backgroundImage?.Dispose();
         _backgroundImagePaint?.Dispose();
         _cursorTimer?.Change(Timeout.Infinite, Timeout.Infinite);

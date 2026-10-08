@@ -21,7 +21,7 @@ public sealed class ReinforcementV3Modifier : ModifierBase
         if (!IsValidCoord(col, row)) return ModifierResult.Fail("坐标超出范围");
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
 
-        int coordIndex = row * _mapData.MapWidth + col;
+        int coordIndex = _mapData.ToRecordCoordinate(col, row);
 
         Reinforcement_3 reinforcement;
         if (parameter is Reinforcement_3 r)
@@ -79,7 +79,7 @@ public sealed class ReinforcementV3Modifier : ModifierBase
         if (!IsValidCoord(col, row) || _mapData == null) return false;
         if (data is not Reinforcement_3 reinforcement) return false;
 
-        reinforcement.Coordinate = row * _mapData.MapWidth + col;
+        reinforcement.Coordinate = _mapData.ToRecordCoordinate(col, row);
         int idx = FindReinforcementV3Index(col, row);
         if (idx >= 0)
             _mapData.ReinforcementsV3[idx] = reinforcement;
@@ -142,7 +142,7 @@ public sealed class ReinforcementV3Modifier : ModifierBase
     {
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
 
-        var coord = HexCoord.FromIndex(reinforcement.Coordinate, _mapData.MapWidth);
+        var coord = _mapData.ToLocalCoordinate(reinforcement.Coordinate);
         int idx = FindReinforcementV3Index(coord.Col, coord.Row);
         if (idx >= 0)
             _mapData.ReinforcementsV3[idx] = reinforcement;
@@ -186,18 +186,18 @@ public sealed class ReinforcementV3Modifier : ModifierBase
         {
             for (int col = 0; col < _mapData.MapWidth; col++)
             {
-                int hexIndex = row * _mapData.MapWidth + col;
+                int recordCoordinate = _mapData.ToRecordCoordinate(col, row);
                 int cellBelong = _mapData.GetBelongValue(col, row);
 
                 if (cellBelong != belongValue) continue;
-                if (existingCoords.Contains(hexIndex)) continue;
+                if (existingCoords.Contains(recordCoordinate)) continue;
 
                 var reinforcement = Reinforcement_3.CreateDefault();
-                reinforcement.Coordinate = hexIndex;
+                reinforcement.Coordinate = _mapData.ToRecordCoordinate(col, row);
                 reinforcement.OwnerLegion = belongValue;
 
                 _mapData.ReinforcementsV3.Add(reinforcement);
-                existingCoords.Add(hexIndex);
+                existingCoords.Add(recordCoordinate);
                 addedCount++;
             }
         }
@@ -288,20 +288,20 @@ public sealed class ReinforcementV3Modifier : ModifierBase
             {
                 if (_random.Next(0, 100) >= probability) continue;
 
-                int hexIndex = row * _mapData.MapWidth + col;
+                int recordCoordinate = _mapData.ToRecordCoordinate(col, row);
                 int cellBelong = _mapData.GetBelongValue(col, row);
 
                 if (belongValue != -1 && cellBelong != belongValue) continue;
-                if (existingCoords.Contains(hexIndex)) continue;
+                if (existingCoords.Contains(recordCoordinate)) continue;
 
                 var reinforcement = Reinforcement_3.CreateDefault();
-                reinforcement.Coordinate = hexIndex;
+                reinforcement.Coordinate = _mapData.ToRecordCoordinate(col, row);
                 reinforcement.OwnerLegion = cellBelong;
                 reinforcement.Level = (byte)_random.Next(1, 6);
                 reinforcement.Organization = (byte)_random.Next(1, 11);
 
                 _mapData.ReinforcementsV3.Add(reinforcement);
-                existingCoords.Add(hexIndex);
+                existingCoords.Add(recordCoordinate);
                 generatedCount++;
             }
         }
@@ -315,7 +315,7 @@ public sealed class ReinforcementV3Modifier : ModifierBase
     private int FindReinforcementV3Index(int col, int row)
     {
         if (_mapData == null) return -1;
-        int coordIndex = row * _mapData.MapWidth + col;
+        int coordIndex = _mapData.ToRecordCoordinate(col, row);
         for (int i = 0; i < _mapData.ReinforcementsV3.Count; i++)
         {
             if (_mapData.ReinforcementsV3[i].Coordinate == coordIndex) return i;

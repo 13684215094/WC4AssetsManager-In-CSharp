@@ -5,9 +5,7 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
-using SkiaSharp;
 using WC4MapEditor.Core.Config;
-using WC4MapEditor.Core.Parsers;
 using WC4MapEditor.Core.Models;
 
 namespace WC4MapEditor.Views.Assist;
@@ -17,8 +15,6 @@ public sealed class BelongListWindow : Window
     private readonly List<Legion> _legionList;
     private readonly Dictionary<int, BitmapSource> _flagCache = new();
     private readonly Dictionary<int, string> _countryNameCache = new();
-    private SKBitmap? _tacticalSurfaceBitmap;
-    private bool _tacticalSurfaceLoadAttempted;
     private ListBox? _listBox;
     private TextBox? _inputTextBox;
     private int _selectedIndex = -1;
@@ -75,105 +71,7 @@ public sealed class BelongListWindow : Window
         }
     }
 
-    private BitmapSource? LoadFlagImage(int countryId)
-    {
-        try
-        {
-            var tacticalMapParser = ConfigManager.Instance.TacticalMapParser;
-            if (tacticalMapParser != null)
-            {
-                var imageDef = tacticalMapParser.GetImageDef($"flag_{countryId}.png");
-                if (imageDef != null)
-                {
-                    var surfaceBitmap = GetTacticalSurfaceBitmap(tacticalMapParser);
-                    if (surfaceBitmap != null)
-                        return ExtractFlagFromTacticalMap(surfaceBitmap, imageDef);
-                }
-            }
-
-            var basePath = System.IO.Path.Combine(ConfigManager.Instance.GetStageMarkPath(), "CountryFlag");
-            var flagPath = System.IO.Path.Combine(basePath, $"flag_{countryId}.png");
-
-            if (!System.IO.File.Exists(flagPath))
-            {
-                if (countryId == 0 || countryId == 255)
-                    flagPath = System.IO.Path.Combine(basePath, "flag_1.png");
-            }
-
-            if (System.IO.File.Exists(flagPath))
-            {
-                var bitmap = new BitmapImage(new Uri(flagPath, UriKind.Absolute));
-                bitmap.Freeze();
-                return bitmap;
-            }
-        }
-        catch { }
-        return null;
-    }
-
-    /// <summary>
-    /// 惰性解码战术地图大图，**整张图只解码一次**供所有国旗裁剪复用。
-    /// <para>
-    /// 原实现对每个国家都执行一次 MemoryStream + SKBitmap.Decode（都是整张大图），
-    /// 国家数量上百时会让窗口弹出前卡顿数秒。
-    /// </para>
-    /// </summary>
-    private SKBitmap? GetTacticalSurfaceBitmap(TacticalMapParser parser)
-    {
-        if (_tacticalSurfaceLoadAttempted) return _tacticalSurfaceBitmap;
-        _tacticalSurfaceLoadAttempted = true;
-
-        var surfaceData = parser.SurfaceData;
-        if (surfaceData == null) return null;
-
-        try
-        {
-            using var stream = new System.IO.MemoryStream(surfaceData);
-            _tacticalSurfaceBitmap = SKBitmap.Decode(stream);
-        }
-        catch
-        {
-            _tacticalSurfaceBitmap = null;
-        }
-
-        return _tacticalSurfaceBitmap;
-    }
-
-    /// <summary>
-    /// 从战术地图大图上裁剪出指定国旗。
-    /// 直接用 Bgra8888 像素构造 <see cref="BitmapSource"/>，跳过 PNG 编解码
-    /// （每个国家一面旗、数量可达数百，PNG 编解码会成为主要开销）。
-    /// </summary>
-    private static BitmapSource? ExtractFlagFromTacticalMap(SKBitmap surfaceBitmap, TacticalMapImageDef imageDef)
-    {
-        try
-        {
-            int x = imageDef.X;
-            int y = imageDef.Y;
-            int w = Math.Min(imageDef.Width, surfaceBitmap.Width - x);
-            int h = Math.Min(imageDef.Height, surfaceBitmap.Height - y);
-
-            if (x < 0 || y < 0 || w <= 0 || h <= 0) return null;
-
-            // 预乘 Bgra8888 的内存布局与 WPF 的 Pbgra32 一致
-            var info = new SKImageInfo(w, h, SKColorType.Bgra8888, SKAlphaType.Premul);
-            using var subsetBitmap = new SKBitmap(info);
-            using (var canvas = new SKCanvas(subsetBitmap))
-            {
-                canvas.Clear(SKColors.Transparent);
-                canvas.DrawBitmap(surfaceBitmap, -x, -y);
-            }
-
-            var result = BitmapSource.Create(
-                w, h, 96, 96,
-                PixelFormats.Pbgra32, null,
-                subsetBitmap.GetPixels(), h * subsetBitmap.RowBytes, subsetBitmap.RowBytes);
-            result.Freeze();
-            return result;
-        }
-        catch { }
-        return null;
-    }
+    private static BitmapSource? LoadFlagImage(int countryId) => FlagImageLoader.Load(countryId);
 
     private FrameworkElement CreateUI()
     {
@@ -642,9 +540,7 @@ public sealed class BelongListWindow : Window
 
     protected override void OnClosed(EventArgs e)
     {
-        // 释放复用的战术地图位图（_flagCache 中的 BitmapImage 已 Freeze，无需手动释放）
-        _tacticalSurfaceBitmap?.Dispose();
-        _tacticalSurfaceBitmap = null;
+        // Frozen preview images are owned by the shared flag loader.
         _flagCache.Clear();
         _countryNameCache.Clear();
         base.OnClosed(e);

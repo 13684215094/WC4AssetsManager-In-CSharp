@@ -22,7 +22,7 @@ public sealed class TrapModifier : ModifierBase
         if (!IsValidCoord(col, row)) return ModifierResult.Fail("坐标超出范围");
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
 
-        int index = checked(row * _mapData.MapWidth + col);
+        int index = _mapData.ToRecordCoordinate(col, row);
         if (index > short.MaxValue)
             return ModifierResult.Fail("该地图位置超过陷阱坐标上限 32767，未写入陷阱。");
         short coordIndex = MapLimits.SignedCoordinate(index);
@@ -82,7 +82,7 @@ public sealed class TrapModifier : ModifierBase
         if (!IsValidCoord(col, row) || _mapData == null) return false;
         if (data is not Trap trap) return false;
 
-        int index = checked(row * _mapData.MapWidth + col);
+        int index = _mapData.ToRecordCoordinate(col, row);
         if (index > short.MaxValue)
             return false;
         trap.Coordinate = MapLimits.SignedCoordinate(index);
@@ -122,7 +122,7 @@ public sealed class TrapModifier : ModifierBase
     {
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
 
-        var coord = HexCoord.FromIndex(trap.Coordinate, _mapData.MapWidth);
+        var coord = _mapData.ToLocalCoordinate(trap.Coordinate);
         int idx = _mapData.FindTrapIndex(coord.Col, coord.Row);
         if (idx >= 0)
             _mapData.ReplaceTrap(idx, trap);
@@ -151,7 +151,7 @@ public sealed class TrapModifier : ModifierBase
     {
         if (!IsValidCoord(col, row)) return ModifierResult.Fail("坐标超出范围");
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
-        if (row * _mapData.MapWidth + col > short.MaxValue)
+        if (_mapData.ToRecordCoordinate(col, row) > short.MaxValue)
             return ModifierResult.Fail("陷阱坐标超过 32767，未修改地图。");
 
         int idx = _mapData.FindTrapIndex(col, row);
@@ -162,7 +162,7 @@ public sealed class TrapModifier : ModifierBase
         }
         else
         {
-            trap = Trap.CreateDefault(row * _mapData.MapWidth + col);
+            trap = Trap.CreateDefault(_mapData.ToRecordCoordinate(col, row));
         }
 
         trap.Organization = (byte)_random.Next(1, 11);
@@ -248,7 +248,7 @@ public sealed class TrapModifier : ModifierBase
     public ModifierResult BatchGenerateTraps(int probability)
     {
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
-        if (_mapData.TerrainCount > short.MaxValue + 1)
+        if (_mapData.MaximumRecordCoordinate > short.MaxValue)
             return ModifierResult.Fail("整图陷阱生成最多支持 32768 格，未修改地图。");
         if (probability < 0 || probability > 100) return ModifierResult.Fail("概率必须在0-100之间");
 
@@ -264,15 +264,15 @@ public sealed class TrapModifier : ModifierBase
                 if (_random.Next(0, 100) >= probability) continue;
 
                 int hexIndex = row * _mapData.MapWidth + col;
-                if (existingCoords.Contains(hexIndex)) continue;
+                if (existingCoords.Contains(_mapData.ToRecordCoordinate(hexIndex % _mapData.MapWidth, hexIndex / _mapData.MapWidth))) continue;
 
-                var trap = Trap.CreateDefault(hexIndex);
+                var trap = Trap.CreateDefault(_mapData.ToRecordCoordinate(col, row));
                 trap.Organization = (byte)_random.Next(1, 6);
                 trap.LegionId = (short)_random.Next(0, 256);
                 trap.Health = (byte)_random.Next(50, 101);
 
                 _mapData.Traps.Add(trap);
-                existingCoords.Add(hexIndex);
+                existingCoords.Add(_mapData.ToRecordCoordinate(col, row));
                 generatedCount++;
             }
         }
@@ -288,7 +288,7 @@ public sealed class TrapModifier : ModifierBase
     public ModifierResult GenerateTrapsByBelong(int belongValue, int probability)
     {
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
-        if (_mapData.TerrainCount > short.MaxValue + 1)
+        if (_mapData.MaximumRecordCoordinate > short.MaxValue)
             return ModifierResult.Fail("整图陷阱生成最多支持 32768 格，未修改地图。");
         if (probability < 0 || probability > 100) return ModifierResult.Fail("概率必须在0-100之间");
 
@@ -327,16 +327,16 @@ public sealed class TrapModifier : ModifierBase
                 int cellBelong = _mapData.GetBelongValue(col, row);
 
                 if (cellBelong != belongValue) continue;
-                if (existingCoords.Contains(hexIndex)) continue;
+                if (existingCoords.Contains(_mapData.ToRecordCoordinate(hexIndex % _mapData.MapWidth, hexIndex / _mapData.MapWidth))) continue;
                 if (_random.Next(0, 100) >= probability) continue;
 
-                var trap = Trap.CreateDefault(hexIndex);
+                var trap = Trap.CreateDefault(_mapData.ToRecordCoordinate(col, row));
                 trap.LegionId = (short)belongValue;
                 trap.Organization = (byte)_random.Next(1, 6);
                 trap.Health = (byte)_random.Next(50, 101);
 
                 _mapData.Traps.Add(trap);
-                existingCoords.Add(hexIndex);
+                existingCoords.Add(_mapData.ToRecordCoordinate(col, row));
                 trapsCreated++;
             }
         }
@@ -355,7 +355,7 @@ public sealed class TrapModifier : ModifierBase
     public ModifierResult GenerateTrapsFree(int probability)
     {
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
-        if (_mapData.TerrainCount > short.MaxValue + 1)
+        if (_mapData.MaximumRecordCoordinate > short.MaxValue)
             return ModifierResult.Fail("整图陷阱生成最多支持 32768 格，未修改地图。");
         if (probability < 0 || probability > 100) return ModifierResult.Fail("概率必须在0-100之间");
 
@@ -386,7 +386,7 @@ public sealed class TrapModifier : ModifierBase
                 int hexIndex = row * _mapData.MapWidth + col;
 
                 // 已有陷阱 / 建筑 / 单位的格子都不生成
-                if (excluded.Contains(hexIndex)) continue;
+                if (excluded.Contains(_mapData.ToRecordCoordinate(col, row))) continue;
 
                 // 排除海洋与空地：TileType1 为 0 或 1 时地形层不绘制陆地（OCEAN_TILE_TYPE = 1）
                 var terrain = _mapData.GetTerrainAt(col, row);
@@ -405,13 +405,13 @@ public sealed class TrapModifier : ModifierBase
 
                 if (legionId < 0 || legionId >= 0xFF) continue;
 
-                var newTrap = Trap.CreateDefault(hexIndex);
+                var newTrap = Trap.CreateDefault(_mapData.ToRecordCoordinate(col, row));
                 newTrap.LegionId = (short)legionId;
                 newTrap.Organization = (byte)_random.Next(1, 6);
                 newTrap.Health = (byte)_random.Next(50, 101);
 
                 _mapData.Traps.Add(newTrap);
-                excluded.Add(hexIndex);
+                excluded.Add(_mapData.ToRecordCoordinate(col, row));
                 generatedCount++;
             }
         }
@@ -427,7 +427,7 @@ public sealed class TrapModifier : ModifierBase
     public ModifierResult GenerateTrapsByProvince(int probability)
     {
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
-        if (_mapData.TerrainCount > short.MaxValue + 1)
+        if (_mapData.MaximumRecordCoordinate > short.MaxValue)
             return ModifierResult.Fail("整图陷阱生成最多支持 32768 格，未修改地图。");
         if (probability < 0 || probability > 100) return ModifierResult.Fail("概率必须在0-100之间");
         if (_mapData.TerrainCount == 0)
@@ -453,16 +453,17 @@ public sealed class TrapModifier : ModifierBase
 
             var hexIndices = kvp.Value;
             int selectedIndex = hexIndices[_random.Next(0, hexIndices.Count)];
+            int recordCoordinate = _mapData.ToRecordCoordinate(selectedIndex % _mapData.MapWidth, selectedIndex / _mapData.MapWidth);
 
-            if (!existingCoords.Contains(selectedIndex))
+            if (!existingCoords.Contains(recordCoordinate))
             {
-                var trap = Trap.CreateDefault(selectedIndex);
+                var trap = Trap.CreateDefault(recordCoordinate);
                 trap.Organization = (byte)_random.Next(1, 6);
                 trap.LegionId = (short)_random.Next(0, 256);
                 trap.Health = (byte)_random.Next(50, 101);
 
                 _mapData.Traps.Add(trap);
-                existingCoords.Add(selectedIndex);
+                existingCoords.Add(recordCoordinate);
                 generatedCount++;
             }
         }
@@ -489,7 +490,7 @@ public sealed class TrapModifier : ModifierBase
         if (foundTraps.Count > 0)
         {
             var first = foundTraps[0];
-            var coord = HexCoord.FromIndex(first.Trap.Coordinate, _mapData.MapWidth);
+            var coord = _mapData.ToLocalCoordinate(first.Trap.Coordinate);
             return ModifierResult.Ok($"找到 {foundTraps.Count} 个编制为 {targetLevel} 的陷阱，第一个在 ({coord.Col}, {coord.Row})");
         }
 

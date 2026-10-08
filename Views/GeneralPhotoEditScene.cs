@@ -1,3 +1,4 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Diagnostics;
 using System.IO;
 using System.Windows;
@@ -13,8 +14,19 @@ using WC4MapEditor.Rendering.Imaging;
 
 namespace WC4MapEditor.Views;
 
-public class GeneralPhotoEditScene : UserControl
+public class GeneralPhotoEditScene : UserControl, IUnsavedScene
 {
+    private string _savedFingerprint = "";
+    private string CurrentFingerprint => BitmapFingerprint.Create(_canvasImage,
+        $"{_baseName}|{_selectRect.X / _scaleFactor}:{_selectRect.Y / _scaleFactor}:{_selectRect.Width / _scaleFactor}:{_selectRect.Height / _scaleFactor}|{_canvasWBox?.Text}:{_canvasHBox?.Text}|{_resize1WBox?.Text}:{_resize1HBox?.Text}|{_resize2WBox?.Text}:{_resize2HBox?.Text}");
+    public bool HasUnsavedChanges => _canvasImage != null && CurrentFingerprint != _savedFingerprint;
+    public bool SaveChanges()
+    {
+        OnSave(this, new RoutedEventArgs());
+        return !HasUnsavedChanges;
+    }
+    public void DiscardChanges() => _savedFingerprint = CurrentFingerprint;
+
     private static readonly SKSamplingOptions HighQuality = new(SKFilterMode.Linear, SKMipmapMode.Linear);
 
     private readonly MainWindow _window;
@@ -66,6 +78,7 @@ public class GeneralPhotoEditScene : UserControl
         BuildUI();
         if (!string.IsNullOrEmpty(initialEName))
             TryLoadGeneralPhoto(initialEName);
+        _savedFingerprint = CurrentFingerprint;
     }
 
     private void BuildUI()
@@ -409,62 +422,8 @@ public class GeneralPhotoEditScene : UserControl
         }
     }
 
-    private static BitmapSource? SkBitmapToBitmapSource(SKBitmap bitmap)
-    {
-        try
-        {
-            var info = bitmap.Info;
-            var wb = new WriteableBitmap(info.Width, info.Height, 96, 96, PixelFormats.Pbgra32, null);
-            wb.Lock();
-            try
-            {
-                using var pixmap = bitmap.PeekPixels();
-                var srcPtr = pixmap.GetPixels();
-                for (int y = 0; y < info.Height; y++)
-                {
-                    var dstPtr = System.IntPtr.Add(wb.BackBuffer, y * wb.BackBufferStride);
-                    var srcRowPtr = System.IntPtr.Add(srcPtr, y * pixmap.RowBytes);
-                    System.Runtime.InteropServices.Marshal.Copy(srcRowPtr, new byte[info.Width * 4], 0, info.Width * 4);
-                    // Convert RGBA -> BGRA and premultiply alpha
-                    var row = new byte[info.Width * 4];
-                    System.Runtime.InteropServices.Marshal.Copy(srcRowPtr, row, 0, row.Length);
-                    for (int i = 0; i < row.Length; i += 4)
-                    {
-                        byte r = row[i];
-                        byte g = row[i + 1];
-                        byte b = row[i + 2];
-                        byte a = row[i + 3];
-
-                        // Premultiply alpha
-                        if (a < 255)
-                        {
-                            r = (byte)(r * a / 255);
-                            g = (byte)(g * a / 255);
-                            b = (byte)(b * a / 255);
-                        }
-
-                        // BGRA order for WPF
-                        row[i] = b;
-                        row[i + 1] = g;
-                        row[i + 2] = r;
-                        row[i + 3] = a;
-                    }
-                    System.Runtime.InteropServices.Marshal.Copy(row, 0, dstPtr, row.Length);
-                }
-                wb.AddDirtyRect(new Int32Rect(0, 0, info.Width, info.Height));
-            }
-            finally
-            {
-                wb.Unlock();
-            }
-            wb.Freeze();
-            return wb;
-        }
-        catch
-        {
-            return null;
-        }
-    }
+    private static BitmapSource SkBitmapToBitmapSource(SKBitmap bitmap)
+        => WC4MapEditor.Views.Assist.SkiaBitmapSource.Create(bitmap);
 
     private Point CanvasPoint(MouseEventArgs e)
     {
@@ -696,6 +655,7 @@ public class GeneralPhotoEditScene : UserControl
 
     private void OnOpen(object sender, RoutedEventArgs e)
     {
+        if (!_window.ConfirmUnsavedDocument(this, "打开另一图片")) return;
         var dlg = new OpenFileDialog
         {
             Filter = "图片文件|*.png;*.jpg;*.jpeg;*.bmp;*.webp;*.gif|所有文件|*.*",
@@ -737,24 +697,34 @@ public class GeneralPhotoEditScene : UserControl
 
         var circleCropped = _editorService.CropCircularRegion(_canvasImage, x0, y0, x1, y1);
 
-        string outputDir;
-        if (!string.IsNullOrEmpty(_baseName))
+        string outputDir = _window.Projects.Current != null ? _parser.GeneralPhotoDir
+            : !string.IsNullOrEmpty(_baseName) && ProjectFile.DirectoryExists(_parser.GeneralPhotoDir) ? _parser.GeneralPhotoDir
+            : System.IO.Path.Combine(AppContext.BaseDirectory, "Output");
+        try
         {
-            outputDir = _parser.GeneralPhotoDir;
-            if (string.IsNullOrEmpty(outputDir) || !Directory.Exists(outputDir))
-                outputDir = System.IO.Path.Combine(AppContext.BaseDirectory, "Output");
+            foreach (string name in new[] { $"general_{_baseName}.png", $"general_circle_{_baseName}.png", $"head_{_baseName}.png" })
+                _window.Projects.Current?.ValidateOutputPath(System.IO.Path.Combine(outputDir, name));
         }
-        else
+        catch (Exception ex)
         {
-            outputDir = System.IO.Path.Combine(AppContext.BaseDirectory, "Output");
+            circleCropped?.Dispose();
+            MessageBox.Show(_window, ex.Message, "保存位置错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
         }
 
-        var result = _editorService.SaveGeneralImages(_canvasImage, circleCropped, _baseName, outputDir, _resize1W, _resize1H, _resize2W, _resize2H);
+        if (circleCropped == null)
+        {
+            MessageBox.Show("圆形裁剪失败，请检查选区。", "保存失败", MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
+        var result = _editorService.SaveGeneralImages(_canvasImage, circleCropped, _baseName, outputDir, _resize1W, _resize1H, _resize2W, _resize2H,
+            outputDir == _parser.GeneralPhotoDir ? _parser.HeadsDir : outputDir);
 
         circleCropped?.Dispose();
 
         if (result.Success)
         {
+            _savedFingerprint = CurrentFingerprint;
             var msg = $"保存成功！\n\n";
             if (result.GeneralPath != null) msg += $"半身像: {result.GeneralPath}\n";
             if (result.CirclePath != null) msg += $"圆形头像: {result.CirclePath}\n";

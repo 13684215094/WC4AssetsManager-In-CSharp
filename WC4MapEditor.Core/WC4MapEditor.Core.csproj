@@ -20,6 +20,14 @@
   </ItemGroup>
 
   <ItemGroup>
+    <None Include="..\EditorResources\Config\*.json" Link="EditorResources\Config\%(Filename)%(Extension)">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
+    <None Include="..\setting.txt" Link="setting.txt">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
     <!--
       Lib 下的外部工具（ocr_map.exe / gen_buildings_zme.exe）。
       必须同时声明 CopyToOutputDirectory（build 输出）和 CopyToPublishDirectory（publish 输出），
@@ -35,5 +43,13 @@
   <ItemGroup>
     <ProjectReference Include="..\WC4MapEditor.Scripting\WC4MapEditor.Scripting.csproj" />
   </ItemGroup>
+
+  <PropertyGroup>
+    <EditorSettingsTemplatePath Condition="'$(EditorSettingsTemplatePath)' == ''">$(MSBuildProjectDirectory)/../setting.txt</EditorSettingsTemplatePath>
+  </PropertyGroup>
+  <Target Name="ValidateSettingsTemplate" BeforeTargets="PrepareForBuild;ComputeFilesToPublish">
+    <Error Condition="$([System.Text.RegularExpressions.Regex]::IsMatch($([System.IO.File]::ReadAllText('$(EditorSettingsTemplatePath)')), '(?im)^[ \t]*AIApiKey[ \t]*=[ \t]*\S'))"
+           Text="setting.txt must not contain an API key. Clear the template and use WC4_EDITOR_AI_API_KEY on your own machine." />
+  </Target>
 
 </Project>

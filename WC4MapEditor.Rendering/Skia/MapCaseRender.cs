@@ -239,8 +239,8 @@ public class MapCaseRender : IDisposable
     {
         if (_mapData == null || _mapData.MapWidth <= 0 || _mapData.MapHeight <= 0) return null;
 
-        int row = coordinate / _mapData.MapWidth;
-        int col = coordinate % _mapData.MapWidth;
+        if (!_mapData.TryGetLocalCoordinate(coordinate, out var coord)) return null;
+        int col = coord.Col, row = coord.Row;
 
         if (row < 0 || row >= _mapData.MapHeight || col < 0 || col >= _mapData.MapWidth) return null;
 

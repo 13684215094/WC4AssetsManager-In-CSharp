@@ -639,7 +639,14 @@ public sealed class EditModeManager
         for (int i = 0; i < beforeSnapshot.Length; i++)
             beforeSnapshot[i] = _mapData.GetTerrainRef(i);
 
-        applyChange();
+        bool wasModified = _mapData.IsModified;
+        try { applyChange(); }
+        catch
+        {
+            for (int i = 0; i < beforeSnapshot.Length; i++) _mapData.GetTerrainRef(i) = beforeSnapshot[i];
+            _mapData.IsModified = wasModified;
+            throw;
+        }
 
         RecordChangesFromSnapshot(description, beforeSnapshot);
     }
@@ -656,7 +663,14 @@ public sealed class EditModeManager
         for (int i = 0; i < beforeSnapshot.Length; i++)
             beforeSnapshot[i] = _mapData.GetProvinceRef(i);
 
-        applyChange();
+        bool wasModified = _mapData.IsModified;
+        try { applyChange(); }
+        catch
+        {
+            for (int i = 0; i < beforeSnapshot.Length; i++) _mapData.GetProvinceRef(i) = beforeSnapshot[i];
+            _mapData.IsModified = wasModified;
+            throw;
+        }
 
         RecordProvinceChangesFromSnapshot(description, beforeSnapshot);
     }
@@ -670,21 +684,33 @@ public sealed class EditModeManager
     /// 改到 Buildings / Provinces / Belongs 三者，用上面任一个都会漏。
     /// </para>
     /// </summary>
-    public void RecordBuildingsSnapshot(string description, Action applyChange)
+    public bool RecordBuildingsSnapshot(string description, Action applyChange)
     {
-        if (_mapData == null || _undoManager == null)
-        {
-            applyChange();
-            return;
-        }
+        if (_mapData == null) return false;
 
         var before = CaptureEntitySnapshot();
-        applyChange();
+        bool wasModified = _mapData.IsModified;
+        try { applyChange(); }
+        catch
+        {
+            RestoreEntitySnapshot(before);
+            _mapData.IsModified = wasModified;
+            throw;
+        }
         var after = CaptureEntitySnapshot();
+        if (before.Buildings.SequenceEqual(after.Buildings) && before.Provinces.SequenceEqual(after.Provinces) &&
+            before.Belongs.SequenceEqual(after.Belongs))
+        {
+            _mapData.IsModified = wasModified;
+            return false;
+        }
 
-        _undoManager.Record(new DelegateCommand(description,
+        _undoManager?.Record(new DelegateCommand(description,
             () => RestoreEntitySnapshot(after),
-            () => RestoreEntitySnapshot(before)));
+            () => RestoreEntitySnapshot(before), 256L +
+                32L * (before.Buildings.Length + after.Buildings.Length) +
+                2L * (before.Provinces.Length + after.Provinces.Length) + before.Belongs.Length + after.Belongs.Length));
+        return true;
     }
 
     /// <summary>建筑相关变更的完整快照（建筑列表 + 省份 + 归属）</summary>
@@ -712,6 +738,7 @@ public sealed class EditModeManager
         _mapData.Buildings.Clear();
         foreach (var building in snapshot.Buildings)
             _mapData.Buildings.Add(building);
+        _mapData.RebuildBuildingCoordIndex();
 
         int total = _mapData.MapWidth * _mapData.MapHeight;
         for (int i = 0; i < total && i < snapshot.Provinces.Length; i++)
@@ -966,7 +993,7 @@ public sealed class EditModeManager
         RecordBelongChangesFromSnapshot(description, beforeSnapshot);
     }
 
-    public void RecordEntityChange(string description, Action execute, Action undo)
+    public void RecordEntityChange(string description, Action execute, Action undo, long estimatedBytes = 256)
     {
         if (_undoManager == null)
         {
@@ -975,7 +1002,7 @@ public sealed class EditModeManager
         }
 
         execute();
-        _undoManager.Record(new DelegateCommand(description, execute, undo));
+        _undoManager.Record(new DelegateCommand(description, execute, undo, estimatedBytes));
     }
 
     public ModifierResult RecordMapResizeChange(string description, Func<ModifierResult> applyChange)
@@ -1054,9 +1081,12 @@ public sealed class EditModeManager
         };
         _sceneModeMap["world"] = new List<EditMode>
         {
-            EditMode.TerrainPaint
+            EditMode.TerrainPaint, EditMode.ProvinceEdit
         };
     }
+
+    public static string GetSceneTypeForMap(MapData map) => map.FileKind == MapFileKind.World ? "world" :
+        map.Header.MapNumber > 0 ? "conquest" : "stage";
 
     private void RebuildModeContext()
     {

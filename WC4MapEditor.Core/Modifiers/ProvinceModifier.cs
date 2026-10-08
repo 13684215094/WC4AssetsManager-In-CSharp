@@ -268,7 +268,7 @@ public sealed class ProvinceModifier : ModifierBase, IBrushTarget
         SyncFromGlobalClipboard();
         if (!_hasCopiedProvince) return;
 
-        var hexes = _brushEngine.GetHexesInBrush(centerCol, centerRow, _mapData.MapWidth, _mapData.MapHeight);
+        var hexes = _brushEngine.GetHexesInBrush(centerCol, centerRow, _mapData.MapWidth, _mapData.MapHeight, _mapData.HexColumnOffset);
         foreach (var (c, r) in hexes)
             _mapData.GetProvinceRef(c, r).ProvinceValue = _copiedProvinceValue;
         MarkModified();
@@ -281,7 +281,7 @@ public sealed class ProvinceModifier : ModifierBase, IBrushTarget
         SyncFromGlobalClipboard();
         if (!_hasCopiedProvince) return;
 
-        var hexes = _brushEngine.GetHexesInBrush(centerCol, centerRow, _mapData.MapWidth, _mapData.MapHeight);
+        var hexes = _brushEngine.GetHexesInBrush(centerCol, centerRow, _mapData.MapWidth, _mapData.MapHeight, _mapData.HexColumnOffset);
         foreach (var (c, r) in hexes)
         {
             byte terrainType = _mapData.GetTerrainRef(c, r).TileType1;
@@ -507,7 +507,7 @@ public sealed class ProvinceModifier : ModifierBase, IBrushTarget
                 int index = row * mapWidth + col;
                 ushort provinceValue = _mapData.GetProvinceRef(index).ProvinceValue;
 
-                if (provinceValue == index && provinceValue > 0 && provinceValue != 0xFFFF && !checkedProvinces.Contains(provinceValue))
+                if (provinceValue == _mapData.ToRecordCoordinate(col, row) && provinceValue > 0 && provinceValue != 0xFFFF && !checkedProvinces.Contains(provinceValue))
                 {
                     checkedProvinces.Add(provinceValue);
 
@@ -677,7 +677,7 @@ public sealed class ProvinceModifier : ModifierBase, IBrushTarget
 
                 // 用 IsValid 排除 0 与 0xFFFF；否则 index == 0 且 ProvinceValue == 0 的格子
                 // 会被误认成省会
-                if (provinceValue == index && provinceRef.IsValid)
+                if (provinceValue == _mapData.ToRecordCoordinate(col, row) && provinceRef.IsValid)
                     provinceCapitals[provinceValue] = new HexCoord(col, row);
             }
         }
@@ -781,7 +781,7 @@ public sealed class ProvinceModifier : ModifierBase, IBrushTarget
                 int index = row * mapWidth + col;
                 ushort provinceValue = _mapData.GetProvinceRef(index).ProvinceValue;
 
-                if (provinceValue == index || provinceValue == 0xFFFF) continue;
+                if (provinceValue == _mapData.ToRecordCoordinate(col, row) || provinceValue == 0xFFFF) continue;
 
                 bool hasSameProvince = false;
                 var neighborProvinces = new List<ushort>();
@@ -850,8 +850,10 @@ public sealed class ProvinceModifier : ModifierBase, IBrushTarget
         if (!IsValidCoord(col, row)) return ModifierResult.Fail("坐标超出范围");
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
 
-        int index = row * _mapData.MapWidth + col;
-        ushort provinceValue = (ushort)(index <= 65535 ? index : index % 65536);
+        int index = _mapData.ToRecordCoordinate(col, row);
+        if (index is <= 0 or >= ushort.MaxValue)
+            return ModifierResult.Fail("该坐标不能表示为有效省会引用，未修改省区。");
+        ushort provinceValue = (ushort)index;
         _mapData.GetProvinceRef(col, row).ProvinceValue = provinceValue;
         MarkModified();
         return ModifierResult.Ok($"已将格子 ({col},{row}) 索引 {index} 的省区数据设置为 {provinceValue}");
@@ -862,27 +864,7 @@ public sealed class ProvinceModifier : ModifierBase, IBrushTarget
     #region Helpers
 
     private List<(int col, int row)> GetHexNeighbors(int col, int row)
-    {
-        int index = row * _mapData!.MapWidth + col;
-        if (index % 2 == 0)
-        {
-            return new List<(int, int)>
-            {
-                (col - 1, row), (col + 1, row),
-                (col, row - 1), (col, row + 1),
-                (col - 1, row - 1), (col + 1, row - 1)
-            };
-        }
-        else
-        {
-            return new List<(int, int)>
-            {
-                (col - 1, row), (col + 1, row),
-                (col, row - 1), (col, row + 1),
-                (col - 1, row + 1), (col + 1, row + 1)
-            };
-        }
-    }
+        => _mapData!.GetNeighbors(col, row).Select(cell => (cell.Col, cell.Row)).ToList();
 
     private bool IsSeaTerrain(int index)
     {

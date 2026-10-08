@@ -1,6 +1,8 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Diagnostics;
 using System.Xml;
 using WC4MapEditor.Core.Assets;
+using WC4MapEditor.Core.Parsers.HdAtlas;
 
 namespace WC4MapEditor.Core.Parsers;
 
@@ -12,62 +14,57 @@ public class TacticalMapParser : IDisposable
     private static List<TacticalMapImageDef>? _cachedDefinitions;
     private static byte[]? _cachedSurfaceData;
     private static bool _isParsed;
+    private static long _cacheRevision = -1;
+    private long _instanceRevision = -1;
+    private static long _cacheGeneration;
+    private long _instanceGeneration = -1;
     private static readonly object _parseLock = new();
 
-    public IReadOnlyList<TacticalMapImageDef> ImageDefinitions => _imageDefinitions;
-    public byte[]? SurfaceData => _tacticalMapSurfaceData;
+    public IReadOnlyList<TacticalMapImageDef> ImageDefinitions { get { EnsureLoadedFromAssets(); return _imageDefinitions; } }
+    public byte[]? SurfaceData { get { EnsureLoadedFromAssets(); return _tacticalMapSurfaceData; } }
     public static bool IsParsed => _isParsed;
 
     public TacticalMapParser()
     {
     }
 
-    public void EnsureLoaded(string resourcePath)
-    {
-        lock (_parseLock)
-        {
-            if (_isParsed)
-            {
-                if (_cachedDefinitions != null)
-                {
-                    _imageDefinitions = new List<TacticalMapImageDef>(_cachedDefinitions);
-                }
-                _tacticalMapSurfaceData = _cachedSurfaceData;
-                return;
-            }
-
-            ParseTacticalMapFromAssets();
-            if (_tacticalMapSurfaceData == null || _tacticalMapSurfaceData.Length == 0)
-            {
-                ParseTacticalMap(resourcePath);
-            }
-
-            _isParsed = true;
-            _cachedDefinitions = new List<TacticalMapImageDef>(_imageDefinitions);
-            _cachedSurfaceData = _tacticalMapSurfaceData;
-        }
-    }
-
     public void EnsureLoadedFromAssets()
     {
         lock (_parseLock)
         {
+            EnsureCurrentRevision();
             if (_isParsed)
             {
-                if (_cachedDefinitions != null)
+                if ((_instanceRevision != _cacheRevision || _instanceGeneration != _cacheGeneration) && _cachedDefinitions != null)
                 {
                     _imageDefinitions = new List<TacticalMapImageDef>(_cachedDefinitions);
                 }
                 _tacticalMapSurfaceData = _cachedSurfaceData;
+                _instanceRevision = _cacheRevision;
+                _instanceGeneration = _cacheGeneration;
                 return;
             }
 
+            _imageDefinitions.Clear();
+            _tacticalMapSurfaceData = null;
             ParseTacticalMapFromAssets();
 
             _isParsed = true;
             _cachedDefinitions = new List<TacticalMapImageDef>(_imageDefinitions);
             _cachedSurfaceData = _tacticalMapSurfaceData;
+            _instanceRevision = _cacheRevision;
+            _instanceGeneration = _cacheGeneration;
         }
+    }
+
+    private static void EnsureCurrentRevision()
+    {
+        long revision = AssetManager.Default.Revision;
+        if (_cacheRevision == revision) return;
+        _isParsed = false;
+        _cachedDefinitions = null;
+        _cachedSurfaceData = null;
+        _cacheRevision = revision;
     }
 
     private void ParseTacticalMapFromAssets()
@@ -81,36 +78,14 @@ public class TacticalMapParser : IDisposable
                 return;
             }
 
-            string[] supportedExtensions = { ".webp", ".png", ".jpg", ".jpeg", ".bmp" };
-            AssetEntry? imageEntry = null;
-            foreach (var ext in supportedExtensions)
+            var atlas = HdAtlasParser.Get("tacticalmap");
+            if (!atlas.IsLoaded) { Debug.WriteLine(atlas.LastError); return; }
+            _imageDefinitions = atlas.ImageDefinitions.Select(def => new TacticalMapImageDef
             {
-                var entry = am.Find($"tacticalmap{ext}");
-                if (entry != null)
-                {
-                    imageEntry = entry;
-                    break;
-                }
-            }
-
-            var xmlEntry = am.Find("tacticalmap.xml");
-
-            if (imageEntry == null)
-            {
-                Debug.WriteLine("[TacticalMapParser] assets 中未找到战术地图图片，支持的格式: webp, png, jpg, jpeg, bmp");
-                return;
-            }
-
-            if (xmlEntry == null)
-            {
-                Debug.WriteLine("[TacticalMapParser] assets 中未找到 tacticalmap.xml");
-                return;
-            }
-
-            Debug.WriteLine($"[TacticalMapParser] 从 AssetManager 加载战术地图图片: {imageEntry.RelativePath}");
-
-            ParseXmlConfigFromText(am.ReadText(xmlEntry));
-            LoadImageFromBytes(am.ReadBytes(imageEntry));
+                Name = def.Name, X = def.X, Y = def.Y, Width = def.Width, Height = def.Height,
+                RefX = def.RefX, RefY = def.RefY
+            }).ToList();
+            _tacticalMapSurfaceData = atlas.SurfaceData;
 
             Debug.WriteLine($"[TacticalMapParser] 成功解析 {_imageDefinitions.Count} 个图片定义 (from AssetManager)");
         }
@@ -120,75 +95,11 @@ public class TacticalMapParser : IDisposable
         }
     }
 
-    private void ParseTacticalMap(string resourcePath)
-    {
-        try
-        {
-            string dataPath = Path.Combine(resourcePath, "Data");
-            if (!Directory.Exists(dataPath))
-                dataPath = Path.Combine(resourcePath, "data");
-
-            string[] supportedExtensions = { ".webp", ".png", ".jpg", ".jpeg", ".bmp" };
-            string? imagePath = null;
-
-            foreach (var ext in supportedExtensions)
-            {
-                string tempPath = Path.Combine(dataPath, $"tacticalmap{ext}");
-                if (File.Exists(tempPath))
-                {
-                    imagePath = tempPath;
-                    break;
-                }
-            }
-
-            string xmlPath = Path.Combine(dataPath, "tacticalmap.xml");
-
-            if (string.IsNullOrEmpty(imagePath))
-            {
-                Debug.WriteLine("[TacticalMapParser] 战术地图文件不存在，支持的格式: webp, png, jpg, jpeg, bmp");
-                return;
-            }
-
-            if (!File.Exists(xmlPath))
-            {
-                Debug.WriteLine($"[TacticalMapParser] 战术地图配置文件不存在: {xmlPath}");
-                return;
-            }
-
-            Debug.WriteLine($"[TacticalMapParser] 加载战术地图图片: {Path.GetFileName(imagePath)}");
-
-            ParseXmlConfig(xmlPath);
-            LoadImage(imagePath);
-
-            Debug.WriteLine($"[TacticalMapParser] 成功解析 {_imageDefinitions.Count} 个图片定义");
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"[TacticalMapParser] 解析战术地图失败: {ex.Message}");
-        }
-    }
-
-    private void ParseXmlConfig(string xmlPath)
-    {
-        try
-        {
-            string xmlContent = File.ReadAllText(xmlPath);
-            ParseXmlConfigFromText(xmlContent);
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"[TacticalMapParser] 解析 XML 配置失败: {ex.Message}");
-        }
-    }
-
     private void ParseXmlConfigFromText(string xmlContent)
     {
         try
         {
-            string tempXml = $"<root>{xmlContent}</root>";
-
-            XmlDocument xmlDoc = new();
-            xmlDoc.LoadXml(tempXml);
+            XmlDocument xmlDoc = ResourceXml.ParseFragments(xmlContent);
 
             XmlNodeList? imageNodes = xmlDoc.SelectNodes("//Images/Image");
             if (imageNodes == null) return;
@@ -262,7 +173,7 @@ public class TacticalMapParser : IDisposable
     {
         try
         {
-            _tacticalMapSurfaceData = File.ReadAllBytes(imagePath);
+            _tacticalMapSurfaceData = ProjectFile.ReadAllBytes(imagePath);
             Debug.WriteLine($"[TacticalMapParser] 加载战术地图: {_tacticalMapSurfaceData.Length} bytes");
         }
         catch (Exception ex)
@@ -286,6 +197,7 @@ public class TacticalMapParser : IDisposable
 
     public TacticalMapImageDef? GetImageDef(string name)
     {
+        EnsureLoadedFromAssets();
         foreach (var def in _imageDefinitions)
         {
             if (def.Name == name)
@@ -296,6 +208,7 @@ public class TacticalMapParser : IDisposable
 
     public bool HasImage(string name)
     {
+        EnsureLoadedFromAssets();
         foreach (var def in _imageDefinitions)
         {
             if (def.Name == name)
@@ -306,6 +219,7 @@ public class TacticalMapParser : IDisposable
 
     public List<string> GetAllImageNames()
     {
+        EnsureLoadedFromAssets();
         var results = new List<string>();
         foreach (var def in _imageDefinitions)
         {
@@ -316,6 +230,7 @@ public class TacticalMapParser : IDisposable
 
     public List<string> SearchImages(string keyword)
     {
+        EnsureLoadedFromAssets();
         var results = new List<string>();
         string lowerKeyword = keyword.ToLower();
 
@@ -330,6 +245,7 @@ public class TacticalMapParser : IDisposable
 
     public List<TacticalMapImageDef> GetGeneralHeadImages()
     {
+        EnsureLoadedFromAssets();
         var results = new List<TacticalMapImageDef>();
         foreach (var def in _imageDefinitions)
         {
@@ -341,6 +257,7 @@ public class TacticalMapParser : IDisposable
 
     public List<TacticalMapImageDef> GetCountryFlagImages()
     {
+        EnsureLoadedFromAssets();
         var results = new List<TacticalMapImageDef>();
         foreach (var def in _imageDefinitions)
         {
@@ -355,6 +272,7 @@ public class TacticalMapParser : IDisposable
         lock (_parseLock)
         {
             _isParsed = false;
+            _cacheGeneration++;
             _cachedDefinitions = null;
             _cachedSurfaceData = null;
         }
@@ -364,5 +282,6 @@ public class TacticalMapParser : IDisposable
     {
         _imageDefinitions.Clear();
         _tacticalMapSurfaceData = null;
+        _instanceRevision = -1;
     }
 }

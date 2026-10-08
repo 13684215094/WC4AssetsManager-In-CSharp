@@ -210,24 +210,6 @@ public sealed class ReinforcementDeployMode : IModeHandler
     /// </summary>
     private int GetProvinceCapitalBelong(int col, int row, ModeContext context)
     {
-        var mapData = context.MapData;
-        if (mapData == null) return -1;
-
-        // 获取当前格子的省份值（省会索引）
-        var province = mapData.GetProvinceRef(col, row);
-        if (province.ProvinceValue == 0 || province.ProvinceValue == 0xFFFF) return -1;
-
-        // ProvinceValue 是省会格子的地图索引
-        int capitalIndex = province.ProvinceValue;
-
-        // 获取省会格子的归属值
-        if (capitalIndex >= 0 && capitalIndex < mapData.MapWidth * mapData.MapHeight)
-        {
-            var capitalCoord = HexCoord.FromIndex(capitalIndex, mapData.MapWidth);
-            // 返回省会格子的归属值
-            return mapData.GetBelongValue(capitalCoord.Col, capitalCoord.Row);
-        }
-
-        return -1;
+        return context.MapData?.GetProvinceCapitalBelong(col, row) ?? -1;
     }
 }

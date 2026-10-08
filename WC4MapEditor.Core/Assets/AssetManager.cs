@@ -1,3 +1,4 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
@@ -12,7 +13,7 @@ namespace WC4MapEditor.Core.Assets;
 /// 典型用法：
 /// <code>
 /// var manager = AssetManager.Default;
-/// manager.Scan(@"E:\CSharpProject\WC4MapEditor\Resource\WC4DATA\assets");
+/// manager.Scan(@"E:\Games\World Conqueror 4\assets");
 /// var stages = manager.Query(kind: AssetKind.Stage);
 /// var bytes = manager.ReadBytes(stages[0]);
 /// </code>
@@ -25,22 +26,6 @@ public sealed class AssetManager
     public static AssetManager Default => _default ??= new AssetManager();
 
     private readonly AssetCache _cache;
-
-    /// <summary>默认 assets 根目录（相对 WC4DATA 结构自动解析）。</summary>
-    public static string GetDefaultAssetsPath() => ResolveDefaultAssetsPath();
-
-    private static string ResolveDefaultAssetsPath()
-    {
-        string? baseDir = AppContext.BaseDirectory;
-        string candidate = Path.Combine(baseDir, "Resource", "WC4DATA", "assets");
-        var current = new DirectoryInfo(baseDir);
-        for (int i = 0; i < 8 && current != null; i++, current = current.Parent)
-        {
-            string test = Path.Combine(current.FullName, "Resource", "WC4DATA", "assets");
-            if (Directory.Exists(test)) return test;
-        }
-        return candidate;
-    }
 
     public AssetManager() : this(AssetCache.Instance) { }
 
@@ -65,14 +50,24 @@ public sealed class AssetManager
     // ---------------------------------------------------------------------
 
     /// <summary>
-    /// 扫描 assets 目录。若已加载相同目录则跳过（除非 <paramref name="forceReload"/> 为 true）。
+    /// 扫描用户指定的游戏目录、assets、APK 或已有项目。相同目录可用 forceReload 刷新。
     /// </summary>
-    public int Scan(string assetsRoot, bool forceReload = false)
-        => _cache.Load(assetsRoot, forceReload);
+    public int Scan(string assetsRoot, bool forceReload = false,
+        IProgress<ProjectCopyProgress>? progress = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(assetsRoot);
+        string path = Path.GetFullPath(assetsRoot.Trim().Trim('"'));
+        if (File.Exists(path)) path = ApkProjectSource.Prepare(path, progress, cancellationToken).Root;
+        else if (File.Exists(Path.Combine(path, GameProjectWorkspace.ManifestFileName)))
+            path = GameProjectWorkspace.Open(path).AssetsRoot;
+        return _cache.Load(path, forceReload, progress, cancellationToken);
+    }
 
-    /// <summary>使用默认路径扫描。首次调用时自动解析默认路径。</summary>
-    public int ScanDefault(bool forceReload = false)
-        => _cache.Load(GetDefaultAssetsPath(), forceReload);
+    public string GetActiveAssetsRoot()
+    {
+        if (IsLoaded) return AssetsRoot;
+        throw new InvalidOperationException("请先指定游戏项目目录或 APK 并加载。");
+    }
 
     /// <summary>清空缓存。</summary>
     public void Clear() => _cache.Clear();
@@ -129,7 +124,7 @@ public sealed class AssetManager
 
     /// <summary>打开指定条目的只读文件流。</summary>
     public Stream OpenRead(AssetEntry entry)
-        => new FileStream(entry.FullPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+        => ProjectFiles.OpenRead(entry.FullPath);
 
     // ---------------------------------------------------------------------
     // 概览

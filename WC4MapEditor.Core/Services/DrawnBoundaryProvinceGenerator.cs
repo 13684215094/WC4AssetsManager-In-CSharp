@@ -66,19 +66,20 @@ public static class DrawnBoundaryProvinceGenerator
 
         foreach (var capital in mapData.Capitals)
         {
-            int idx = capital.Coordinate;
-            if (idx >= 0 && idx < total)
-                capitalIndices.Add(idx);
+            if (mapData.TryGetLocalCoordinate(capital.Coordinate, out var cell))
+                capitalIndices.Add(cell.Row * mapWidth + cell.Col);
         }
 
         for (int i = 0; i < total; i++)
         {
             ref var provinceRef = ref mapData.GetProvinceRef(i);
-            if (provinceRef.IsValid && provinceRef.ProvinceValue == i)
+            if (provinceRef.IsValid && provinceRef.ProvinceValue == mapData.ToRecordCoordinate(i % mapWidth, i / mapWidth))
                 capitalIndices.Add(i);
         }
 
         if (capitalIndices.Count == 0) return null;
+        if (capitalIndices.Any(index => mapData.ToRecordCoordinate(index % mapWidth, index / mapWidth) is <= 0 or >= ushort.MaxValue))
+            throw new InvalidOperationException("省会坐标无法存入省份引用（有效范围 1–65534），未生成省区。");
 
         // ---------- 1. 边界像素 → 边界格子 ----------
         // 反算每个边界像素落在哪个格子，比"逐格采样中心"更稳：
@@ -93,7 +94,7 @@ public static class DrawnBoundaryProvinceGenerator
             {
                 if (!boundaryMask[rowBase + x]) continue;
 
-                var (col, row) = MapPixelToHex(x, y);
+                var (col, row) = MapPixelToHex(x, y, mapData);
                 if (col < 0 || row < 0 || col >= mapWidth || row >= mapHeight) continue;
 
                 cellBoundary[row * mapWidth + col] = true;
@@ -120,7 +121,7 @@ public static class DrawnBoundaryProvinceGenerator
 
                 int col = index % mapWidth;
                 int row = index / mapWidth;
-                CollectNeighbors(col, row, mapWidth, mapHeight, neighbors, dilateCells);
+                CollectNeighbors(col, row, mapData, neighbors, dilateCells);
 
                 foreach (int n in neighbors)
                     dilated[n] = true;
@@ -165,7 +166,7 @@ public static class DrawnBoundaryProvinceGenerator
 
                 int col = index % mapWidth;
                 int row = index / mapWidth;
-                CollectNeighbors(col, row, mapWidth, mapHeight, neighborsBuf, 1);
+                CollectNeighbors(col, row, mapData, neighborsBuf, 1);
 
                 foreach (int n in neighborsBuf)
                 {
@@ -204,7 +205,7 @@ public static class DrawnBoundaryProvinceGenerator
                 int index = groupQueue.Dequeue();
                 int col = index % mapWidth;
                 int row = index / mapWidth;
-                CollectNeighbors(col, row, mapWidth, mapHeight, neighborsBuf, 1);
+                CollectNeighbors(col, row, mapData, neighborsBuf, 1);
 
                 foreach (int n in neighborsBuf)
                 {
@@ -234,7 +235,7 @@ public static class DrawnBoundaryProvinceGenerator
             int index = groupQueue.Dequeue();
             int col = index % mapWidth;
             int row = index / mapWidth;
-            CollectNeighbors(col, row, mapWidth, mapHeight, neighborsBuf, 1);
+            CollectNeighbors(col, row, mapData, neighborsBuf, 1);
 
             foreach (int n in neighborsBuf)
             {
@@ -259,7 +260,7 @@ public static class DrawnBoundaryProvinceGenerator
             if (mapData.GetTerrainRef(index).TileType1 == 1) continue;
 
             mapData.GetProvinceRef(index).ProvinceValue =
-                (ushort)(sourceIndex <= 0xFFFF ? sourceIndex : sourceIndex % 0x10000);
+                (ushort)mapData.ToRecordCoordinate(sourceIndex % mapWidth, sourceIndex / mapWidth);
 
             filledCells++;
         }
@@ -273,10 +274,10 @@ public static class DrawnBoundaryProvinceGenerator
     /// 地图逻辑像素 → 格子。与 <see cref="Camera.ScreenToHex"/> 同一套公式
     /// （只是省掉了 offset 与 zoom，因为掩码本身就存的是未变换的逻辑像素）。
     /// </summary>
-    private static (int col, int row) MapPixelToHex(double mapX, double mapY)
+    private static (int col, int row) MapPixelToHex(double mapX, double mapY, MapData mapData)
     {
         int col = (int)Math.Round(mapX / Camera.HexHorizontalSpacing);
-        double rowOffset = (col % 2 == 1) ? Camera.HexVerticalSpacing / 2.0 : 0;
+        double rowOffset = mapData.IsOddColumn(col) ? Camera.HexVerticalSpacing / 2.0 : 0;
         int row = (int)Math.Round((mapY - rowOffset) / Camera.HexVerticalSpacing);
         return (col, row);
     }
@@ -286,7 +287,7 @@ public static class DrawnBoundaryProvinceGenerator
     /// <paramref name="rings"/> 为 1 时是 6 邻接，大于 1 时扩散到对应层数。
     /// </summary>
     private static void CollectNeighbors(
-        int col, int row, int width, int height, List<int> output, int rings)
+        int col, int row, MapData mapData, List<int> output, int rings)
     {
         output.Clear();
 
@@ -299,12 +300,12 @@ public static class DrawnBoundaryProvinceGenerator
                 int c = col + dc;
                 int r = row + dr;
 
-                if (c < 0 || c >= width || r < 0 || r >= height) continue;
+                if (c < 0 || c >= mapData.MapWidth || r < 0 || r >= mapData.MapHeight) continue;
 
                 // 用六边形距离判定，避免把"方块邻域"当成六边形邻域
-                if (Brush.BrushEngine.CalculateHexDistance(col, row, c, r) > rings) continue;
+                if (Brush.BrushEngine.CalculateHexDistance(col + mapData.HexColumnOffset, row, c + mapData.HexColumnOffset, r) > rings) continue;
 
-                output.Add(r * width + c);
+                output.Add(r * mapData.MapWidth + c);
             }
         }
     }

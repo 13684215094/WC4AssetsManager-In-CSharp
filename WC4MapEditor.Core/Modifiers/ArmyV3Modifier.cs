@@ -19,7 +19,7 @@ public sealed class ArmyV3Modifier : ModifierBase
         if (!IsValidCoord(col, row)) return ModifierResult.Fail("坐标超出范围");
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
 
-        int index = checked(row * _mapData.MapWidth + col);
+        int index = _mapData.ToRecordCoordinate(col, row);
         if (index > short.MaxValue)
             return ModifierResult.Fail("该地图位置超过 v3 部队坐标上限 32767，未写入单位。");
         short coordIndex = MapLimits.SignedCoordinate(index);
@@ -89,7 +89,7 @@ public sealed class ArmyV3Modifier : ModifierBase
         if (!IsValidCoord(col, row) || _mapData == null) return false;
         if (data is not Army_3 army) return false;
 
-        int index = checked(row * _mapData.MapWidth + col);
+        int index = _mapData.ToRecordCoordinate(col, row);
         if (index > short.MaxValue)
             return false;
         army.Coordinate = MapLimits.SignedCoordinate(index);
@@ -131,7 +131,7 @@ public sealed class ArmyV3Modifier : ModifierBase
     {
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
 
-        var coord = HexCoord.FromIndex(army.Coordinate, _mapData.MapWidth);
+        var coord = _mapData.ToLocalCoordinate(army.Coordinate);
         int idx = _mapData.FindArmyV3Index(coord.Col, coord.Row);
         if (idx >= 0)
             _mapData.ReplaceArmyV3(idx, army);
@@ -240,7 +240,7 @@ public sealed class ArmyV3Modifier : ModifierBase
         for (int i = 0; i < _mapData.ArmiesV3.Count; i++)
         {
             var army = _mapData.ArmiesV3[i];
-            int armyBelongValue = _mapData.GetBelongValueByIndex(army.Coordinate);
+            int armyBelongValue = _mapData.GetBelongAtRecordCoordinate(army.Coordinate);
             if (belongValue == -1 || armyBelongValue == belongValue)
             {
                 ApplyLegionLevelConfig(ref army, config);
@@ -375,7 +375,7 @@ public sealed class ArmyV3Modifier : ModifierBase
             for (int i = 0; i < _mapData.ArmiesV3.Count; i++)
             {
                 var army = _mapData.ArmiesV3[i];
-                int armyBelongValue = _mapData.GetBelongValueByIndex(army.Coordinate);
+                int armyBelongValue = _mapData.GetBelongAtRecordCoordinate(army.Coordinate);
                 if (armyBelongValue == actionId)
                 {
                     ApplyLegionLevelConfig(ref army, config);
@@ -413,11 +413,12 @@ public sealed class ArmyV3Modifier : ModifierBase
         for (int i = 0; i < _mapData.ArmiesV3.Count; i++)
         {
             var army = _mapData.ArmiesV3[i];
-            int armyBelongValue = _mapData.GetBelongValueByIndex(army.Coordinate);
+            int armyBelongValue = _mapData.GetBelongAtRecordCoordinate(army.Coordinate);
 
             if (belongValue == -1 || armyBelongValue == belongValue)
             {
-                int terrainType = GetTerrainTypeAt(army.Coordinate);
+                var cell = _mapData.ToLocalCoordinate(army.Coordinate);
+                int terrainType = _mapData.TryGetLocalCoordinate(army.Coordinate, out _) ? GetTerrainTypeAt(cell.Row * _mapData.MapWidth + cell.Col) : 0;
                 RandomizeArmyData(ref army, terrainType, armyOnLand, armyOnSea);
                 _mapData.ReplaceArmyV3(i, army);
                 modifiedCount++;
@@ -502,7 +503,7 @@ public sealed class ArmyV3Modifier : ModifierBase
         for (int i = 0; i < _mapData.ArmiesV3.Count; i++)
         {
             var army = _mapData.ArmiesV3[i];
-            int armyBelongValue = _mapData.GetBelongValueByIndex(army.Coordinate);
+            int armyBelongValue = _mapData.GetBelongAtRecordCoordinate(army.Coordinate);
             if (army.LegionId > 0) armyBelongValue = army.LegionId;
 
             if (targetBelongValue != -1 && armyBelongValue != targetBelongValue) continue;
@@ -517,7 +518,7 @@ public sealed class ArmyV3Modifier : ModifierBase
         if (targetArmies.Count == 0)
             return ModifierResult.Fail($"没有找到归属值为 {targetBelongValue} 的v3单位");
 
-        if (targetArmies.Any(a => a.Coordinate < 0 || a.Coordinate >= _mapData.TerrainCount ||
+        if (targetArmies.Any(a => !_mapData.TryGetLocalCoordinate(a.Coordinate, out _) ||
             _mapData.ArmiesV3.Count(other => other.Coordinate == a.Coordinate) != 1))
             return ModifierResult.Fail("目标单位坐标越界或重复，未修改单位");
 
@@ -539,7 +540,7 @@ public sealed class ArmyV3Modifier : ModifierBase
         var armiesByBelong = new Dictionary<int, List<Army_3>>();
         foreach (var army in targetArmies)
         {
-            int armyBelongValue = _mapData.GetBelongValueByIndex(army.Coordinate);
+            int armyBelongValue = _mapData.GetBelongAtRecordCoordinate(army.Coordinate);
             if (army.LegionId > 0) armyBelongValue = army.LegionId;
 
             if (!armiesByBelong.ContainsKey(armyBelongValue))
@@ -642,8 +643,8 @@ public sealed class ArmyV3Modifier : ModifierBase
             cfg.AddAssignedGeneral(generalId);
 
             int armyIdx = _mapData!.FindArmyV3Index(
-                HexCoord.FromIndex(army.Coordinate, _mapData.MapWidth).Col,
-                HexCoord.FromIndex(army.Coordinate, _mapData.MapWidth).Row);
+                _mapData.ToLocalCoordinate(army.Coordinate).Col,
+                _mapData.ToLocalCoordinate(army.Coordinate).Row);
             if (armyIdx >= 0)
                 _mapData.ReplaceArmyV3(armyIdx, army);
 
@@ -689,8 +690,8 @@ public sealed class ArmyV3Modifier : ModifierBase
             cfg.AddAssignedGeneral(generalId);
 
             int armyIdx = _mapData!.FindArmyV3Index(
-                HexCoord.FromIndex(selectedArmy.Coordinate, _mapData.MapWidth).Col,
-                HexCoord.FromIndex(selectedArmy.Coordinate, _mapData.MapWidth).Row);
+                _mapData.ToLocalCoordinate(selectedArmy.Coordinate).Col,
+                _mapData.ToLocalCoordinate(selectedArmy.Coordinate).Row);
             if (armyIdx >= 0)
                 _mapData.ReplaceArmyV3(armyIdx, selectedArmy);
 
@@ -738,8 +739,8 @@ public sealed class ArmyV3Modifier : ModifierBase
         foreach (var selected in selectedArmies)
         {
             int idx = _mapData.FindArmyV3Index(
-                HexCoord.FromIndex(selected.Coordinate, _mapData.MapWidth).Col,
-                HexCoord.FromIndex(selected.Coordinate, _mapData.MapWidth).Row);
+                _mapData.ToLocalCoordinate(selected.Coordinate).Col,
+                _mapData.ToLocalCoordinate(selected.Coordinate).Row);
             if (idx < 0) continue;
 
             var army = _mapData.ArmiesV3[idx];
@@ -842,7 +843,7 @@ public sealed class ArmyV3Modifier : ModifierBase
     public ModifierResult GenerateArmiesByProbability(int belongValue, int probability)
     {
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
-        if (_mapData.TerrainCount > short.MaxValue + 1)
+        if (_mapData.MaximumRecordCoordinate > short.MaxValue)
             return ModifierResult.Fail("整图批量生成要求所有格子的部队坐标可表示（最多 32768 格），未修改地图。");
         if (probability < 0 || probability > 100) return ModifierResult.Fail("概率必须在0-100之间");
 
@@ -867,7 +868,7 @@ public sealed class ArmyV3Modifier : ModifierBase
 
         for (int hexIndex = 0; hexIndex < totalCells; hexIndex++)
         {
-            if (existingCoords.Contains(hexIndex)) continue;
+            if (existingCoords.Contains(_mapData.ToRecordCoordinate(hexIndex % _mapData.MapWidth, hexIndex / _mapData.MapWidth))) continue;
 
             var provinceValue = GetProvinceValue(hexIndex);
             if (provinceValue == null || provinceValue.Value == 0xFFFF) continue;
@@ -896,12 +897,12 @@ public sealed class ArmyV3Modifier : ModifierBase
 
             int actualBelongValue = belongValue;
             if (actualBelongValue == -1)
-                actualBelongValue = _mapData.GetBelongValueByIndex(provinceValue.Value);
+                actualBelongValue = _mapData.GetBelongAtRecordCoordinate(provinceValue.Value);
 
             if (actualBelongValue >= 0)
                 _mapData.SetBelongValueByIndex(hexIndex, actualBelongValue);
 
-            var army3 = Army_3.CreateDefault(hexIndex);
+            var army3 = Army_3.CreateDefault(_mapData.ToRecordCoordinate(col, row));
             army3.UnitType = (byte)unitType;
             army3.Level = (byte)_random.Next(1, 6);
             army3.Organization = (byte)organization;
@@ -962,7 +963,7 @@ public sealed class ArmyV3Modifier : ModifierBase
         var validProvinces = new HashSet<int>();
         foreach (int province in allProvinces)
         {
-            int provinceBelong = _mapData.GetBelongValueByIndex(province);
+            int provinceBelong = _mapData.GetBelongAtRecordCoordinate(province);
             if (provinceBelong == belongValue)
                 validProvinces.Add(province);
         }

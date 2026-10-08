@@ -1,3 +1,4 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -65,7 +66,7 @@ public sealed class AssetAuditReport
                 throw new IOException("Audit reports must be written outside input assets directories.");
         }
         // Existing destinations could be assets reached through symlinks/hardlinks.
-        if (File.Exists(full) || Directory.Exists(full))
+        if (ProjectFile.Exists(full) || ProjectFile.DirectoryExists(full))
             throw new IOException("Choose a new report filename; existing files are never overwritten.");
         var parent = new DirectoryInfo(Path.GetDirectoryName(full)!);
         for (var dir = parent; dir != null; dir = dir.Parent)
@@ -154,10 +155,10 @@ public sealed class AssetRelationshipAnalyzer
             _report.Tables[name] = file.Value;
             try
             {
-                if (new FileInfo(file.Value).Length > 32 * 1024 * 1024)
+                if (new FileInfo(ProjectFile.ResolveRead(file.Value)).Length > 32 * 1024 * 1024)
                     throw new InvalidDataException("Table exceeds the 32 MiB audit budget.");
                 var rows = name == "GeneralSettings.json" && generalSnapshot != null ? generalSnapshot.DeepClone().AsArray() :
-                    JsonNode.Parse(File.ReadAllText(file.Value), documentOptions: new JsonDocumentOptions
+                    JsonNode.Parse(ProjectFile.ReadAllText(file.Value).TrimStart('\uFEFF'), documentOptions: new JsonDocumentOptions
                     { AllowTrailingCommas = true, CommentHandling = JsonCommentHandling.Skip }) as JsonArray;
                 if (rows == null || rows.Any(row => row is not JsonObject))
                     throw new InvalidDataException("Expected an array of objects.");
@@ -200,8 +201,8 @@ public sealed class AssetRelationshipAnalyzer
     public static string ResolveRoot(string input)
     {
         string root = Path.GetFullPath(input);
-        if (Directory.Exists(Path.Combine(root, "json"))) return root;
-        if (Directory.Exists(Path.Combine(root, "assets", "json"))) return Path.Combine(root, "assets");
+        if (ProjectFile.DirectoryExists(Path.Combine(root, "json"))) return root;
+        if (ProjectFile.DirectoryExists(Path.Combine(root, "assets", "json"))) return Path.Combine(root, "assets");
         throw new DirectoryNotFoundException($"Expected an assets directory containing json/: {root}");
     }
 
@@ -211,8 +212,8 @@ public sealed class AssetRelationshipAnalyzer
         foreach (string root in new[] { _report.BaseAssetsRoot, _report.AssetsRoot }.OfType<string>())
         {
             string path = Path.Combine(root, directory);
-            if (!Directory.Exists(path)) continue;
-            foreach (string file in Directory.EnumerateFiles(path, pattern, directory == "json" ? SearchOption.TopDirectoryOnly : SearchOption.AllDirectories))
+            if (!ProjectFile.DirectoryExists(path)) continue;
+            foreach (string file in ProjectFile.EnumerateFiles(path, pattern, directory == "json" ? SearchOption.TopDirectoryOnly : SearchOption.AllDirectories))
                 files[Path.GetRelativePath(root, file).Replace('\\', '/')] = file;
         }
         return files;
@@ -342,7 +343,9 @@ public sealed class AssetRelationshipAnalyzer
             {
                 var row = rows[i]!;
                 if (row["Skills"] is not JsonArray skills) continue;
-                if (Int(row["SkillsMax"]) is int max && skills.Count > max)
+                // NPC rows use zero here without limiting their built-in skills.
+                if (Int(row["SkillsMax"]) is int max && skills.Count > max &&
+                    !(table == "GeneralSettings.json" && Int(row["Type"]) == 3 && max == 0))
                     Add("error", "skill-max", table, i + 1, Int(row["Id"]), "Skills", $"{skills.Count} entries exceed SkillsMax={max}.");
                 if (skills.Count > 5)
                     Add("warning", "btl-skill-slots", table, i + 1, Int(row["Id"]), "Skills", "More than five slots; editor BTL auto-assignment skips this record.");

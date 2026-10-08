@@ -2,20 +2,15 @@ using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using SkiaSharp;
-using WC4MapEditor.Core.Config;
+using WC4MapEditor.Core.Assets;
+using WC4MapEditor.Core.Parsers.HdAtlas;
+using WC4MapEditor.Rendering.Imaging;
 
 namespace WC4MapEditor.Rendering.Skia;
 
 /// <summary>
-/// 单位图集共享缓存。
-///
-/// ArmyRender、ReinforceRender、ReinforceRenderNew 三个渲染器需要的是完全相同的一份
-/// legion_icon_*.png 图集，但原实现各自扫描目录、逐个解码 PNG、再拼成图集，
-/// 同一份资源被完整构建三次（冷启动时约 400ms，且各渲染器耗时波动很大）。
-///
-/// 这里改为全进程只构建一次，三个渲染器共享同一份 SKImage 与切片表。
-/// 共享的 SKImage 由本缓存持有所有权，调用方只能读取、不可 Dispose，
-/// 也不得修改切片表。
+/// 从当前项目 image/image_legion_icon_hd 提取兵种图标，部队和援军共享使用。
+/// 按资源 Revision 重建；共享图片和切片表归缓存所有。
 /// </summary>
 internal static class UnitAtlasCache
 {
@@ -24,6 +19,7 @@ internal static class UnitAtlasCache
 
     private static readonly object _lock = new();
     private static bool _initialized;
+    private static long _revision = -1;
 
     private static SKImage? _atlas;
     private static Dictionary<int, SKRect> _tileMap = new();
@@ -57,18 +53,20 @@ internal static class UnitAtlasCache
 
     private static void EnsureInitialized()
     {
-        if (_initialized) return;
-
         lock (_lock)
         {
+            long revision = AssetManager.Default.Revision;
+            if (_revision != revision) { Invalidate(); _revision = revision; }
             if (_initialized) return;
 
             try
             {
-                string armyMarkPath = ConfigManager.Instance.GetArmyMarkPath();
-                if (!Directory.Exists(armyMarkPath)) return;
-
-                var availableUnits = CollectAvailableUnits(armyMarkPath);
+                const string atlasName = "image/image_legion_icon_hd";
+                var availableUnits = HdAtlasParser.Get(atlasName).ImageDefinitions
+                    .Where(def => def.Name.StartsWith("legion_icon_", StringComparison.Ordinal))
+                    .Select(def => int.TryParse(Path.GetFileNameWithoutExtension(def.Name)[12..], out int id) ? id : -1)
+                    .Where(id => id >= 0).Distinct().Order().ToList();
+                using var loader = new ProjectSpriteLoader();
                 if (availableUnits.Count == 0) return;
 
                 var sw = Stopwatch.StartNew();
@@ -88,7 +86,7 @@ internal static class UnitAtlasCache
                 {
                     if (tileIndex >= atlasTiles * atlasTiles) break;
 
-                    using var unitImage = LoadUnitImage(armyMarkPath, unitType);
+                    using var unitImage = loader.LoadImage($"legion_icon_{unitType}.png", atlasName);
                     if (unitImage == null) continue;
 
                     int atlasX = (tileIndex % atlasTiles) * TileSize;
@@ -116,24 +114,6 @@ internal static class UnitAtlasCache
         }
     }
 
-    private static List<int> CollectAvailableUnits(string armyMarkPath)
-    {
-        var units = new List<int>();
-        try
-        {
-            foreach (string file in Directory.GetFiles(armyMarkPath, "legion_icon_*.png"))
-            {
-                string fileName = Path.GetFileNameWithoutExtension(file);
-                string[] parts = fileName.Split('_');
-                if (parts.Length >= 3 && int.TryParse(parts[2], out int type))
-                    units.Add(type);
-            }
-            units.Sort();
-        }
-        catch { }
-        return units;
-    }
-
     private static int CalculateAtlasSize(int unitCount)
     {
         int tiles = 1;
@@ -141,18 +121,4 @@ internal static class UnitAtlasCache
         return tiles;
     }
 
-    private static SKImage? LoadUnitImage(string armyMarkPath, int unitType)
-    {
-        try
-        {
-            string imagePath = Path.Combine(armyMarkPath, $"legion_icon_{unitType}.png");
-            if (File.Exists(imagePath))
-            {
-                using var stream = File.OpenRead(imagePath);
-                return SKImage.FromEncodedData(stream);
-            }
-        }
-        catch { }
-        return null;
-    }
 }

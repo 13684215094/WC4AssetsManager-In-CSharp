@@ -162,6 +162,8 @@ public sealed class KeyboardManager
     {
         _pressedKeys.Clear();
         _currentModifiers = KeyModifiers.None;
+        _externalModifiers = KeyModifiers.None;
+        _useExternalModifiers = false;
     }
 
     public bool IsKeyDown(int keyCode) => _pressedKeys.Contains(keyCode);

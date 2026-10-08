@@ -1,3 +1,4 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Collections.ObjectModel;
 using System.Globalization;
 using WC4MapEditor.Core.Models;
@@ -11,7 +12,7 @@ public static class BTLParser
 
     public static MapData LoadFromFile(string path)
     {
-        using var stream = File.OpenRead(path);
+        using var stream = ProjectFile.OpenRead(path);
         var data = new byte[MapLimits.FileSize(stream.Length)];
         stream.ReadExactly(data);
         return LoadFromBytes(data, path);

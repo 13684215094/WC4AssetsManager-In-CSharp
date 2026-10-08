@@ -11,6 +11,46 @@ public enum MapFileKind { Unknown, World, Battle }
 public class MapData : INotifyPropertyChanged
 {
     public MapFileKind FileKind { get; set; }
+    // Runtime context only; BTL object records retain their original world indices.
+    public int ExternalWorldWidth { get; private set; }
+    public bool UsesExternalCoordinates => FileKind == MapFileKind.Battle && Header.MapNumber != 0 && ExternalWorldWidth > 0;
+    public int HexColumnOffset => UsesExternalCoordinates ? Header.MapClipX : 0;
+    public bool IsOddColumn(int col) => ((col + HexColumnOffset) & 1) != 0;
+    public int MaximumRecordCoordinate => UsesExternalCoordinates
+        ? checked((Header.MapClipY + MapHeight - 1) * ExternalWorldWidth + Math.Min(ExternalWorldWidth - 1, Header.MapClipX + MapWidth - 1))
+        : checked(MapWidth * MapHeight - 1);
+
+    public void SetExternalWorldWidth(int width)
+    {
+        if (width < MapWidth || width <= 0) throw new ArgumentOutOfRangeException(nameof(width));
+        ExternalWorldWidth = width;
+        InvalidateBuildingCoordIndex();
+    }
+
+    public int ToRecordCoordinate(int col, int row)
+    {
+        if ((uint)col >= (uint)MapWidth || (uint)row >= (uint)MapHeight) return -1;
+        return UsesExternalCoordinates
+            ? checked((Header.MapClipY + row) * ExternalWorldWidth + (Header.MapClipX + col) % ExternalWorldWidth)
+            : checked(row * MapWidth + col);
+    }
+
+    public HexCoord ToLocalCoordinate(int index)
+    {
+        if (index < 0 || MapWidth <= 0) return new(-1, -1);
+        if (!UsesExternalCoordinates) return HexCoord.FromIndex(index, MapWidth);
+        return new((index % ExternalWorldWidth - Header.MapClipX + ExternalWorldWidth) % ExternalWorldWidth,
+            index / ExternalWorldWidth - Header.MapClipY);
+    }
+
+    public bool TryGetLocalCoordinate(int index, out HexCoord coord)
+    {
+        coord = ToLocalCoordinate(index);
+        return (uint)coord.Col < (uint)MapWidth && (uint)coord.Row < (uint)MapHeight;
+    }
+
+    public HexCoord[] GetNeighbors(int col, int row) => new HexCoord(col + HexColumnOffset, row).GetNeighbors()
+        .Select(cell => new HexCoord(cell.Col - HexColumnOffset, cell.Row)).ToArray();
     public byte[] ProvincePadding { get; set; } = [];
     public byte[] BelongPadding { get; set; } = [];
     public byte[] OpaqueRecords { get; set; } = [];
@@ -231,6 +271,7 @@ public class MapData : INotifyPropertyChanged
         int mapWidth = _mapWidth;
         if (mapWidth <= 0) return -1;
         if (col < 0 || row < 0 || col >= mapWidth || row >= _mapHeight) return -1;
+        if (UsesExternalCoordinates) return row * mapWidth + col;
 
         int mapClipX = _header?.MapClipX ?? 0;
         int mapClipY = _header?.MapClipY ?? 0;
@@ -258,6 +299,11 @@ public class MapData : INotifyPropertyChanged
     {
         int index = GetBelongIndex(col, row);
         return index < 0 ? 0xFF : GetBelongValueByIndex(index);
+    }
+
+    public int GetBelongAtRecordCoordinate(int coordinate)
+    {
+        return TryGetLocalCoordinate(coordinate, out var cell) ? GetBelongValue(cell.Col, cell.Row) : 0xFF;
     }
 
     public int GetBelongValueByIndex(int index)
@@ -569,7 +615,7 @@ public class MapData : INotifyPropertyChanged
     {
         foreach (Building building in Buildings)
         {
-            HexCoord coord = HexCoord.FromIndex(building.Coordinate, MapWidth);
+            HexCoord coord = ToLocalCoordinate(building.Coordinate);
             if (coord.Col == col && coord.Row == row) return building;
         }
         return null;
@@ -579,7 +625,7 @@ public class MapData : INotifyPropertyChanged
     {
         foreach (Army army in Armies)
         {
-            HexCoord coord = HexCoord.FromIndex(army.Coordinate, MapWidth);
+            HexCoord coord = ToLocalCoordinate(army.Coordinate);
             if (coord.Col == col && coord.Row == row) return army;
         }
         return null;
@@ -589,7 +635,7 @@ public class MapData : INotifyPropertyChanged
     {
         foreach (Army_3 army in ArmiesV3)
         {
-            HexCoord coord = HexCoord.FromIndex(army.Coordinate, MapWidth);
+            HexCoord coord = ToLocalCoordinate(army.Coordinate);
             if (coord.Col == col && coord.Row == row) return army;
         }
         return null;
@@ -608,15 +654,13 @@ public class MapData : INotifyPropertyChanged
         if (province.ProvinceValue == 0 || province.ProvinceValue == 0xFFFF) return -1;
 
         int capitalIndex = province.ProvinceValue;
-        if (capitalIndex < 0 || capitalIndex >= _mapWidth * _mapHeight) return -1;
-
-        var capitalCoord = HexCoord.FromIndex(capitalIndex, MapWidth);
+        if (!TryGetLocalCoordinate(capitalIndex, out var capitalCoord)) return -1;
         return GetBelongValue(capitalCoord.Col, capitalCoord.Row);
     }
 
     public void AddBuilding(Building building)
     {
-        HexCoord coord = HexCoord.FromIndex(building.Coordinate, MapWidth);
+        HexCoord coord = ToLocalCoordinate(building.Coordinate);
         int idx = FindBuildingIndex(coord.Col, coord.Row);
         if (idx >= 0)
         {
@@ -633,7 +677,7 @@ public class MapData : INotifyPropertyChanged
 
     public void AddArmy(Army army)
     {
-        HexCoord coord = HexCoord.FromIndex(army.Coordinate, MapWidth);
+        HexCoord coord = ToLocalCoordinate(army.Coordinate);
         int idx = FindArmyIndex(coord.Col, coord.Row);
         if (idx >= 0)
             _armies[idx] = army;
@@ -644,7 +688,7 @@ public class MapData : INotifyPropertyChanged
 
     public void AddArmyV3(Army_3 army)
     {
-        HexCoord coord = HexCoord.FromIndex(army.Coordinate, MapWidth);
+        HexCoord coord = ToLocalCoordinate(army.Coordinate);
         int idx = FindArmyV3Index(coord.Col, coord.Row);
         if (idx >= 0)
             _armiesV3[idx] = army;
@@ -746,6 +790,7 @@ public class MapData : INotifyPropertyChanged
         _mapHeight = copy._mapHeight;
         _filePath = copy._filePath;
         _isModified = copy._isModified;
+        ExternalWorldWidth = copy.ExternalWorldWidth;
         FileKind = copy.FileKind;
         ProvincePadding = copy.ProvincePadding;
         BelongPadding = copy.BelongPadding;
@@ -860,7 +905,8 @@ public class MapData : INotifyPropertyChanged
 
     public int FindBuildingIndex(int col, int row)
     {
-        int coordIndex = row * _mapWidth + col;
+        int coordIndex = ToRecordCoordinate(col, row);
+        if (coordIndex < 0) return -1;
         if (_buildingCoordIndex.Count > 0 && _buildingCoordIndex.TryGetValue(coordIndex, out int idx))
             return idx;
         for (int i = 0; i < _buildings.Count; i++)
@@ -889,7 +935,8 @@ public class MapData : INotifyPropertyChanged
 
     public int FindArmyIndex(int col, int row)
     {
-        int coordIndex = row * _mapWidth + col;
+        int coordIndex = ToRecordCoordinate(col, row);
+        if (coordIndex < 0) return -1;
         for (int i = 0; i < _armies.Count; i++)
         {
             if (_armies[i].Coordinate == coordIndex) return i;
@@ -899,7 +946,8 @@ public class MapData : INotifyPropertyChanged
 
     public int FindArmyV3Index(int col, int row)
     {
-        int coordIndex = row * _mapWidth + col;
+        int coordIndex = ToRecordCoordinate(col, row);
+        if (coordIndex < 0) return -1;
         for (int i = 0; i < _armiesV3.Count; i++)
         {
             if (_armiesV3[i].Coordinate == coordIndex) return i;
@@ -909,7 +957,8 @@ public class MapData : INotifyPropertyChanged
 
     public int FindTrapIndex(int col, int row)
     {
-        int coordIndex = row * _mapWidth + col;
+        int coordIndex = ToRecordCoordinate(col, row);
+        if (coordIndex < 0) return -1;
         for (int i = 0; i < _traps.Count; i++)
         {
             if (_traps[i].Coordinate == coordIndex) return i;
@@ -919,7 +968,8 @@ public class MapData : INotifyPropertyChanged
 
     public int FindReinforcementIndex(int col, int row)
     {
-        int coordIndex = row * _mapWidth + col;
+        int coordIndex = ToRecordCoordinate(col, row);
+        if (coordIndex < 0) return -1;
         for (int i = 0; i < _reinforcements.Count; i++)
         {
             if (_reinforcements[i].Coordinate == coordIndex) return i;
@@ -965,6 +1015,7 @@ public class MapData : INotifyPropertyChanged
     {
         if ((uint)index < (uint)_buildings.Count)
         {
+            _buildingCoordIndex.Remove(_buildings[index].Coordinate);
             _buildings[index] = building;
             _buildingCoordIndex[building.Coordinate] = index;
         }

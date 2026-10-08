@@ -125,18 +125,18 @@ public sealed class ModeContext
         EditModeManager.Instance.RecordMultiCellBelongChange(description, applyChange);
     }
 
-    public void RecordEntityChange(string description, Action execute, Action undo)
+    public void RecordEntityChange(string description, Action execute, Action undo, long estimatedBytes = 256)
     {
-        EditModeManager.Instance.RecordEntityChange(description, execute, undo);
+        EditModeManager.Instance.RecordEntityChange(description, execute, undo, estimatedBytes);
     }
 
     /// <summary>
     /// 记录建筑相关的批量变更 - 同时快照 建筑列表 / 省份 / 归属。
     /// 建筑编辑模式里的随机化、批量生成、生成省会等操作必须用它记录撤销。
     /// </summary>
-    public void RecordBuildingsSnapshot(string description, Action applyChange)
+    public bool RecordBuildingsSnapshot(string description, Action applyChange)
     {
-        EditModeManager.Instance.RecordBuildingsSnapshot(description, applyChange);
+        return EditModeManager.Instance.RecordBuildingsSnapshot(description, applyChange);
     }
 
     /// <summary>

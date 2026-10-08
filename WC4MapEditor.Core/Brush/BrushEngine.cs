@@ -1,3 +1,5 @@
+using WC4MapEditor.Core.Models;
+
 namespace WC4MapEditor.Core.Brush;
 
 public sealed class BrushEngine
@@ -40,21 +42,21 @@ public sealed class BrushEngine
         if (_radius > 0) _radius--;
     }
 
-    public List<(int col, int row)> GetHexesInBrush(int centerCol, int centerRow, int mapWidth, int mapHeight)
+    public List<(int col, int row)> GetHexesInBrush(int centerCol, int centerRow, int mapWidth, int mapHeight, int hexColumnOffset = 0)
     {
         if (_shape == "方形")
             return GetHexesInSquare(centerCol, centerRow, _radius, mapWidth, mapHeight);
-        return GetHexesInRadius(centerCol, centerRow, _radius, mapWidth, mapHeight);
+        return GetHexesInRadius(centerCol, centerRow, _radius, mapWidth, mapHeight, hexColumnOffset);
     }
 
-    public static List<(int col, int row)> GetHexesInRadius(int centerCol, int centerRow, int radius, int mapWidth, int mapHeight)
+    public static List<(int col, int row)> GetHexesInRadius(int centerCol, int centerRow, int radius, int mapWidth, int mapHeight, int hexColumnOffset = 0)
     {
         var hexes = new List<(int, int)>();
         for (int row = Math.Max(0, centerRow - radius); row <= Math.Min(mapHeight - 1, centerRow + radius); row++)
         {
             for (int col = Math.Max(0, centerCol - radius); col <= Math.Min(mapWidth - 1, centerCol + radius); col++)
             {
-                if (CalculateHexDistance(centerCol, centerRow, col, row) <= radius)
+                if (CalculateHexDistance(centerCol + hexColumnOffset, centerRow, col + hexColumnOffset, row) <= radius)
                     hexes.Add((col, row));
             }
         }
@@ -74,14 +76,6 @@ public sealed class BrushEngine
 
     public static int CalculateHexDistance(int col1, int row1, int col2, int row2)
     {
-        int x1 = col1;
-        int z1 = row1 - (col1 >> 1);
-        int y1 = -x1 - z1;
-
-        int x2 = col2;
-        int z2 = row2 - (col2 >> 1);
-        int y2 = -x2 - z2;
-
-        return (Math.Abs(x1 - x2) + Math.Abs(y1 - y2) + Math.Abs(z1 - z2)) >> 1;
+        return new HexCoord(col1, row1).DistanceTo(new HexCoord(col2, row2));
     }
 }

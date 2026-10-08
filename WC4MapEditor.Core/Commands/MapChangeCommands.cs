@@ -4,6 +4,7 @@ namespace WC4MapEditor.Core.Commands;
 
 public sealed class TerrainChangeCommand : IUndoableCommand
 {
+    public long EstimatedBytes => 96L + 40L * _changes.Length;
     private readonly MapData _mapData;
     private readonly (int col, int row, TerrainData before, TerrainData after)[] _changes;
 
@@ -34,6 +35,7 @@ public sealed class TerrainChangeCommand : IUndoableCommand
 
 public sealed class ProvinceChangeCommand : IUndoableCommand
 {
+    public long EstimatedBytes => 96L + 12L * _changes.Length;
     private readonly MapData _mapData;
     private readonly (int col, int row, Province before, Province after)[] _changes;
 
@@ -64,13 +66,16 @@ public sealed class ProvinceChangeCommand : IUndoableCommand
 
 public sealed class DelegateCommand : IUndoableCommand
 {
+    public long EstimatedBytes { get; }
     private readonly Action _execute;
     private readonly Action _undo;
 
     public string Description { get; }
 
-    public DelegateCommand(string description, Action execute, Action undo)
+    public DelegateCommand(string description, Action execute, Action undo, long estimatedBytes = 256)
     {
+        if (estimatedBytes < 0) throw new ArgumentOutOfRangeException(nameof(estimatedBytes));
+        EstimatedBytes = estimatedBytes;
         Description = description;
         _execute = execute;
         _undo = undo;
@@ -82,6 +87,7 @@ public sealed class DelegateCommand : IUndoableCommand
 
 public sealed class MapResizeCommand : IUndoableCommand
 {
+    public long EstimatedBytes => SnapshotBytes + 96;
     private readonly MapData _mapData;
     private readonly MapData _before;
     private MapData? _after;
@@ -135,6 +141,7 @@ public sealed class MapResizeCommand : IUndoableCommand
 /// </summary>
 public sealed class ProvinceFullSnapshotCommand : IUndoableCommand
 {
+    public long EstimatedBytes => 96L + 2L * (_beforeSnapshot.Length + (_afterSnapshot?.Length ?? 0));
     private readonly MapData _mapData;
     private readonly Province[] _beforeSnapshot;
     private Province[]? _afterSnapshot;
@@ -175,6 +182,7 @@ public sealed class ProvinceFullSnapshotCommand : IUndoableCommand
 /// </summary>
 public sealed class TerrainFullSnapshotCommand : IUndoableCommand
 {
+    public long EstimatedBytes => 96L + 16L * (_beforeSnapshot.Length + (_afterSnapshot?.Length ?? 0));
     private readonly MapData _mapData;
     private readonly TerrainData[] _beforeSnapshot;
     private TerrainData[]? _afterSnapshot;
@@ -215,6 +223,7 @@ public sealed class TerrainFullSnapshotCommand : IUndoableCommand
 /// </summary>
 public sealed class BelongChangeCommand : IUndoableCommand
 {
+    public long EstimatedBytes => 96L + 12L * _changes.Length;
     private readonly MapData _mapData;
     private readonly (int col, int row, byte before, byte after)[] _changes;
 
@@ -248,6 +257,7 @@ public sealed class BelongChangeCommand : IUndoableCommand
 /// </summary>
 public sealed class BelongFullSnapshotCommand : IUndoableCommand
 {
+    public long EstimatedBytes => 96L + _beforeSnapshot.Length + (_afterSnapshot?.Length ?? 0);
     private readonly MapData _mapData;
     private readonly byte[] _beforeSnapshot;
     private byte[]? _afterSnapshot;

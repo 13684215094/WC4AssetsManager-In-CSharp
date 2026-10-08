@@ -1,45 +1,31 @@
 using System.Diagnostics;
-using System.IO;
-using System.Text.Json;
-using System.Xml;
 using SkiaSharp;
-using WC4MapEditor.Core.Config;
+using WC4MapEditor.Core.Assets;
+using WC4MapEditor.Core.Parsers.HdAtlas;
+using WC4MapEditor.Rendering.Imaging;
 
 namespace WC4MapEditor.Rendering.Helpers;
 
-public sealed class CoastHelper
+public sealed class CoastHelper : IDisposable
 {
-    private static CoastHelper? _instance;
-    private static readonly object _instanceLock = new();
+    private static readonly Lazy<CoastHelper> Shared = new(() => new CoastHelper());
+    public static CoastHelper Instance => Shared.Value;
 
     private readonly Dictionary<string, SKImage> _coastImageCache = new();
     private readonly List<string> _coastImageAccessOrder = new();
-    private const int MaxCoastImageCacheSize = 100;
-
+    private const int MaxCoastImageCacheSize = 150;
     private readonly Dictionary<string, SKImage> _hexagonCoastCache = new();
     private readonly List<string> _hexagonCoastAccessOrder = new();
     private const int MaxHexagonCacheSize = 150;
-
-    private Dictionary<string, string> _coastTypes = new();
-    private Dictionary<string, int> _coastImageCounts = new();
-    private Dictionary<string, string> _coastImages = new();
-    private Dictionary<string, string>? _coastMapping;
-    private int _coastIdOffset = 10;
-
     private SKImage? _coastAtlasImage;
+    private SKImage? _grayLevelAtlasImage;
     private readonly Dictionary<string, SKRect> _coastAtlasSpriteRects = new();
     private readonly Dictionary<string, SKPoint> _coastAtlasSpriteOrigins = new();
-    private bool _coastAtlasLoaded;
-
-    private readonly Dictionary<string, CoastSpriteInfo> _grayLevelCoastImages = new();
-
-    private SKImage? _grayLevelAtlasImage;
     private readonly Dictionary<string, SKRect> _grayLevelAtlasSpriteRects = new();
     private readonly Dictionary<string, SKPoint> _grayLevelAtlasSpriteOrigins = new();
+    private bool _coastAtlasLoaded;
     private bool _grayLevelAtlasLoaded;
-
-    private readonly string _coastFolderPath;
-    private readonly string _coastGrayLevelFolderPath;
+    private long _revision = -1;
 
     public class CoastSpriteInfo
     {
@@ -48,485 +34,104 @@ public sealed class CoastHelper
         public int RefY { get; set; }
     }
 
-    public static CoastHelper Instance
+    public bool IsAtlasLoaded { get { RefreshResources(); return _coastAtlasLoaded; } }
+    public bool IsGrayLevelAtlasLoaded { get { RefreshResources(); return _grayLevelAtlasLoaded; } }
+    public CoastHelper() => RefreshResources();
+
+    private void RefreshResources()
     {
-        get
-        {
-            lock (_instanceLock)
-            {
-                _instance ??= new CoastHelper();
-            }
-            return _instance;
-        }
+        long revision = AssetManager.Default.Revision;
+        if (_revision == revision) return;
+        ClearCache();
+        _coastAtlasImage?.Dispose();
+        _grayLevelAtlasImage?.Dispose();
+        _coastAtlasImage = LoadAtlas("coast_hd", _coastAtlasSpriteRects, _coastAtlasSpriteOrigins);
+        _grayLevelAtlasImage = LoadAtlas("coastmask_hd", _grayLevelAtlasSpriteRects, _grayLevelAtlasSpriteOrigins);
+        _coastAtlasLoaded = _coastAtlasImage != null;
+        _grayLevelAtlasLoaded = _grayLevelAtlasImage != null;
+        _revision = revision;
     }
 
-    public bool IsAtlasLoaded => _coastAtlasLoaded;
-    public bool IsGrayLevelAtlasLoaded => _grayLevelAtlasLoaded;
-
-    /// <summary>供依赖注入使用的公开构造（替代单例入口）</summary>
-    public CoastHelper()
+    private static SKImage? LoadAtlas(string name, Dictionary<string, SKRect> rectangles, Dictionary<string, SKPoint> origins)
     {
-        ConfigManager.Instance.Initialize();
-        _coastFolderPath = ConfigManager.Instance.GetTexturePath("MapCoast");
-        _coastGrayLevelFolderPath = ConfigManager.Instance.GetTexturePath("MapCoastGrayLevel");
-        Debug.WriteLine($"[CoastHelper] 海岸线纹理路径: {_coastFolderPath}");
-        Debug.WriteLine($"[CoastHelper] 灰度级海岸线路径: {_coastGrayLevelFolderPath}");
-        LoadCoastConfig();
-        LoadGrayLevelCoastConfig();
-    }
-
-    private void LoadCoastConfig()
-    {
-        var configPath = Path.Combine(_coastFolderPath, "CoastManager.json");
-        if (!File.Exists(configPath))
-        {
-            Debug.WriteLine($"[CoastHelper] 警告: 配置文件不存在: {configPath}");
-            return;
-        }
-
+        rectangles.Clear();
+        origins.Clear();
+        var parser = HdAtlasParser.Get(name);
+        if (parser.SurfaceData == null) return null;
         try
         {
-            var jsonContent = File.ReadAllText(configPath);
-            var config = JsonDocument.Parse(jsonContent);
-
-            if (config.RootElement.TryGetProperty("coast_types", out var typesEl))
+            using var bitmap = ProjectImageDecoder.Decode(parser.SurfaceData);
+            foreach (var definition in parser.ImageDefinitions)
             {
-                _coastTypes = new Dictionary<string, string>();
-                foreach (var prop in typesEl.EnumerateObject())
-                    _coastTypes[prop.Name] = prop.Value.GetString() ?? "";
+                if (definition.X < 0 || definition.Y < 0 || definition.Width <= 0 || definition.Height <= 0 ||
+                    (long)definition.X + definition.Width > bitmap.Width || (long)definition.Y + definition.Height > bitmap.Height) continue;
+                rectangles[definition.Name] = new SKRect(definition.X, definition.Y,
+                    definition.X + definition.Width, definition.Y + definition.Height);
+                origins[definition.Name] = new SKPoint(definition.RefX, definition.RefY);
             }
-
-            if (config.RootElement.TryGetProperty("coast_image_counts", out var countsEl))
-            {
-                _coastImageCounts = new Dictionary<string, int>();
-                foreach (var prop in countsEl.EnumerateObject())
-                    _coastImageCounts[prop.Name] = prop.Value.GetInt32();
-            }
-
-            if (config.RootElement.TryGetProperty("coast_images", out var imagesEl))
-            {
-                _coastImages = new Dictionary<string, string>();
-                foreach (var prop in imagesEl.EnumerateObject())
-                    _coastImages[prop.Name] = prop.Value.GetString() ?? "";
-            }
-
-            if (config.RootElement.TryGetProperty("coast_mapping", out var mappingEl))
-            {
-                _coastMapping = new Dictionary<string, string>();
-                foreach (var prop in mappingEl.EnumerateObject())
-                    _coastMapping[prop.Name] = prop.Value.GetString() ?? "";
-            }
-
-            if (config.RootElement.TryGetProperty("coast_id_offset", out var offsetEl))
-                _coastIdOffset = offsetEl.GetInt32();
-
-            if (config.RootElement.TryGetProperty("coast_atlas", out var atlasEl))
-            {
-                string? atlasImageName = null, atlasConfigName = null;
-                if (atlasEl.TryGetProperty("image", out var imgEl)) atlasImageName = imgEl.GetString();
-                if (atlasEl.TryGetProperty("config", out var cfgEl)) atlasConfigName = cfgEl.GetString();
-                if (!string.IsNullOrEmpty(atlasImageName) && !string.IsNullOrEmpty(atlasConfigName))
-                    LoadAtlasConfig(atlasImageName, atlasConfigName);
-            }
-
-            Debug.WriteLine($"[CoastHelper] 成功加载海岸线配置: {_coastTypes.Count} 种类型, {_coastImages.Count} 张图片, 图集={_coastAtlasLoaded}");
+            return SKImage.FromBitmap(bitmap);
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"[CoastHelper] 加载海岸线配置失败: {ex.Message}");
-        }
-    }
-
-    private void LoadAtlasConfig(string atlasImageName, string atlasConfigName)
-    {
-        var atlasImagePath = Path.Combine(_coastFolderPath, atlasImageName);
-        var atlasConfigPath = Path.Combine(_coastFolderPath, atlasConfigName);
-
-        if (!File.Exists(atlasImagePath))
-        {
-            Debug.WriteLine($"[CoastHelper] 警告: 图集图片不存在: {atlasImagePath}");
-            return;
-        }
-
-        try
-        {
-            using var stream = File.OpenRead(atlasImagePath);
-            _coastAtlasImage = SKImage.FromEncodedData(stream);
-            if (_coastAtlasImage == null) return;
-            Debug.WriteLine($"[CoastHelper] 图集图片已加载: {atlasImagePath} ({_coastAtlasImage.Width}x{_coastAtlasImage.Height})");
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"[CoastHelper] 加载图集图片失败: {ex.Message}");
-            return;
-        }
-
-        if (!File.Exists(atlasConfigPath))
-        {
-            Debug.WriteLine($"[CoastHelper] 警告: 图集配置文件不存在: {atlasConfigPath}");
-            return;
-        }
-
-        try
-        {
-            var rawXml = File.ReadAllText(atlasConfigPath);
-            rawXml = "<root>" + rawXml + "</root>";
-            var xmlDoc = new XmlDocument();
-            xmlDoc.LoadXml(rawXml);
-
-            var imageNodes = xmlDoc.SelectNodes("//Image");
-            if (imageNodes != null)
-            {
-                foreach (XmlNode node in imageNodes)
-                {
-                    if (node.Attributes == null) continue;
-                    var nameAttr = node.Attributes["name"];
-                    var xAttr = node.Attributes["x"];
-                    var yAttr = node.Attributes["y"];
-                    var wAttr = node.Attributes["w"];
-                    var hAttr = node.Attributes["h"];
-                    var refxAttr = node.Attributes["refx"];
-                    var refyAttr = node.Attributes["refy"];
-
-                    if (nameAttr != null && xAttr != null && yAttr != null && wAttr != null && hAttr != null)
-                    {
-                        var spriteName = nameAttr.Value;
-                        var x = int.Parse(xAttr.Value);
-                        var y = int.Parse(yAttr.Value);
-                        var w = int.Parse(wAttr.Value);
-                        var h = int.Parse(hAttr.Value);
-                        var refx = refxAttr != null ? float.Parse(refxAttr.Value) : w / 2f;
-                        var refy = refyAttr != null ? float.Parse(refyAttr.Value) : h / 2f;
-
-                        _coastAtlasSpriteRects[spriteName] = new SKRect(x, y, x + w, y + h);
-                        _coastAtlasSpriteOrigins[spriteName] = new SKPoint(refx, refy);
-                    }
-                }
-            }
-
-            _coastAtlasLoaded = true;
-            Debug.WriteLine($"[CoastHelper] 图集XML已解析: {_coastAtlasSpriteRects.Count} 个精灵");
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"[CoastHelper] 解析图集XML失败: {ex.Message}");
-        }
-    }
-
-    private void LoadGrayLevelCoastConfig()
-    {
-        var xmlPath = Path.Combine(_coastGrayLevelFolderPath, "pm_map.xml");
-        if (File.Exists(xmlPath))
-        {
-            try
-            {
-                var xmlDoc = new XmlDocument();
-                xmlDoc.Load(xmlPath);
-                var spriteNodes = xmlDoc.SelectNodes("//sprite");
-                if (spriteNodes != null)
-                {
-                    foreach (XmlNode node in spriteNodes)
-                    {
-                        if (node.Attributes == null) continue;
-                        var nameAttr = node.Attributes["n"];
-                        var refXAttr = node.Attributes["refx"];
-                        var refYAttr = node.Attributes["refy"];
-                        if (nameAttr != null)
-                        {
-                            _grayLevelCoastImages[nameAttr.Value] = new CoastSpriteInfo
-                            {
-                                Name = nameAttr.Value,
-                                RefX = refXAttr != null ? int.Parse(refXAttr.Value) : 0,
-                                RefY = refYAttr != null ? int.Parse(refYAttr.Value) : 0
-                            };
-                        }
-                    }
-                }
-                Debug.WriteLine($"[CoastHelper] 成功加载灰度级海岸线配置: {_grayLevelCoastImages.Count} 个精灵");
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"[CoastHelper] 加载灰度级海岸线配置失败: {ex.Message}");
-            }
-        }
-
-        LoadGrayLevelAtlasConfig();
-    }
-
-    private void LoadGrayLevelAtlasConfig()
-    {
-        var atlasImagePath = Path.Combine(_coastGrayLevelFolderPath, "coastmask_hd.webp");
-        var atlasConfigPath = Path.Combine(_coastGrayLevelFolderPath, "coastmask_hd.xml");
-
-        if (!File.Exists(atlasImagePath)) return;
-
-        try
-        {
-            using var stream = File.OpenRead(atlasImagePath);
-            _grayLevelAtlasImage = SKImage.FromEncodedData(stream);
-            if (_grayLevelAtlasImage == null) return;
-            Debug.WriteLine($"[CoastHelper] 灰度图图集已加载: ({_grayLevelAtlasImage.Width}x{_grayLevelAtlasImage.Height})");
-        }
-        catch { return; }
-
-        if (!File.Exists(atlasConfigPath)) return;
-
-        try
-        {
-            var rawXml = File.ReadAllText(atlasConfigPath);
-            rawXml = "<root>" + rawXml + "</root>";
-            var xmlDoc = new XmlDocument();
-            xmlDoc.LoadXml(rawXml);
-
-            var imageNodes = xmlDoc.SelectNodes("//Image");
-            if (imageNodes != null)
-            {
-                foreach (XmlNode node in imageNodes)
-                {
-                    if (node.Attributes == null) continue;
-                    var nameAttr = node.Attributes["name"];
-                    var xAttr = node.Attributes["x"];
-                    var yAttr = node.Attributes["y"];
-                    var wAttr = node.Attributes["w"];
-                    var hAttr = node.Attributes["h"];
-                    var refxAttr = node.Attributes["refx"];
-                    var refyAttr = node.Attributes["refy"];
-
-                    if (nameAttr != null && xAttr != null && yAttr != null && wAttr != null && hAttr != null)
-                    {
-                        var spriteName = nameAttr.Value;
-                        var x = int.Parse(xAttr.Value);
-                        var y = int.Parse(yAttr.Value);
-                        var w = int.Parse(wAttr.Value);
-                        var h = int.Parse(hAttr.Value);
-                        var refx = refxAttr != null ? float.Parse(refxAttr.Value) : w / 2f;
-                        var refy = refyAttr != null ? float.Parse(refyAttr.Value) : h / 2f;
-
-                        _grayLevelAtlasSpriteRects[spriteName] = new SKRect(x, y, x + w, y + h);
-                        _grayLevelAtlasSpriteOrigins[spriteName] = new SKPoint(refx, refy);
-                    }
-                }
-            }
-
-            _grayLevelAtlasLoaded = true;
-            Debug.WriteLine($"[CoastHelper] 灰度图图集XML已解析: {_grayLevelAtlasSpriteRects.Count} 个精灵");
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"[CoastHelper] 解析灰度图图集XML失败: {ex.Message}");
-        }
-    }
-
-    public SKImage? GetCoastImageByDoodad(int doodad1Group, int doodad1Id)
-    {
-        if (doodad1Group != 31) return null;
-        var mappingKey = $"{doodad1Group}_{doodad1Id}";
-        if (_coastMapping == null || !_coastMapping.TryGetValue(mappingKey, out var imageFileName))
+            Debug.WriteLine($"[CoastHelper] {name}: {ex.Message}");
             return null;
-
-        string? imageKey = null;
-        foreach (var kvp in _coastImages)
-        {
-            if (kvp.Value == imageFileName) { imageKey = kvp.Key; break; }
         }
-        if (imageKey == null) return null;
-        return LoadCoastImage(imageKey);
     }
 
     public string? GetCoastSpriteName(int doodad1Group, int doodad1Id)
     {
-        var mappingKey = $"{doodad1Group}_{doodad1Id}";
-        if (_coastMapping != null && _coastMapping.TryGetValue(mappingKey, out var spriteName))
-            return spriteName;
-        return null;
+        RefreshResources();
+        if (doodad1Group != 31 || doodad1Id is < 11 or > 73) return null;
+        // Existing coast adjacency rules encode the 63 standard tiles as 11..73.
+        string name = $"coast00{doodad1Id - 10}.png";
+        return _coastAtlasSpriteRects.ContainsKey(name) ? name : null;
     }
 
-    private SKImage? LoadCoastImage(string imageKey)
+    public SKImage? GetCoastImageByDoodad(int group, int id)
     {
-        lock (_coastImageCache)
+        string? name = GetCoastSpriteName(group, id);
+        return name == null ? null : ExtractTile("coast:" + name, _coastAtlasImage, _coastAtlasSpriteRects, name);
+    }
+
+    public SKImage? GetGrayLevelCoastImage(string name)
+    {
+        RefreshResources();
+        return ExtractTile("mask:" + name, _grayLevelAtlasImage, _grayLevelAtlasSpriteRects, name);
+    }
+
+    private SKImage? ExtractTile(string key, SKImage? atlas, Dictionary<string, SKRect> rectangles, string name)
+    {
+        if (_coastImageCache.TryGetValue(key, out var cached)) return cached;
+        if (atlas == null || !rectangles.TryGetValue(name, out var rectangle)) return null;
+        var tile = atlas.Subset(SKRectI.Round(rectangle));
+        if (tile == null) return null;
+        while (_coastImageCache.Count >= MaxCoastImageCacheSize)
         {
-            if (_coastImageCache.TryGetValue(imageKey, out var cached))
-            {
-                _coastImageAccessOrder.Remove(imageKey);
-                _coastImageAccessOrder.Add(imageKey);
-                return cached;
-            }
+            string oldest = _coastImageAccessOrder[0];
+            _coastImageAccessOrder.RemoveAt(0);
+            _coastImageCache.Remove(oldest, out var image);
+            image?.Dispose();
         }
-
-        if (!_coastImages.TryGetValue(imageKey, out var spriteName))
-            return null;
-
-        if (_coastAtlasLoaded && _coastAtlasSpriteRects.ContainsKey(spriteName))
-            return ExtractFromAtlas(imageKey, spriteName);
-
-        return LoadCoastImageFromFile(imageKey, spriteName);
+        _coastImageCache[key] = tile;
+        _coastImageAccessOrder.Add(key);
+        return tile;
     }
 
-    private SKImage? ExtractFromAtlas(string imageKey, string spriteName)
+    public CoastSpriteInfo? GetGrayLevelCoastSpriteInfo(string name)
     {
-        try
-        {
-            var srcRect = _coastAtlasSpriteRects[spriteName];
-            var imgInfo = new SKImageInfo((int)srcRect.Width, (int)srcRect.Height);
-            using var surface = SKSurface.Create(imgInfo);
-            surface.Canvas.DrawImage(_coastAtlasImage!, srcRect, new SKRect(0, 0, srcRect.Width, srcRect.Height));
-            var subImage = surface.Snapshot();
-
-            if (subImage != null)
-            {
-                lock (_coastImageCache)
-                {
-                    _coastImageCache[imageKey] = subImage;
-                    _coastImageAccessOrder.Add(imageKey);
-                    while (_coastImageCache.Count > MaxCoastImageCacheSize)
-                    {
-                        var oldestKey = _coastImageAccessOrder[0];
-                        _coastImageAccessOrder.RemoveAt(0);
-                        if (_coastImageCache.Remove(oldestKey, out var oldest))
-                            oldest?.Dispose();
-                    }
-                }
-            }
-            return subImage;
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"[CoastHelper] 从图集提取子图失败 [{spriteName}]: {ex.Message}");
-            return null;
-        }
+        RefreshResources();
+        return _grayLevelAtlasSpriteOrigins.TryGetValue(name, out var origin)
+            ? new CoastSpriteInfo { Name = name, RefX = (int)origin.X, RefY = (int)origin.Y } : null;
     }
 
-    private SKImage? LoadCoastImageFromFile(string imageKey, string fileName)
-    {
-        var filePath = Path.Combine(_coastFolderPath, fileName);
-        if (!File.Exists(filePath)) return null;
-
-        try
-        {
-            using var stream = File.OpenRead(filePath);
-            var image = SKImage.FromEncodedData(stream);
-            if (image != null)
-            {
-                lock (_coastImageCache)
-                {
-                    _coastImageCache[imageKey] = image;
-                    _coastImageAccessOrder.Add(imageKey);
-                    while (_coastImageCache.Count > MaxCoastImageCacheSize)
-                    {
-                        var oldestKey = _coastImageAccessOrder[0];
-                        _coastImageAccessOrder.RemoveAt(0);
-                        if (_coastImageCache.Remove(oldestKey, out var oldest))
-                            oldest?.Dispose();
-                    }
-                }
-            }
-            return image;
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"[CoastHelper] 加载图片失败: {filePath} - {ex.Message}");
-            return null;
-        }
-    }
-
-    public SKImage? GetGrayLevelCoastImage(string spriteName)
-    {
-        lock (_coastImageCache)
-        {
-            if (_coastImageCache.TryGetValue(spriteName, out var cached))
-            {
-                _coastImageAccessOrder.Remove(spriteName);
-                _coastImageAccessOrder.Add(spriteName);
-                return cached;
-            }
-        }
-
-        if (_grayLevelAtlasLoaded && _grayLevelAtlasSpriteRects.ContainsKey(spriteName))
-            return ExtractFromGrayLevelAtlas(spriteName);
-
-        var filePath = Path.Combine(_coastGrayLevelFolderPath, spriteName);
-        if (!File.Exists(filePath)) return null;
-
-        try
-        {
-            using var stream = File.OpenRead(filePath);
-            var image = SKImage.FromEncodedData(stream);
-            if (image != null)
-            {
-                lock (_coastImageCache)
-                {
-                    _coastImageCache[spriteName] = image;
-                    _coastImageAccessOrder.Add(spriteName);
-                    while (_coastImageCache.Count > MaxCoastImageCacheSize)
-                    {
-                        var oldestKey = _coastImageAccessOrder[0];
-                        _coastImageAccessOrder.RemoveAt(0);
-                        if (_coastImageCache.Remove(oldestKey, out var oldest))
-                            oldest?.Dispose();
-                    }
-                }
-            }
-            return image;
-        }
-        catch { return null; }
-    }
-
-    private SKImage? ExtractFromGrayLevelAtlas(string spriteName)
-    {
-        try
-        {
-            var srcRect = _grayLevelAtlasSpriteRects[spriteName];
-            var imgInfo = new SKImageInfo((int)srcRect.Width, (int)srcRect.Height);
-            using var surface = SKSurface.Create(imgInfo);
-            surface.Canvas.DrawImage(_grayLevelAtlasImage!, srcRect, new SKRect(0, 0, srcRect.Width, srcRect.Height));
-            var subImage = surface.Snapshot();
-
-            if (subImage != null)
-            {
-                lock (_coastImageCache)
-                {
-                    _coastImageCache[spriteName] = subImage;
-                    _coastImageAccessOrder.Add(spriteName);
-                    while (_coastImageCache.Count > MaxCoastImageCacheSize)
-                    {
-                        var oldestKey = _coastImageAccessOrder[0];
-                        _coastImageAccessOrder.RemoveAt(0);
-                        if (_coastImageCache.Remove(oldestKey, out var oldest))
-                            oldest?.Dispose();
-                    }
-                }
-            }
-            return subImage;
-        }
-        catch { return null; }
-    }
-
-    public CoastSpriteInfo? GetGrayLevelCoastSpriteInfo(string spriteName)
-    {
-        return _grayLevelCoastImages.TryGetValue(spriteName, out var info) ? info : null;
-    }
-
-    public List<string> GetGrayLevelSpriteNames()
-    {
-        if (_grayLevelAtlasLoaded)
-            return _grayLevelAtlasSpriteRects.Keys.ToList();
-        return _grayLevelCoastImages.Keys.ToList();
-    }
-
-    public SKImage? GetCoastAtlasImage() => _coastAtlasImage;
-
-    public SKRect? GetCoastAtlasSpriteRect(string spriteName)
-    {
-        return _coastAtlasSpriteRects.TryGetValue(spriteName, out var rect) ? rect : null;
-    }
-
-    public SKPoint? GetCoastAtlasSpriteOrigin(string spriteName)
-    {
-        return _coastAtlasSpriteOrigins.TryGetValue(spriteName, out var origin) ? origin : null;
-    }
+    public List<string> GetGrayLevelSpriteNames() { RefreshResources(); return _grayLevelAtlasSpriteRects.Keys.ToList(); }
+    public SKImage? GetCoastAtlasImage() { RefreshResources(); return _coastAtlasImage; }
+    public SKRect? GetCoastAtlasSpriteRect(string name) { RefreshResources(); return _coastAtlasSpriteRects.TryGetValue(name, out var rect) ? rect : null; }
+    public SKPoint? GetCoastAtlasSpriteOrigin(string name) { RefreshResources(); return _coastAtlasSpriteOrigins.TryGetValue(name, out var origin) ? origin : null; }
 
     public SKImage? GetHexagonCoastImage(string spriteName)
     {
+        RefreshResources();
         lock (_hexagonCoastCache)
         {
             if (_hexagonCoastCache.TryGetValue(spriteName, out var cached))
@@ -561,7 +166,7 @@ public sealed class CoastHelper
             float centerX = width / 2f;
             float centerY = height / 2f;
 
-            var hexPath = new SKPath();
+            using var hexPath = new SKPath();
             hexPath.MoveTo(centerX - hexSide / 2, verticalMargin);
             hexPath.LineTo(centerX + hexSide / 2, verticalMargin);
             hexPath.LineTo(centerX + hexSide, centerY);
@@ -604,6 +209,7 @@ public sealed class CoastHelper
 
     public void PreGenerateAllHexagonCoasts(Action<int, string>? progressCallback)
     {
+        RefreshResources();
         if (!_coastAtlasLoaded)
         {
             progressCallback?.Invoke(100, "图集未加载，跳过六边形裁剪");
@@ -634,12 +240,20 @@ public sealed class CoastHelper
 
     public void ClearCache()
     {
-        lock (_coastImageCache)
-        {
-            foreach (var image in _coastImageCache.Values)
-                image?.Dispose();
-            _coastImageCache.Clear();
-            _coastImageAccessOrder.Clear();
-        }
+        foreach (var image in _coastImageCache.Values) image.Dispose();
+        _coastImageCache.Clear();
+        _coastImageAccessOrder.Clear();
+        foreach (var image in _hexagonCoastCache.Values) image.Dispose();
+        _hexagonCoastCache.Clear();
+        _hexagonCoastAccessOrder.Clear();
+    }
+
+    public void Dispose()
+    {
+        ClearCache();
+        _coastAtlasImage?.Dispose(); _coastAtlasImage = null;
+        _grayLevelAtlasImage?.Dispose(); _grayLevelAtlasImage = null;
+        _coastAtlasLoaded = _grayLevelAtlasLoaded = false;
+        _revision = -1;
     }
 }

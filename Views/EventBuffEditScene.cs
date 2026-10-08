@@ -14,8 +14,17 @@ namespace WC4MapEditor.Views;
 /// 事件 Buff 编辑场景（对应 Python 工具中的 EventBuff 编辑器）。
 /// 列表 + 属性面板完整 CRUD；描述写入 stringtable 的 event_buff_desc_{Id}（带 Type 回退）。
 /// </summary>
-public class EventBuffEditScene : UserControl
+public class EventBuffEditScene : UserControl, IUnsavedScene
 {
+    public bool HasUnsavedChanges => _parser.HasChanges;
+    public bool SaveChanges()
+    {
+        if (_parser.SaveAll()) return true;
+        MessageBox.Show(_parser.LastError ?? "保存失败，修改仍保留。", "保存失败", MessageBoxButton.OK, MessageBoxImage.Error);
+        return false;
+    }
+    public void DiscardChanges() => _parser.Reload();
+
     private readonly MainWindow _window;
     private readonly EventBuffSettingParser _parser = EventBuffSettingParser.Instance;
 

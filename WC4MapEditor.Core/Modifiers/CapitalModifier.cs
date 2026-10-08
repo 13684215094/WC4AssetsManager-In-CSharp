@@ -36,7 +36,7 @@ public sealed class CapitalModifier : ModifierBase
     public ModifierResult AddCapital(int hexIndex)
     {
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
-        if (hexIndex < 0 || hexIndex >= _mapData.MapWidth * _mapData.MapHeight)
+        if (!_mapData.TryGetLocalCoordinate(hexIndex, out _))
             return ModifierResult.Fail("坐标超出范围");
 
         // 不能用 FirstOrDefault 判重复：没找到时返回 default(Capital)，Coordinate 为 0，
@@ -70,6 +70,7 @@ public sealed class CapitalModifier : ModifierBase
     public ModifierResult ToggleCapital(int hexIndex)
     {
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
+        if (!_mapData.TryGetLocalCoordinate(hexIndex, out _)) return ModifierResult.Fail("坐标超出范围");
 
         for (int i = 0; i < _mapData.Capitals.Count; i++)
         {
@@ -91,13 +92,13 @@ public sealed class CapitalModifier : ModifierBase
     public override ModifierResult Apply(int col, int row, object? parameter = null)
     {
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
-        return AddCapital(row * _mapData.MapWidth + col);
+        return AddCapital(_mapData.ToRecordCoordinate(col, row));
     }
 
     public override ModifierResult Remove(int col, int row)
     {
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
-        return RemoveCapital(row * _mapData.MapWidth + col);
+        return RemoveCapital(_mapData.ToRecordCoordinate(col, row));
     }
 
     public override bool CanApply(int col, int row) => CanTouch(col, row);
@@ -111,13 +112,12 @@ public sealed class CapitalModifier : ModifierBase
     public override object? GetDataAt(int col, int row)
     {
         if (_mapData == null) return null;
-        return GetCapitalAtPosition(row * _mapData.MapWidth + col);
+        return GetCapitalAtPosition(_mapData.ToRecordCoordinate(col, row));
     }
 
     public override bool SetDataAt(int col, int row, object data)
     {
         if (_mapData == null || data is not Capital) return false;
-        AddCapital(row * _mapData.MapWidth + col);
-        return true;
+        return AddCapital(_mapData.ToRecordCoordinate(col, row)).Success;
     }
 }

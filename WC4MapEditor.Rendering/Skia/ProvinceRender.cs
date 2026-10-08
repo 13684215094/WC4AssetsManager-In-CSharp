@@ -1,8 +1,10 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
 using SkiaSharp;
-using WC4MapEditor.Core.Config;
+using WC4MapEditor.Core.Assets;
+using WC4MapEditor.Rendering.Imaging;
 using WC4MapEditor.Core.Models;
 
 namespace WC4MapEditor.Rendering.Skia;
@@ -25,6 +27,7 @@ public class ProvinceRender : IDisposable
     private bool _disposed;
 
     private SKBitmap? _capitalImage;
+    private long _capitalRevision = -1;
     private readonly object _capitalImageLock = new();
     private readonly Dictionary<int, SKBitmap> _capitalTileCache = new();
     private readonly object _capitalTileCacheLock = new();
@@ -149,7 +152,7 @@ public class ProvinceRender : IDisposable
         for (int col = startCol; col <= endCol; col++)
         {
             double centerX = offsetX + col * hexSpacingX;
-            double rowOffsetY = offsetY + (col % 2) * (hexSpacingY / 2);
+            double rowOffsetY = offsetY + (mapData.IsOddColumn(col) ? 1 : 0) * (hexSpacingY / 2);
 
             for (int row = startRow; row <= endRow; row++)
             {
@@ -172,7 +175,7 @@ public class ProvinceRender : IDisposable
                 if (enableCapital && capitalDrawCalls != null)
                 {
                     int index = row * mapData.MapWidth + col;
-                    if (provinceId == index)
+                    if (provinceId == mapData.ToRecordCoordinate(col, row))
                         capitalDrawCalls.Add(((float)centerX, (float)centerY));
                 }
             }
@@ -236,21 +239,22 @@ public class ProvinceRender : IDisposable
     {
         lock (_capitalImageLock)
         {
+            if (_capitalRevision != AssetManager.Default.Revision)
+            {
+                _capitalImage?.Dispose(); _capitalImage = null;
+                lock (_capitalTileCacheLock)
+                {
+                    foreach (var tile in _capitalTileCache.Values) tile.Dispose();
+                    _capitalTileCache.Clear();
+                }
+                _capitalRevision = AssetManager.Default.Revision;
+            }
             if (_capitalImage != null) return _capitalImage;
 
             try
             {
-                string imagePath = ConfigManager.Instance.GetProvinceCapitalImagePath();
-                if (!File.Exists(imagePath))
-                {
-                    Debug.WriteLine($"[ProvinceRender] 省会标记图片不存在: {imagePath}");
-                    return null;
-                }
-
-                using var stream = File.OpenRead(imagePath);
-                _capitalImage = SKBitmap.Decode(stream);
-
-                Debug.WriteLine($"[ProvinceRender] 加载省会标记图片: {imagePath}");
+                using var sprites = new ProjectSpriteLoader();
+                _capitalImage = sprites.Load("city_point1.png", "tacticalmap");
                 return _capitalImage;
             }
             catch (Exception ex)
@@ -303,11 +307,11 @@ public class ProvinceRender : IDisposable
     {
         // paint 由调用方复用（Style 已为 Stroke、StrokeWidth 已设好），这里只更新颜色，
         // 避免可视范围内逐格 new SKPaint。
-        paint.Color = GetBorderColor(provinceValue, belongs, legions);
+        paint.Color = GetBorderColor(provinceValue, mapData, legions);
 
         for (int edgeIndex = 0; edgeIndex < 6; edgeIndex++)
         {
-            GetNeighbor(col, row, edgeIndex, out int neighborCol, out int neighborRow);
+            GetNeighbor(mapData, col, row, edgeIndex, out int neighborCol, out int neighborRow);
 
             if (neighborCol >= 0 && neighborCol < mapData.MapWidth &&
                 neighborRow >= 0 && neighborRow < mapData.MapHeight)
@@ -335,12 +339,12 @@ public class ProvinceRender : IDisposable
         }
     }
 
-    private static void GetNeighbor(int col, int row, int edgeIndex, out int neighborCol, out int neighborRow)
+    private static void GetNeighbor(MapData mapData, int col, int row, int edgeIndex, out int neighborCol, out int neighborRow)
     {
         neighborCol = -1;
         neighborRow = -1;
 
-        if (col % 2 == 0)
+        if (!mapData.IsOddColumn(col))
         {
             switch (edgeIndex)
             {
@@ -375,11 +379,11 @@ public class ProvinceRender : IDisposable
         return new SKColor(r, g, b, PROVINCE_ALPHA);
     }
 
-    private static SKColor GetBorderColor(int provinceValue, List<string>? belongs, ObservableCollection<Legion>? legions)
+    private static SKColor GetBorderColor(int provinceValue, MapData map, ObservableCollection<Legion>? legions)
     {
         var borderColor = SKColors.Black;
 
-        int? capitalBelongValue = GetCapitalBelongValue(provinceValue, belongs);
+        int? capitalBelongValue = provinceValue is 0 or 0xFFFF ? null : map.GetBelongAtRecordCoordinate(provinceValue);
         if (capitalBelongValue.HasValue)
         {
             var legionColor = GetLegionColor(capitalBelongValue.Value, legions);

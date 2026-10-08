@@ -39,6 +39,12 @@ public sealed class CommandManager
 
     public void UnregisterCommand(string name) => _commands.Remove(name);
 
+    public void UnregisterCommand(string name, Action<string[]> expectedHandler)
+    {
+        if (_commands.TryGetValue(name, out var entry) && entry.Execute == expectedHandler)
+            _commands.Remove(name);
+    }
+
     /// <summary>
     /// 判断一行输入的首个词是否为已注册命令。
     /// 供脚本批量执行时先做判别：未注册的命令直接交给命令宿主，

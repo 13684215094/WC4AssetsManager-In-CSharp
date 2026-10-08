@@ -4,15 +4,15 @@ using System.Xml;
 namespace WC4MapEditor.Core.Config;
 
 /// <summary>
-/// 地形定义解析器：解析 WC4DATA/assets/config/def_mapterrain.xml。
+/// 地形定义解析器：解析当前项目 assets/config/def_mapterrain.xml。
 /// <para>
 /// 该文件是游戏对地形的<b>权威定义</b>，与 Java 版 ResConfig.Config.TERRAINIDS
 /// （即 DefDAO.getAllTerrainIds）同源 —— 校验地形组 ID 时应当以它为准，
-/// 而不是 Texture/MapTerrian/manager.json（后者只是贴图文件的映射表）。
+/// 地形定义同时指定当前项目的贴图名称和变体。
 /// </para>
 /// <para>
 /// 本类只负责<b>解析</b>。文件内容的获取由调用方通过 <c>AssetManager</c> 完成 ——
-/// AssetManager 的职责是定位并读取 WC4DATA 内的资源，不应理解 XML 的语义。
+/// AssetManager 的职责是定位并读取用户选择的项目资源，不应理解 XML 的语义。
 /// </para>
 /// </summary>
 public static class DefMapTerrainParser
@@ -65,7 +65,8 @@ public static class DefMapTerrainParser
                     Terrain = terrain,
                     Type = type,
                     Name = node.Attributes["name"]?.Value ?? "",
-                    TileCount = node.SelectNodes("tile")?.Count ?? 0
+                    TileCount = node.SelectNodes("tile")?.Count ?? 0,
+                    TileImages = ReadTileImages(node)
                 });
             }
 
@@ -88,6 +89,15 @@ public static class DefMapTerrainParser
     /// </summary>
     public static HashSet<int> ToGroupIdSet(IEnumerable<MapTerrainEntry> entries)
         => entries.Select(e => e.Terrain).ToHashSet();
+
+    private static IReadOnlyDictionary<int, string> ReadTileImages(XmlNode terrain)
+    {
+        var images = new Dictionary<int, string>();
+        foreach (XmlNode tile in terrain.SelectNodes("tile")!)
+            if (int.TryParse(tile.Attributes?["idx"]?.Value, out int index) && tile.Attributes?["image"]?.Value is { Length: > 0 } image)
+                images[index] = image;
+        return images;
+    }
 }
 
 /// <summary>def_mapterrain.xml 中的一条地形定义</summary>
@@ -104,4 +114,5 @@ public sealed class MapTerrainEntry
 
     /// <summary>变体数量（子元素 tile 的个数），相当于 Java 版的 TERRAINIMGIDMAX</summary>
     public int TileCount { get; init; }
+    public IReadOnlyDictionary<int, string> TileImages { get; init; } = new Dictionary<int, string>();
 }

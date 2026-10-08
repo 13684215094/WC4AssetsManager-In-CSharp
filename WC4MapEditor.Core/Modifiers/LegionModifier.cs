@@ -718,7 +718,7 @@ public sealed class LegionModifier : ModifierBase
             }
             sb.AppendLine("]");
 
-            File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+            WC4MapEditor.Core.Parsers.AtomicFile.Write(path, new UTF8Encoding(false).GetBytes(sb.ToString()));
             Debug.WriteLine($"[LegionModifier] 已写回 {countrySettings.Count} 条征服国家配置 -> {path}");
             return true;
         }

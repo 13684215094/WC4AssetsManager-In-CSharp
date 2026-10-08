@@ -1,4 +1,5 @@
 using System.Text;
+using System.Net;
 
 namespace WC4MapEditor.Core.Parsers.Layout;
 
@@ -83,7 +84,7 @@ public class LayoutDocument
             if (lt > i)
             {
                 var t = text.Substring(i, lt - i).Trim();
-                if (t.Length > 0) cur.Text = (cur.Text ?? "") + t;
+                if (t.Length > 0) cur.Text = (cur.Text ?? "") + WebUtility.HtmlDecode(t);
             }
 
             if (lt + 1 < n && text[lt + 1] == '?')
@@ -146,6 +147,7 @@ public class LayoutDocument
 
         void PushAttr(string name, string val)
         {
+            val = WebUtility.HtmlDecode(val);
             for (int idx = 0; idx < node.Attributes.Count; idx++)
             {
                 if (string.Equals(node.Attributes[idx].Key, name, StringComparison.Ordinal))
@@ -258,7 +260,7 @@ public class LayoutDocument
             node.Items = new List<LayoutNode>();
             for (int i = 0; i < count; i++)
             {
-                var cell = new LayoutNode { Tag = "#cell", IsVirtual = true, Owner = node, IsCell = true };
+                var cell = new LayoutNode { Tag = "#cell", IsVirtual = true, Owner = node, Parent = node, IsCell = true };
                 foreach (var c in node.Children)
                 {
                     var cc = c.CloneVirtual(node);

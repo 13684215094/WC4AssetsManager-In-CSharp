@@ -25,13 +25,14 @@ public interface IModifier
 public readonly struct ModifierResult
 {
     public bool Success { get; }
-    public string? Message { get; }
+    private readonly string? _message;
+    public string Message => _message ?? string.Empty;
     public int AffectedCount { get; }
 
     public ModifierResult(bool success, string? message = null, int affectedCount = 0)
     {
         Success = success;
-        Message = message;
+        _message = message;
         AffectedCount = affectedCount;
     }
 

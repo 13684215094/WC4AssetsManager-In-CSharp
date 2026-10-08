@@ -29,20 +29,21 @@ public class StageRenderScene : RenderSceneBase
             var dlg = new OpenFileDialog
             {
                 Filter = "战役文件 (*.btl)|*.btl|所有文件 (*.*)|*.*",
-                Title = "打开战役地图文件"
+                Title = "打开战役地图文件",
+                InitialDirectory = MapInitialDirectory
             };
             if (dlg.ShowDialog() != true) return null;
             path = dlg.FileName;
         }
 
-        return StageParser.LoadToMapData(path);
+        return StageParser.LoadToMapData(ResolveMapInputPath(path));
     }
 
     protected override bool SaveMapData(MapData mapData, string outputPath)
         => StageParser.SaveFromMapData(mapData, outputPath);
 
     protected override MapData? ReloadMapData(string filePath)
-        => StageParser.LoadToMapData(filePath);
+        => StageParser.LoadToMapData(ResolveMapInputPath(filePath));
 
     protected override void InitializeRenderers()
     {

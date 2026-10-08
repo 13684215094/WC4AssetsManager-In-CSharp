@@ -1,3 +1,4 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Globalization;
@@ -34,11 +35,8 @@ public sealed class ConfigManager
     private string _resourcePath = "";
     private bool _isInitialized;
 
-    private MusicConfig? _musicConfig;
     private SettingTxtData? _settingData;
-    private Dictionary<int, string> _terrainTypes = new();
-    private Dictionary<string, string> _terrainMapping = new();
-    private Dictionary<string, int> _terrainImageCounts = new();
+    private long _gameLookupRevision = -1;
     private List<MapTerrainEntry>? _mapTerrainEntries;
     private HashSet<int>? _buildingTypeIds;
     private HashSet<int>? _armyTypeIds;
@@ -65,10 +63,7 @@ public sealed class ConfigManager
         Debug.WriteLine($"[ConfigManager] Resource path: {_resourcePath}");
 
         LoadSettingFile();
-        LoadMusicConfig();
         LoadConfigFiles();
-        LoadDataFiles();
-        LoadTerrainTypes();
         LoadTacticalMap();
 
         _isInitialized = true;
@@ -76,7 +71,7 @@ public sealed class ConfigManager
     }
 
     private string DetectResourcePath()
-        => FindRuntimePath("Resource");
+        => FindRuntimePath("EditorResources");
 
     private static string FindRuntimePath(string name)
     {
@@ -87,7 +82,7 @@ public sealed class ConfigManager
         for (int depth = 0; directory != null && depth < 8; depth++, directory = directory.Parent)
         {
             string candidate = IOPath.Combine(directory.FullName, name);
-            if (Directory.Exists(candidate) || File.Exists(candidate)) return candidate;
+            if (ProjectFile.DirectoryExists(candidate) || ProjectFile.Exists(candidate)) return candidate;
         }
         return IOPath.Combine(baseDir, name);
     }
@@ -98,13 +93,13 @@ public sealed class ConfigManager
         {
             string configPath = FindRuntimePath("setting.txt");
 
-            if (!File.Exists(configPath))
+            if (!ProjectFile.Exists(configPath))
             {
                 Debug.WriteLine($"[ConfigManager] setting.txt not found: {configPath}");
                 return;
             }
 
-            var lines = File.ReadAllLines(configPath);
+            var lines = ProjectFile.ReadAllLines(configPath);
             _settingData = SettingTxtParser.Parse(lines);
 
             // 将解析后的文本配置合并到 ConfigManager 的字典中
@@ -124,23 +119,12 @@ public sealed class ConfigManager
         }
     }
 
-    private void LoadMusicConfig()
-    {
-        try
-        {
-            string path = IOPath.Combine(_resourcePath, "Music", "WindowMusic.json");
-            if (File.Exists(path))
-                _musicConfig = JsonSerializer.Deserialize<MusicConfig>(File.ReadAllText(path));
-        }
-        catch { }
-    }
-
     private void LoadConfigFiles()
     {
         try
         {
             string configPath = IOPath.Combine(_resourcePath, "Config");
-            if (!Directory.Exists(configPath))
+            if (!ProjectFile.DirectoryExists(configPath))
             {
                 Debug.WriteLine($"[ConfigManager] Config 目录不存在: {configPath}");
                 return;
@@ -165,13 +149,13 @@ public sealed class ConfigManager
         try
         {
             string filePath = IOPath.Combine(configPath, "GeneralInCountry.json");
-            if (!File.Exists(filePath))
+            if (!ProjectFile.Exists(filePath))
             {
                 Debug.WriteLine("[ConfigManager] GeneralInCountry.json 不存在");
                 return;
             }
 
-            var json = File.ReadAllText(filePath);
+            var json = ProjectFile.ReadAllText(filePath);
             _generalInCountryData = JsonSerializer.Deserialize<List<CountryGeneralsConfig>>(json);
 
             Debug.WriteLine($"[ConfigManager] 加载了 {_generalInCountryData?.Count ?? 0} 个国家将领配置");
@@ -187,13 +171,13 @@ public sealed class ConfigManager
         try
         {
             string filePath = IOPath.Combine(configPath, "LegionLvSetting.json");
-            if (!File.Exists(filePath))
+            if (!ProjectFile.Exists(filePath))
             {
                 Debug.WriteLine("[ConfigManager] LegionLvSetting.json 不存在");
                 return;
             }
 
-            var json = File.ReadAllText(filePath);
+            var json = ProjectFile.ReadAllText(filePath);
             _legionLvSettingData = JsonSerializer.Deserialize<List<LegionLevelConfig>>(json);
 
             Debug.WriteLine($"[ConfigManager] 加载了 {_legionLvSettingData?.Count ?? 0} 个军团等级配置");
@@ -209,13 +193,13 @@ public sealed class ConfigManager
         try
         {
             string filePath = IOPath.Combine(configPath, "MaxFormation.json");
-            if (!File.Exists(filePath))
+            if (!ProjectFile.Exists(filePath))
             {
                 Debug.WriteLine("[ConfigManager] MaxFormation.json 不存在");
                 return;
             }
 
-            var json = File.ReadAllText(filePath);
+            var json = ProjectFile.ReadAllText(filePath);
             _maxFormationData = JsonSerializer.Deserialize<List<MaxFormationConfig>>(json);
 
             Debug.WriteLine($"[ConfigManager] 加载了 {_maxFormationData?.Count ?? 0} 个最大编队配置");
@@ -231,13 +215,13 @@ public sealed class ConfigManager
         try
         {
             string filePath = IOPath.Combine(configPath, "GeneralRandomTemplates.json");
-            if (!File.Exists(filePath))
+            if (!ProjectFile.Exists(filePath))
             {
                 Debug.WriteLine("[ConfigManager] GeneralRandomTemplates.json 不存在");
                 return;
             }
 
-            var json = File.ReadAllText(filePath);
+            var json = ProjectFile.ReadAllText(filePath);
             _generalRandomTemplates = JsonSerializer.Deserialize<List<GeneralRandomTemplate>>(json);
 
             Debug.WriteLine($"[ConfigManager] 加载了 {_generalRandomTemplates?.Count ?? 0} 个将领随机参数模板");
@@ -253,13 +237,13 @@ public sealed class ConfigManager
         try
         {
             string filePath = IOPath.Combine(configPath, "GeneralSpecialtyTemplates.json");
-            if (!File.Exists(filePath))
+            if (!ProjectFile.Exists(filePath))
             {
                 Debug.WriteLine("[ConfigManager] GeneralSpecialtyTemplates.json 不存在");
                 return;
             }
 
-            var json = File.ReadAllText(filePath);
+            var json = ProjectFile.ReadAllText(filePath);
             _generalSpecialtyTemplates = JsonSerializer.Deserialize<List<GeneralSpecialtyTemplate>>(json);
 
             Debug.WriteLine($"[ConfigManager] 加载了 {_generalSpecialtyTemplates?.Count ?? 0} 个兵种专长模板");
@@ -270,83 +254,32 @@ public sealed class ConfigManager
         }
     }
 
-    private void LoadDataFiles()
-    {
-        try
-        {
-            var am = Assets.AssetManager.Default;
-            if (!am.IsLoaded)
-            {
-                string assetsPath = Assets.AssetManager.GetDefaultAssetsPath();
-                if (Directory.Exists(assetsPath))
-                    am.Scan(assetsPath);
-            }
-
-            if (am.IsLoaded)
-                Debug.WriteLine("[ConfigManager] Data 文件将通过 AssetManager 按需加载");
-            else
-                Debug.WriteLine("[ConfigManager] AssetManager 未扫描，Data 文件不可用");
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"[ConfigManager] 初始化 AssetManager 失败: {ex.Message}");
-        }
-    }
-
-    private void LoadTerrainTypes()
-    {
-        try
-        {
-            string path = IOPath.Combine(_resourcePath, "Texture", "MapTerrian", "manager.json");
-            if (File.Exists(path))
-            {
-                var doc = JsonDocument.Parse(File.ReadAllText(path));
-
-                if (doc.RootElement.TryGetProperty("terrain_types", out var types))
-                {
-                    foreach (var prop in types.EnumerateObject())
-                    {
-                        if (int.TryParse(prop.Name, out int id))
-                            _terrainTypes[id] = prop.Value.GetString() ?? "";
-                    }
-                }
-
-                if (doc.RootElement.TryGetProperty("terrain_mapping", out var mapping))
-                {
-                    foreach (var prop in mapping.EnumerateObject())
-                        _terrainMapping[prop.Name] = prop.Value.GetString() ?? "";
-                }
-
-                if (doc.RootElement.TryGetProperty("terrain_image_counts", out var counts))
-                {
-                    foreach (var prop in counts.EnumerateObject())
-                    {
-                        if (prop.Value.ValueKind == JsonValueKind.Number)
-                            _terrainImageCounts[prop.Name] = prop.Value.GetInt32();
-                    }
-                }
-            }
-        }
-        catch { }
-    }
-
     public string GetTerrainTypeName(int terrainId)
-    {
-        if (!_isInitialized) Initialize();
-        return _terrainTypes.TryGetValue(terrainId, out var name) ? name : $"未知({terrainId})";
-    }
+        => GetMapTerrainEntries().LastOrDefault(entry => entry.Terrain == terrainId)?.Name ?? $"未知({terrainId})";
 
     public Dictionary<int, string> GetTerrainTypes()
+        => GetMapTerrainEntries().GroupBy(entry => entry.Terrain)
+            .ToDictionary(group => group.Key, group => group.Last().Name);
+
+    private void EnsureCurrentGameLookups()
     {
-        if (!_isInitialized) Initialize();
-        return new Dictionary<int, string>(_terrainTypes);
+        long revision = Assets.AssetManager.Default.Revision;
+        if (_gameLookupRevision == revision) return;
+        _mapTerrainEntries = null;
+        _buildingTypeIds = null;
+        _armyTypeIds = null;
+        _countryIds = null;
+        _armyLevels = null;
+        _rankIds = null;
+        _qualityIds = null;
+        _gameLookupRevision = revision;
     }
 
     /// <summary>
     /// 地形定义列表，来自 assets/config/def_mapterrain.xml —— 游戏对地形的<b>权威定义</b>，
     /// 与 Java 版 ResConfig.Config.TERRAINIDS 同源。
     /// <para>
-    /// 职责划分：由 <c>AssetManager</c> 负责定位并读取 WC4DATA 内的文件，
+    /// 职责划分：由 <c>AssetManager</c> 负责定位并读取当前项目内的文件，
     /// 由 <see cref="DefMapTerrainParser"/> 负责解析 XML 语义。
     /// 资源未扫描或文件缺失时返回空列表，让调用方<b>跳过</b>地形检查，
     /// 而不是把「取不到配置」误判成「所有 ID 都非法」。
@@ -355,6 +288,7 @@ public sealed class ConfigManager
     public IReadOnlyList<MapTerrainEntry> GetMapTerrainEntries()
     {
         if (!_isInitialized) Initialize();
+        EnsureCurrentGameLookups();
         if (_mapTerrainEntries != null) return _mapTerrainEntries;
 
         _mapTerrainEntries = new List<MapTerrainEntry>();
@@ -362,12 +296,6 @@ public sealed class ConfigManager
         try
         {
             var am = Assets.AssetManager.Default;
-            if (!am.IsLoaded)
-            {
-                string assetsPath = Assets.AssetManager.GetDefaultAssetsPath();
-                if (Directory.Exists(assetsPath)) am.Scan(assetsPath);
-            }
-
             var entry = am.Find(DefMapTerrainParser.AssetPath);
             if (entry == null)
             {
@@ -430,6 +358,7 @@ public sealed class ConfigManager
     private HashSet<int> LoadIdSet(string assetPath, Func<string, HashSet<int>> parse, ref HashSet<int>? cache)
     {
         if (!_isInitialized) Initialize();
+        EnsureCurrentGameLookups();
         if (cache != null) return cache;
 
         cache = [];
@@ -437,12 +366,6 @@ public sealed class ConfigManager
         try
         {
             var am = Assets.AssetManager.Default;
-            if (!am.IsLoaded)
-            {
-                string assetsPath = Assets.AssetManager.GetDefaultAssetsPath();
-                if (Directory.Exists(assetsPath)) am.Scan(assetsPath);
-            }
-
             var entry = am.Find(assetPath);
             if (entry == null)
             {
@@ -461,30 +384,16 @@ public sealed class ConfigManager
     }
 
     /// <summary>
-    /// 读取配置文件文本，自动判断编码。
-    /// <para>
-    /// WC4DATA/assets/config 下的 xml 目前是 <b>GBK</b> 编码 —— 例如「平原」的字节是
-    /// <c>C6 BD D4 AD</c>，按 UTF-8 解会得到乱码（实测：解成 U+01BD U+052D）。
-    /// 这里先按 UTF-8 解；若出现替换字符 U+FFFD 就说明不是 UTF-8，再尝试 GB18030。
-    /// <para>
-    /// 注意：GBK / GB18030 依赖 <c>CodePagesEncodingProvider</c>，本项目并未注册
-    /// （也不含 System.Text.Encoding.CodePages 包），因此该尝试会抛异常并退回 UTF-8 结果。
-    /// 结果是<b>中文地形名会乱码，但组 ID 与类型都是 ASCII 数字，不受任何影响</b> ——
-    /// 校验只依赖组 ID，所以功能完全正确。
-    /// 若将来要显示正确的中文名，需引入该包并注册提供程序。
-    /// </para>
+    /// 读取 UTF-8 或 GBK/GB18030 配置，保留所选项目的中文地形名称。
     /// </summary>
     private static string ReadConfigText(Assets.AssetManager am, Assets.AssetEntry entry)
     {
         string utf8 = am.ReadText(entry, Encoding.UTF8);
         if (!utf8.Contains('\uFFFD')) return utf8;
 
-        // 不是 UTF-8：这批配置文件是 GBK。
-        // 注意 GBK/GB18030 依赖 CodePagesEncodingProvider，未注册时会抛异常 ——
-        // 此时必须退回 UTF-8 结果，绝不能让异常把整个解析打断：
-        // 组 ID / 类型都是 ASCII 数字，任何单字节解码都拿得到，只有中文名会乱码。
         try
         {
+            Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
             return am.ReadText(entry, Encoding.GetEncoding("GB18030"));
         }
         catch
@@ -494,25 +403,14 @@ public sealed class ConfigManager
     }
 
     public int GetTerrainVariantCount(int terrainId)
-    {
-        if (!_isInitialized) Initialize();
-
-        if (!_terrainTypes.TryGetValue(terrainId, out var name))
-            return 1;
-
-        if (!_terrainMapping.TryGetValue(name, out var mappingKey))
-            return 1;
-
-        if (!_terrainImageCounts.TryGetValue(mappingKey, out int count))
-            return 1;
-
-        return Math.Max(1, count);
-    }
+        => Math.Max(1, GetMapTerrainEntries().LastOrDefault(entry => entry.Terrain == terrainId)?.TileCount ?? 1);
 
     public string ResourcePath => _resourcePath;
 
     public string GetText(string key, string defaultValue = "")
     {
+        if (key.Equals("AIApiKey", StringComparison.OrdinalIgnoreCase))
+            return Environment.GetEnvironmentVariable("WC4_EDITOR_AI_API_KEY") ?? defaultValue;
         if (!_isInitialized) Initialize();
         return _textConfig.TryGetValue(key, out var v) ? v : defaultValue;
     }
@@ -541,26 +439,18 @@ public sealed class ConfigManager
     public string GetMainToken() => GetText("Main_Token", "");
     public WordCloudConfig GetWordCloudConfig() => _settingData?.WordCloudConfig ?? new WordCloudConfig();
 
-    public string GetTexturePath(string folder) => IOPath.Combine(ResourcePath, "Texture", folder);
     public string GetBackgroundPath() => IOPath.Combine(ResourcePath, "Texture", "ZSEditor_BackGround");
     public string GetLoadingBackgroundPath() => IOPath.Combine(ResourcePath, "Texture", "ZSEditor_Loading");
     public string GetLogoPath() => IOPath.Combine(ResourcePath, "Texture", "ZSEditor_Logo");
     public string GetConsoleBackgroundPath() => IOPath.Combine(ResourcePath, "Texture", "ZSEditor_Console", "Console.jpg");
     public string GetRenderBackgroundPath() => IOPath.Combine(ResourcePath, "Texture", "ZSEditor_MEBackGround", "MEBackGround.jpg");
-    public string GetStageMarkPath() => IOPath.Combine(ResourcePath, "Texture", "StageMark");
-    public string GetProvinceMarkPath() => IOPath.Combine(GetStageMarkPath(), "ProvinceMark");
-    public string GetProvinceCapitalImagePath() => IOPath.Combine(GetProvinceMarkPath(), "ProvinceCapital.png");
-    public string GetBuildMarkPath() => IOPath.Combine(GetStageMarkPath(), "BuildMark");
-    public string GetInformationMarkPath() => IOPath.Combine(GetStageMarkPath(), "InformationMark");
-    public string GetArmyMarkPath() => IOPath.Combine(GetStageMarkPath(), "ArmyMark");
-
     public string GetLoadingBackgroundImagePath()
     {
         string folder = GetLoadingBackgroundPath();
-        if (!Directory.Exists(folder)) return "";
+        if (!ProjectFile.DirectoryExists(folder)) return "";
         foreach (string ext in new[] { ".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp" })
         {
-            var files = Directory.GetFiles(folder, "*" + ext);
+            var files = ProjectFile.GetFiles(folder, "*" + ext);
             if (files.Length > 0) return files[0];
         }
         return "";
@@ -749,7 +639,10 @@ public sealed class ConfigManager
     public StringTableParser GetStringTableParser()
     {
         if (!_isInitialized) Initialize();
-        _stringTableParser ??= new StringTableParser(GetStringTableFilePath());
+        string path = GetStringTableFilePath();
+        if (_stringTableParser == null || !string.Equals(_stringTableParser.FilePath, path,
+            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+            _stringTableParser = new StringTableParser(path);
         return _stringTableParser;
     }
 
@@ -758,16 +651,7 @@ public sealed class ConfigManager
     /// </summary>
     public string GetStringTableFilePath()
     {
-        // 优先使用AssetManager的路径（WC4DATA/assets），确保与游戏运行时一致
-        string assetsPath = IOPath.Combine(ResourcePath, "WC4DATA", "assets", "stringtable_tw.ini");
-        if (File.Exists(assetsPath)) return assetsPath;
-
-        // 回退到Data目录
-        string dataPath = IOPath.Combine(ResourcePath, "Data", "stringtable_tw.ini");
-        if (File.Exists(dataPath)) return dataPath;
-
-        // 如果都不存在，默认返回assets路径（会创建新文件）
-        return assetsPath;
+        return IOPath.Combine(Assets.AssetManager.Default.GetActiveAssetsRoot(), "stringtable_tw.ini");
     }
 
     /// <summary>
@@ -788,15 +672,26 @@ public sealed class ConfigManager
         }
     }
 
-    public void Reload()
+    public void Reload(bool preserveStringDraft = false)
     {
+        var stringDraft = preserveStringDraft ? _stringTableParser : null;
         _isInitialized = false;
         _textConfig.Clear();
         _settingData = null;
         _stringTableParser = null;
         _tacticalMapParser = null;
+        _mapTerrainEntries = null;
+        _buildingTypeIds = null;
+        _armyTypeIds = null;
+        _countryIds = null;
+        _armyLevels = null;
+        _rankIds = null;
+        _qualityIds = null;
         Core.Parsers.TacticalMapParser.ClearCache();
         Initialize();
+        if (stringDraft != null && string.Equals(stringDraft.FilePath, GetStringTableFilePath(),
+            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+            _stringTableParser = stringDraft;
     }
 
     private void LoadTacticalMap()
@@ -812,6 +707,4 @@ public sealed class ConfigManager
         }
     }
 
-    public class MusicConfig { public List<MusicTrack>? Tracks { get; set; } }
-    public class MusicTrack { public string? Name { get; set; } public string? Path { get; set; } public int Volume { get; set; } }
 }

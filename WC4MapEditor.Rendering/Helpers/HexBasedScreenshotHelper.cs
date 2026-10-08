@@ -1,3 +1,4 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Diagnostics;
 using System.IO;
 using SkiaSharp;
@@ -89,15 +90,10 @@ public class HexBasedScreenshotHelper : IDisposable
 
             progress?.Report((totalHexes, totalHexes, mapHeight - 1, mapWidth - 1, 92));
 
-            var directory = Path.GetDirectoryName(outputPath);
-            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
-                Directory.CreateDirectory(directory);
-
             using (var image = SKImage.FromBitmap(bitmap))
             using (var data = image.Encode(SKEncodedImageFormat.Png, 100))
-            using (var stream = File.OpenWrite(outputPath))
             {
-                data.SaveTo(stream);
+                WC4MapEditor.Core.Parsers.AtomicFile.Write(outputPath, data.ToArray());
             }
 
             progress?.Report((totalHexes, totalHexes, mapHeight - 1, mapWidth - 1, 100));

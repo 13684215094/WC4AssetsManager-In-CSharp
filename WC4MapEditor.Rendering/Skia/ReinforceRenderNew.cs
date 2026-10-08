@@ -1,8 +1,9 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Collections.Specialized;
 using System.Diagnostics;
 using System.IO;
 using SkiaSharp;
-using WC4MapEditor.Core.Config;
+using WC4MapEditor.Rendering.Imaging;
 using WC4MapEditor.Core.Helpers;
 using WC4MapEditor.Core.Parsers.General;
 using WC4MapEditor.Core.Models;
@@ -18,7 +19,6 @@ public class ReinforceRenderNew : IDisposable
     private const int COLUMN_COUNT = 2;
     private const int ROW_COUNT = 6;
     private const double BASE_HEX_SIZE = 20.0;
-    private static readonly double HEX_HORIZONTAL_SPACING = BASE_HEX_SIZE * 1.5;
     private static readonly double HEX_VERTICAL_SPACING = BASE_HEX_SIZE * Math.Sqrt(3);
 
     private readonly Camera _camera;
@@ -164,15 +164,13 @@ public class ReinforceRenderNew : IDisposable
     {
         try
         {
-            string infoMarkPath = ConfigManager.Instance.GetInformationMarkPath();
+            using var sprites = new ProjectSpriteLoader();
 
             for (int level = 1; level <= 5; level++)
             {
-                string levelPath = Path.Combine(infoMarkPath, $"level_{level}.png");
-                if (File.Exists(levelPath))
+                if (sprites.LoadImage($"level_{level}.png") is { } sprite1)
                 {
-                    using var stream = File.OpenRead(levelPath);
-                    _levelIconCache[level] = SKImage.FromEncodedData(stream);
+                    _levelIconCache[level] = sprite1;
                 }
             }
         }
@@ -394,6 +392,7 @@ public class ReinforceRenderNew : IDisposable
         bool isDefault = true;
 
         var tacticalCache = TacticalMapImageCache.Instance;
+        tacticalCache.Initialize();
         if (tacticalCache.IsInitialized)
         {
             var generalSetting = GeneralSettingParser.Instance;
@@ -528,8 +527,8 @@ public class ReinforceRenderNew : IDisposable
     {
         if (_mapData == null || _mapData.MapWidth <= 0 || _mapData.MapHeight <= 0) return null;
 
-        int row = coordinate / _mapData.MapWidth;
-        int col = coordinate % _mapData.MapWidth;
+        if (!_mapData.TryGetLocalCoordinate(coordinate, out var coord)) return null;
+        int col = coord.Col, row = coord.Row;
 
         if (row < 0 || row >= _mapData.MapHeight || col < 0 || col >= _mapData.MapWidth) return null;
 

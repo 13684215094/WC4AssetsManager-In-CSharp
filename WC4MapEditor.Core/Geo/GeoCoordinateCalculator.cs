@@ -1,3 +1,4 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Text;
 using WC4MapEditor.Core.Models;
 
@@ -276,9 +277,9 @@ public sealed class GeoCoordinateCalculator
     public void ImportReferencePoints(string filePath)
     {
         if (string.IsNullOrEmpty(filePath)) throw new ArgumentNullException(nameof(filePath));
-        if (!File.Exists(filePath)) throw new FileNotFoundException("参考点文件不存在", filePath);
+        if (!ProjectFile.Exists(filePath)) throw new FileNotFoundException("参考点文件不存在", filePath);
 
-        string json = File.ReadAllText(filePath);
+        string json = ProjectFile.ReadAllText(filePath);
         var points = new List<GeoReferencePoint>();
 
         // 简单解析 JSON（不引入额外依赖）

@@ -1,16 +1,17 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
-using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Microsoft.Win32;
 using WC4MapEditor.Core.Parsers.Stage;
 using WC4MapEditor.Core.Parsers.Conquest;
 using WC4MapEditor.Core.Parsers.World;
+using WC4MapEditor.Core.Assets;
 using WC4MapEditor.Views.Dialogs;
 
 namespace WC4MapEditor.Views;
@@ -19,34 +20,6 @@ public partial class BeginScene : UserControl
 {
     private readonly MainWindow _window;
     private Grid _mainGrid = null!;
-    private StackPanel _navPanel = null!;
-
-    private Button _campaignButton = null!;
-    private Button _newCampaignButton = null!;
-    private Button _conquestButton = null!;
-    private Button _newConquestButton = null!;
-    private Button _mapButton = null!;
-    private Button _newMapButton = null!;
-    private Button _assetButton = null!;
-    private Button _settingsButton = null!;
-    private Button _generalButton = null!;
-    private Button _countryButton = null!;
-    private Button _checkDataButton = null!;
-
-    private Button _recommendBtn = null!;
-    private Button _navPrevButton = null!;
-    private Button _navNextButton = null!;
-    private int _navOffset;
-    private int _navVisibleCount = int.MaxValue;
-    private double _navTextWidth;
-    private bool _recalculating;
-    private bool _navAnimating;
-    private Grid _bottomBar = null!;
-
-    private Grid _campaignGroup = null!;
-    private Grid _conquestGroup = null!;
-    private Grid _mapGroup = null!;
-
     private DispatcherTimer? _bgTimer;
     private ImageBrush _bgBrush1 = null!;
     private ImageBrush _bgBrush2 = null!;
@@ -55,400 +28,60 @@ public partial class BeginScene : UserControl
     private Border _bgBorder1 = null!;
     private Border _bgBorder2 = null!;
 
-    public BeginScene(MainWindow window)
+    public BeginScene(MainWindow window, bool showProjectLoader = false)
     {
         _window = window;
         InitializeComponent();
-        SetupUI();
+        SetupUI(showProjectLoader);
         InitializeBackgroundSlideshow();
         Unloaded += BeginScene_Unloaded;
-        _mainGrid.MouseLeftButtonDown += Grid_MouseLeftButtonDown;
     }
 
-    private void SetupUI()
+    private void SetupUI(bool showProjectLoader)
     {
         ConfigManager.Instance.Initialize();
-
-        _mainGrid = new Grid();
-
-        // Row definitions: title bar (40) | content (*) | bottom bar (100)
-        _mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(40) });
+        _mainGrid = new Grid { Background = new SolidColorBrush(Color.FromRgb(24, 28, 36)) };
         _mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        _mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(100) });
 
-        // Background borders for crossfade
         _bgBorder1 = new Border();
-        _bgBorder2 = new Border();
-        Grid.SetRowSpan(_bgBorder1, 3);
-        Grid.SetRowSpan(_bgBorder2, 3);
+        _bgBorder2 = new Border { Opacity = 0 };
         _bgBrush1 = new ImageBrush { Stretch = Stretch.UniformToFill };
         _bgBrush2 = new ImageBrush { Stretch = Stretch.UniformToFill };
         _bgBorder1.Background = _bgBrush1;
         _bgBorder2.Background = _bgBrush2;
-        _bgBorder2.Opacity = 0;
         _mainGrid.Children.Add(_bgBorder1);
         _mainGrid.Children.Add(_bgBorder2);
+        var shade = new Border { Background = new SolidColorBrush(Color.FromArgb(210, 20, 24, 32)), IsHitTestVisible = false };
+        _mainGrid.Children.Add(shade);
 
-        // Title bar
-        var titleBar = new Grid { Background = Brushes.Transparent };
-        Grid.SetRow(titleBar, 0);
-
-        var titlePanel = new StackPanel
+        FrameworkElement panel = !showProjectLoader && _window.Projects.Current is { } project
+            ? CreateProjectOverviewPanel(project) : CreateProjectLoadPanel();
+        var scroll = new ScrollViewer
         {
-            Orientation = Orientation.Horizontal,
-            VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(15, 0, 0, 0)
+            Content = panel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            Margin = new Thickness(24, 12, 24, 24)
         };
-
-        var windowTitle = new TextBlock
-        {
-            Text = ConfigManager.Instance.GetText("TitleBarText", "WC4 Map Editor"),
-            FontSize = 12,
-            Foreground = Brushes.White,
-            VerticalAlignment = VerticalAlignment.Center,
-            Effect = new DropShadowEffect { BlurRadius = 4, ShadowDepth = 2, Opacity = 0.8, Color = Colors.Black }
-        };
-        titlePanel.Children.Add(windowTitle);
-
-        titlePanel.Children.Add(new TextBlock
-        {
-            Text = "  |  ",
-            FontSize = 12,
-            Foreground = Brushes.Gray,
-            VerticalAlignment = VerticalAlignment.Center
-        });
-
-        var wordCloudText = new TextBlock
-        {
-            FontSize = 12,
-            Foreground = Brushes.White,
-            VerticalAlignment = VerticalAlignment.Center,
-            MaxWidth = 600,
-            Effect = new DropShadowEffect { BlurRadius = 4, ShadowDepth = 2, Opacity = 0.8, Color = Colors.Black }
-        };
-        titlePanel.Children.Add(wordCloudText);
-        titleBar.Children.Add(titlePanel);
-        _mainGrid.Children.Add(titleBar);
-
-        StartWordCloudRotation(wordCloudText);
-
-        // Circle buttons (right side)
-        var circlePanel = new StackPanel
-        {
-            Orientation = Orientation.Vertical,
-            HorizontalAlignment = HorizontalAlignment.Right,
-            VerticalAlignment = VerticalAlignment.Bottom,
-            Margin = new Thickness(0, 20, 37, 0)
-        };
-        Grid.SetRow(circlePanel, 0);
-        Grid.SetRowSpan(circlePanel, 2);
-        Panel.SetZIndex(circlePanel, 100);
-
-        circlePanel.Children.Add(CreateCircleButton("➖", (_, _) => _window.MinimizeWindow()));
-        circlePanel.Children.Add(CreateCircleButton("⬜", (_, _) => _window.ToggleMaximize()));
-        circlePanel.Children.Add(CreateCircleButton("✕", (_, _) => _window.CloseApplication(), true));
-        circlePanel.Children.Add(new Rectangle { Height = 10, Fill = Brushes.Transparent });
-        circlePanel.Children.Add(CreateCircleButton("❚❚", MusicToggleButton_Click));
-
-        _mainGrid.Children.Add(circlePanel);
-
-        // Center content - big title
-        var mainContent = new Grid();
-        Grid.SetRow(mainContent, 1);
-
-        var titleStack = new StackPanel
-        {
-            VerticalAlignment = VerticalAlignment.Bottom,
-            HorizontalAlignment = HorizontalAlignment.Left,
-            Margin = new Thickness(50, 0, 0, 20)
-        };
-
-        var titleLabel = new TextBlock
-        {
-            Text = ConfigManager.Instance.GetText("WindowTitleText", "WC4 EDITOR"),
-            FontSize = 72,
-            FontWeight = FontWeights.Black,
-            Foreground = new SolidColorBrush(Colors.White),
-            Effect = new DropShadowEffect { BlurRadius = 20, ShadowDepth = 0, Opacity = 0.5 }
-        };
-
-        var versionLabel = new TextBlock
-        {
-            Text = ConfigManager.Instance.GetText("VersionText", "v5.0 开发版"),
-            FontSize = 18,
-            Foreground = Brushes.White,
-            Margin = new Thickness(5, 10, 0, 0),
-            Effect = new DropShadowEffect { BlurRadius = 4, ShadowDepth = 2, Opacity = 0.8, Color = Colors.Black }
-        };
-
-        titleStack.Children.Add(titleLabel);
-        titleStack.Children.Add(versionLabel);
-        mainContent.Children.Add(titleStack);
-        _mainGrid.Children.Add(mainContent);
-
-        // Bottom navigation bar
-        _bottomBar = new Grid();
-        Grid.SetRow(_bottomBar, 2);
-        _bottomBar.Margin = new Thickness(50, 0, 20, 0);
-
-        _navPanel = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, RenderTransform = new TranslateTransform() };
-
-        // 创建主按钮
-        _campaignButton = CreateNavButton(ConfigManager.Instance.GetText("CampaignButtonText", "战役"), CampaignButton_Click);
-        _conquestButton = CreateNavButton(ConfigManager.Instance.GetText("ConquestButtonText", "征服"), ConquestButton_Click);
-        _mapButton = CreateNavButton(ConfigManager.Instance.GetText("TerrainsMapButtonText", "征服地图"), MapButton_Click);
-
-        // 创建弹出按钮
-        _newCampaignButton = CreatePopupButton(ConfigManager.Instance.GetText("NewCampaignButtonText", "新战役"), NewCampaignButton_Click);
-        _newConquestButton = CreatePopupButton(ConfigManager.Instance.GetText("NewConquestButtonText", "新征服"), NewConquestButton_Click);
-        _newMapButton = CreatePopupButton(ConfigManager.Instance.GetText("NewTerrainsMapButtonText", "新地图"), NewMapButton_Click);
-
-        // 创建按钮组（主按钮 + 弹出按钮）
-        _campaignGroup = CreateButtonGroup(_campaignButton, _newCampaignButton);
-        _conquestGroup = CreateButtonGroup(_conquestButton, _newConquestButton);
-        _mapGroup = CreateButtonGroup(_mapButton, _newMapButton);
-
-        _assetButton = CreateNavButton(ConfigManager.Instance.GetText("AssetBrowserButtonText", "资源管理器"), AssetButton_Click);
-        _generalButton = CreateNavButton(ConfigManager.Instance.GetText("GeneralButtonText", "将领编辑"), GeneralButton_Click);
-        _countryButton = CreateNavButton(ConfigManager.Instance.GetText("CountryButtonText", "国家编辑"), CountryButton_Click);
-        _checkDataButton = CreateNavButton(ConfigManager.Instance.GetText("CheckDataButtonText", "检查数据"), CheckDataButton_Click);
-        _settingsButton = CreateNavButton(ConfigManager.Instance.GetText("SettingsButtonText", "设置"), SettingsButton_Click);
-
-        _navPanel.Children.Add(_campaignGroup);
-        _navPanel.Children.Add(_conquestGroup);
-        _navPanel.Children.Add(_mapGroup);
-        _navPanel.Children.Add(_assetButton);
-        _navPanel.Children.Add(_generalButton);
-        _navPanel.Children.Add(_countryButton);
-        _navPanel.Children.Add(_checkDataButton);
-        _navPanel.Children.Add(_settingsButton);
-        _navPanel.Children.Add(CreateNavButton(ConfigManager.Instance.GetText("InGameTechButtonText", "局内科技"), InGameTechButton_Click));
-        _navPanel.Children.Add(CreateNavButton(ConfigManager.Instance.GetText("EventEditorButtonText", "集团军事件编辑"), EventEditorButton_Click));
-        _navPanel.Children.Add(CreateNavButton(ConfigManager.Instance.GetText("EventBuffButtonText", "事件的效果"), EventBuffButton_Click));
-        _navPanel.Children.Add(CreateNavButton(ConfigManager.Instance.GetText("ConquerEventButtonText", "征服事件"), ConquerEventButton_Click));
-        _navPanel.Children.Add(CreateNavButton(ConfigManager.Instance.GetText("SkillButtonText", "技能编辑"), SkillButton_Click));
-        _navPanel.Children.Add(CreateNavButton(ConfigManager.Instance.GetText("ArmyBuffButtonText", "军队Buff"), ArmyBuffButton_Click));
-        _navPanel.Children.Add(CreateNavButton(ConfigManager.Instance.GetText("ArmyButtonText", "兵种编辑"), ArmyButton_Click));
-        _navPanel.Children.Add(CreateNavButton(ConfigManager.Instance.GetText("BuildingButtonText", "建筑与设施"), BuildingButton_Click));
-        _navPanel.Children.Add(CreateNavButton(ConfigManager.Instance.GetText("ArmyGroupButtonText", "集团军与援军"), ArmyGroupButton_Click));
-        _navPanel.Children.Add(CreateNavButton(ConfigManager.Instance.GetText("LayoutButtonText", "布局编辑器"), LayoutButton_Click));
-
-        // 统一导航按钮宽度：取最长文本的期望宽度，保证全部按钮等宽且能容纳 setting 键值文本
-        double navWidth = 0;
-        foreach (UIElement child in _navPanel.Children)
-            if (child is FrameworkElement fe)
-            {
-                fe.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
-                navWidth = Math.Max(navWidth, Math.Ceiling(fe.DesiredSize.Width));
-            }
-        _navTextWidth = navWidth;
-        foreach (UIElement child in _navPanel.Children)
-            if (child is FrameworkElement fe) fe.Width = navWidth;
-
-        _recommendBtn = CreateCircleButton("👍", RecommendButton_Click);
-        _recommendBtn.Width = 75;
-        _recommendBtn.Height = 75;
-        _recommendBtn.HorizontalAlignment = HorizontalAlignment.Right;
-        _recommendBtn.VerticalAlignment = VerticalAlignment.Center;
-        if (_recommendBtn.Content is TextBlock rtb) rtb.FontSize = 36;
-
-        _navPrevButton = CreatePagerButton("◀", NavPrev_Click);
-        _navNextButton = CreatePagerButton("▶", NavNext_Click);
-
-        var navBarRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-        navBarRow.Children.Add(_navPrevButton);
-        navBarRow.Children.Add(_navPanel);
-        navBarRow.Children.Add(_navNextButton);
-
-        _bottomBar.Children.Add(navBarRow);
-        _bottomBar.Children.Add(_recommendBtn);
-        _mainGrid.Children.Add(_bottomBar);
-
-        Loaded += (_, _) => Dispatcher.BeginInvoke(() => RecalculateNav(), DispatcherPriority.Loaded);
-        _bottomBar.SizeChanged += (_, _) => RecalculateNav();
-
+        _mainGrid.Children.Add(scroll);
         Content = _mainGrid;
-    }
-
-    private Button CreatePopupButton(string text, RoutedEventHandler handler)
-    {
-        var tb = new TextBlock
-        {
-            Text = text,
-            Foreground = Brushes.White,
-            FontSize = 14,
-            Effect = new DropShadowEffect { BlurRadius = 4, ShadowDepth = 2, Opacity = 0.8, Color = Colors.Black }
-        };
-
-        var btn = new Button
-        {
-            Content = tb,
-            BorderThickness = new Thickness(0),
-            FontSize = 14,
-            Margin = new Thickness(0),
-            Cursor = Cursors.Hand,
-            Padding = new Thickness(15, 8, 15, 8),
-            Template = CreateNavButtonTemplate(),
-            Opacity = 0,
-            IsHitTestVisible = false
-        };
-
-        btn.MouseEnter += (s, e) =>
-        {
-            tb.Foreground = Brushes.Black;
-            tb.Effect = null;
-        };
-        btn.MouseLeave += (s, e) =>
-        {
-            tb.Foreground = Brushes.White;
-            tb.Effect = new DropShadowEffect { BlurRadius = 4, ShadowDepth = 2, Opacity = 0.8, Color = Colors.Black };
-        };
-        btn.Click += handler;
-        return btn;
-    }
-
-    private Grid CreateButtonGroup(Button mainButton, Button popupButton)
-    {
-        // 移除主按钮的外部 Margin，由 Grid 来统一控制间距
-        mainButton.Margin = new Thickness(0);
-        mainButton.HorizontalAlignment = HorizontalAlignment.Center;
-        mainButton.VerticalAlignment = VerticalAlignment.Center;
-
-        popupButton.HorizontalAlignment = HorizontalAlignment.Center;
-        popupButton.VerticalAlignment = VerticalAlignment.Bottom;
-
-        var group = new Grid
-        {
-            Margin = new Thickness(0, 0, 8, 0),
-            VerticalAlignment = VerticalAlignment.Center,
-            HorizontalAlignment = HorizontalAlignment.Center
-        };
-
-        // 主按钮在最底层
-        group.Children.Add(mainButton);
-
-        // 弹出按钮初始位置在主按钮上方（隐藏）
-        // 计算主按钮的实际高度（包含Padding）
-        double mainButtonHeight = mainButton.Padding.Top + mainButton.Padding.Bottom + 24; // 24是字体高度估算
-        // 增加间距，让弹出按钮更高一些（主按钮高度 + 额外间距）
-        popupButton.Margin = new Thickness(0, 0, 0, mainButtonHeight + 15);
-        group.Children.Add(popupButton);
-
-        bool isPopupVisible = false;
-
-        // 鼠标进入主按钮时显示弹出按钮
-        mainButton.MouseEnter += (s, e) =>
-        {
-            if (!isPopupVisible)
-            {
-                isPopupVisible = true;
-                ShowPopupButton(popupButton);
-            }
-        };
-
-        // 鼠标离开整个组时隐藏弹出按钮
-        group.MouseLeave += (s, e) =>
-        {
-            if (isPopupVisible)
-            {
-                isPopupVisible = false;
-                HidePopupButton(popupButton);
-            }
-        };
-
-        return group;
-    }
-
-    private void ShowPopupButton(Button popupButton)
-    {
-        popupButton.IsHitTestVisible = true;
-
-        // 向上滑出动画
-        var translateTransform = popupButton.RenderTransform as TranslateTransform;
-        if (translateTransform == null)
-        {
-            translateTransform = new TranslateTransform();
-            popupButton.RenderTransform = translateTransform;
-        }
-
-        var slideUp = new DoubleAnimation(20, 0, TimeSpan.FromMilliseconds(200))
-        {
-            EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut }
-        };
-        translateTransform.BeginAnimation(TranslateTransform.YProperty, slideUp);
-
-        var fadeIn = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(200));
-        popupButton.BeginAnimation(UIElement.OpacityProperty, fadeIn);
-    }
-
-    private void HidePopupButton(Button popupButton)
-    {
-        var translateTransform = popupButton.RenderTransform as TranslateTransform;
-        if (translateTransform == null)
-        {
-            translateTransform = new TranslateTransform();
-            popupButton.RenderTransform = translateTransform;
-        }
-
-        var slideDown = new DoubleAnimation(0, 20, TimeSpan.FromMilliseconds(150))
-        {
-            EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseIn }
-        };
-
-        var fadeOut = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(150));
-        fadeOut.Completed += (s, e) =>
-        {
-            popupButton.IsHitTestVisible = false;
-        };
-
-        translateTransform.BeginAnimation(TranslateTransform.YProperty, slideDown);
-        popupButton.BeginAnimation(UIElement.OpacityProperty, fadeOut);
     }
 
     private void BeginScene_Unloaded(object? sender, RoutedEventArgs e) => _bgTimer?.Stop();
 
-    private void Grid_MouseLeftButtonDown(object? sender, MouseButtonEventArgs e)
-    {
-        if (e.LeftButton == MouseButtonState.Pressed) _window.DragMove();
-    }
-
-    private void StartWordCloudRotation(TextBlock textBlock)
-    {
-        var wcConfig = ConfigManager.Instance.GetWordCloudConfig();
-        var tokens = wcConfig.Tokens.Where(t => !string.IsNullOrWhiteSpace(t)).ToArray();
-        if (tokens.Length == 0) return;
-
-        int index = 0;
-        textBlock.Text = tokens[0];
-        var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(4) };
-        timer.Tick += (s, e) =>
-        {
-            index = (index + 1) % tokens.Length;
-            var fadeOut = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(300));
-            fadeOut.Completed += (s2, e2) =>
-            {
-                textBlock.Text = tokens[index];
-                textBlock.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(300)));
-            };
-            textBlock.BeginAnimation(UIElement.OpacityProperty, fadeOut);
-        };
-        timer.Start();
-    }
-
     private void InitializeBackgroundSlideshow()
     {
         string bgPath = ConfigManager.Instance.GetBackgroundPath();
-        if (!Directory.Exists(bgPath)) return;
+        if (!ProjectFile.DirectoryExists(bgPath)) return;
 
         var images = new List<string>();
         foreach (string ext in new[] { ".jpg", ".jpeg", ".png", ".bmp" })
-            images.AddRange(Directory.GetFiles(bgPath, "*" + ext));
+            images.AddRange(ProjectFile.GetFiles(bgPath, "*" + ext));
 
         if (images.Count == 0) return;
 
-        try { _bgBrush1.ImageSource = new BitmapImage(new Uri(images[0], UriKind.Absolute)); } catch { }
+        try { _bgBrush1.ImageSource = new BitmapImage(new Uri(ProjectFile.ResolveRead(images[0]), UriKind.Absolute)); } catch { }
         if (images.Count > 1)
-            try { _bgBrush2.ImageSource = new BitmapImage(new Uri(images[1], UriKind.Absolute)); } catch { }
+            try { _bgBrush2.ImageSource = new BitmapImage(new Uri(ProjectFile.ResolveRead(images[1]), UriKind.Absolute)); } catch { }
 
         _bgIndex = 0;
         _useFirstBrush = true;
@@ -457,7 +90,7 @@ public partial class BeginScene : UserControl
         _bgTimer.Tick += (s, e) =>
         {
             _bgIndex = (_bgIndex + 1) % images.Count;
-            var nextUri = new Uri(images[_bgIndex], UriKind.Absolute);
+            var nextUri = new Uri(ProjectFile.ResolveRead(images[_bgIndex]), UriKind.Absolute);
             if (_useFirstBrush)
             {
                 try { _bgBrush2.ImageSource = new BitmapImage(nextUri); } catch { }
@@ -481,102 +114,22 @@ public partial class BeginScene : UserControl
         source.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(1, 0, TimeSpan.FromSeconds(1.5)));
     }
 
-    private Button CreateCircleButton(string content, RoutedEventHandler handler, bool isClose = false)
+    private string ProjectInitialDirectory => _window.Projects.Current!.AssetsRoot;
+
+    private string NewBattleSaveDirectory()
     {
-        var tb = new TextBlock
-        {
-            Text = content,
-            Foreground = Brushes.White,
-            FontSize = 18,
-            FontWeight = FontWeights.Bold,
-            Effect = new DropShadowEffect { BlurRadius = 4, ShadowDepth = 2, Opacity = 0.8, Color = Colors.Black }
-        };
-
-        var btn = new Button
-        {
-            Width = 42, Height = 42, Foreground = Brushes.White,
-            BorderThickness = new Thickness(0), Margin = new Thickness(0, 0, 0, 9),
-            Cursor = Cursors.Hand, Content = tb,
-            Template = CreateCircleButtonTemplate(isClose)
-        };
-
-        btn.MouseEnter += (s, e) =>
-        {
-            if (btn.Content is TextBlock ttb) { ttb.Foreground = isClose ? Brushes.White : Brushes.Black; ttb.Effect = null; }
-        };
-        btn.MouseLeave += (s, e) =>
-        {
-            if (btn.Content is TextBlock ttb) { ttb.Foreground = Brushes.White; ttb.Effect = new DropShadowEffect { BlurRadius = 4, ShadowDepth = 2, Opacity = 0.8, Color = Colors.Black }; }
-        };
-        btn.Click += handler;
-        return btn;
+        string stage = IOPath.Combine(ProjectInitialDirectory, "stage");
+        _window.Projects.Current!.ValidateOutputPath(IOPath.Combine(stage, "new.btl"));
+        Directory.CreateDirectory(stage);
+        return stage;
     }
 
-    private ControlTemplate CreateCircleButtonTemplate(bool isClose)
+    private bool ValidateProjectDestination(string path)
     {
-        var f = new FrameworkElementFactory(typeof(Border));
-        f.Name = "border";
-        f.SetValue(Border.BackgroundProperty, Brushes.Transparent);
-        f.SetValue(Border.CornerRadiusProperty, new CornerRadius(8));
-        f.SetValue(Border.BorderThicknessProperty, new Thickness(0));
-        var cp = new FrameworkElementFactory(typeof(ContentPresenter));
-        cp.SetValue(ContentPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Center);
-        cp.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
-        f.AppendChild(cp);
-        return new ControlTemplate(typeof(Button)) { VisualTree = f };
+        try { _window.Projects.Current!.ValidateOutputPath(path); return true; }
+        catch (Exception ex) { MessageBox.Show(_window, ex.Message, "保存位置", MessageBoxButton.OK, MessageBoxImage.Error); return false; }
     }
 
-    private Button CreateNavButton(string text, RoutedEventHandler handler)
-    {
-        var tb = new TextBlock
-        {
-            Text = text, Foreground = Brushes.White, FontSize = 16,
-            Effect = new DropShadowEffect { BlurRadius = 4, ShadowDepth = 2, Opacity = 0.8, Color = Colors.Black }
-        };
-
-        var btn = new Button
-        {
-            Content = tb, BorderThickness = new Thickness(0), FontSize = 16,
-            Margin = new Thickness(0, 0, 8, 0), Cursor = Cursors.Hand,
-            Padding = new Thickness(20, 10, 20, 10),
-            Template = CreateNavButtonTemplate()
-        };
-
-        btn.MouseEnter += (s, e) =>
-        {
-            tb.Foreground = Brushes.Black;
-            tb.Effect = null;
-        };
-        btn.MouseLeave += (s, e) =>
-        {
-            tb.Foreground = Brushes.White;
-            tb.Effect = new DropShadowEffect { BlurRadius = 4, ShadowDepth = 2, Opacity = 0.8, Color = Colors.Black };
-        };
-        btn.Click += handler;
-        return btn;
-    }
-
-    private ControlTemplate CreateNavButtonTemplate()
-    {
-        var f = new FrameworkElementFactory(typeof(Border));
-        f.Name = "border";
-        f.SetValue(Border.BackgroundProperty, Brushes.Transparent);
-        f.SetValue(Border.CornerRadiusProperty, new CornerRadius(6));
-        f.SetValue(Border.BorderThicknessProperty, new Thickness(0));
-        f.SetBinding(Border.PaddingProperty, new Binding("Padding") { RelativeSource = new RelativeSource(RelativeSourceMode.TemplatedParent) });
-        var cp = new FrameworkElementFactory(typeof(ContentPresenter));
-        cp.SetValue(ContentPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Center);
-        cp.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
-        f.AppendChild(cp);
-        return new ControlTemplate(typeof(Button)) { VisualTree = f };
-    }
-
-    private void MusicToggleButton_Click(object sender, RoutedEventArgs e) { }
-    private void CampaignButton_Click(object sender, RoutedEventArgs e)
-    {
-        var scene = new StageRenderScene(_window);
-        _window.SetCurrentScene(scene);
-    }
     private async void NewCampaignButton_Click(object sender, RoutedEventArgs e)
     {
         var confirmResult = MessageBox.Show("确定要创建新的战役文件吗？", "新建战役", MessageBoxButton.YesNo, MessageBoxImage.Question);
@@ -641,9 +194,10 @@ public partial class BeginScene : UserControl
             {
                 Filter = "战役文件 (*.btl)|*.btl|所有文件 (*.*)|*.*",
                 Title = "保存战役文件",
-                FileName = $"new_campaign_{mapWidth}x{mapHeight}.btl"
+                FileName = $"stage_new_{mapWidth}x{mapHeight}.btl",
+                InitialDirectory = NewBattleSaveDirectory()
             };
-            if (saveDialog.ShowDialog() == true)
+            if (saveDialog.ShowDialog() == true && ValidateProjectDestination(saveDialog.FileName))
             {
                 if (parser.SaveData(saveDialog.FileName))
                 {
@@ -662,57 +216,28 @@ public partial class BeginScene : UserControl
             }
         }
     }
-    private void ConquestButton_Click(object sender, RoutedEventArgs e)
-    {
-        var scene = new ConquestRenderScene(_window);
-        _window.SetCurrentScene(scene);
-    }
     private async void NewConquestButton_Click(object sender, RoutedEventArgs e)
     {
         var confirmResult = MessageBox.Show("确定要创建新的征服文件吗？", "新建征服", MessageBoxButton.YesNo, MessageBoxImage.Question);
         if (confirmResult != MessageBoxResult.Yes) return;
 
-        var mapDialog = new OpenFileDialog
-        {
-            Filter = "世界地图文件 (*.bin)|*.bin|所有文件 (*.*)|*.*",
-            Title = "选择地图文件（获取尺寸）"
-        };
-        var baseDir = AppDomain.CurrentDomain.BaseDirectory;
-        var mapsFolder = System.IO.Path.Combine(baseDir, "Maps");
-        if (Directory.Exists(mapsFolder)) mapDialog.InitialDirectory = mapsFolder;
-
-        if (mapDialog.ShowDialog() != true) return;
-        var selectedMapFilePath = mapDialog.FileName;
-
-        var mapData = WorldParser.LoadFromFile(selectedMapFilePath);
+        string selectedMapFilePath = IOPath.Combine(_window.Projects.Current!.AssetsRoot, "world.bin");
+        MapData? mapData;
+        try { mapData = WorldParser.LoadFromFile(selectedMapFilePath); }
+        catch (Exception ex) { MessageBox.Show(_window, ex.Message, "底图加载失败", MessageBoxButton.OK, MessageBoxImage.Error); return; }
         if (mapData == null)
         {
             MessageBox.Show("无法加载地图文件，请检查文件是否有效！", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
             return;
         }
 
-        int mapClipY = 2;
-        int actualMapWidth = mapData.MapWidth;
-        int actualMapHeight = mapData.MapHeight - 2 * mapClipY;
-
-        int mapNumber = ExtractMapNumberFromFileName(System.IO.Path.GetFileName(selectedMapFilePath));
-        if (mapNumber <= 0)
+        if (mapData.MapHeight <= 4)
         {
-            using var mapNumDialog = new SingleInputDialog(_window)
-            {
-                Title = "新建征服",
-                Description = "无法从文件名识别地图编号，请手动输入地图编号 (1-255)：",
-                DefaultValue = "1",
-                MinValue = 1,
-                MaxValue = 255
-            };
-            var mapNumStr = await mapNumDialog.ShowAsync();
-            if (mapNumStr == null || !int.TryParse(mapNumStr, out mapNumber) || mapNumber < 1 || mapNumber > 255)
-            {
-                if (mapNumStr != null) MessageBox.Show("地图编号必须是1-255之间的整数！", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
-                return;
-            }
+            MessageBox.Show(_window, "世界地图高度必须大于 4，才能保留征服窗口的上下边距。", "底图尺寸不足", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
         }
+
+        const int mapNumber = 1;
 
         using var legionDialog = new SingleInputDialog(_window)
         {
@@ -728,12 +253,10 @@ public partial class BeginScene : UserControl
             return;
         }
 
-        var parser = new ConquestParser();
-        if (!parser.CreateNew(actualMapWidth, actualMapHeight, numLegions, mapNumber))
-        {
-            MessageBox.Show("创建征服文件失败", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
-            return;
-        }
+        ProjectMapDocument document;
+        try { document = ProjectMapDocument.CreateConquest(_window.Projects.Current!, numLegions); }
+        catch (Exception ex) { MessageBox.Show(_window, ex.Message, "创建征服失败", MessageBoxButton.OK, MessageBoxImage.Error); return; }
+        int actualMapWidth = document.Map.MapWidth, actualMapHeight = document.Map.MapHeight;
 
         var mapFileName = System.IO.Path.GetFileNameWithoutExtension(selectedMapFilePath);
         var saveResult = MessageBox.Show(
@@ -746,12 +269,14 @@ public partial class BeginScene : UserControl
             {
                 Filter = "征服文件 (*.btl)|*.btl|所有文件 (*.*)|*.*",
                 Title = "保存征服文件",
-                FileName = $"conquest_{mapFileName}_{mapNumber}_{actualMapWidth}x{actualMapHeight}.btl"
+                FileName = $"conquest_{mapFileName}_{mapNumber}_{actualMapWidth}x{actualMapHeight}.btl",
+                InitialDirectory = NewBattleSaveDirectory()
             };
-            if (saveDialog.ShowDialog() == true)
+            if (saveDialog.ShowDialog() == true && ValidateProjectDestination(saveDialog.FileName))
             {
-                if (parser.SaveData(saveDialog.FileName))
+                try
                 {
+                    document.Save(saveDialog.FileName);
                     MessageBox.Show($"征服文件已保存到:\n{saveDialog.FileName}", "成功", MessageBoxButton.OK, MessageBoxImage.Information);
                     var openResult = MessageBox.Show("是否立即打开编辑？", "打开编辑", MessageBoxButton.YesNo, MessageBoxImage.Question);
                     if (openResult == MessageBoxResult.Yes)
@@ -760,17 +285,12 @@ public partial class BeginScene : UserControl
                         _window.SetCurrentScene(scene);
                     }
                 }
-                else
+                catch (Exception ex)
                 {
-                    MessageBox.Show("保存征服文件失败", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+                    MessageBox.Show($"保存征服文件失败：{ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
                 }
             }
         }
-    }
-    private void MapButton_Click(object sender, RoutedEventArgs e)
-    {
-        var scene = new MapRenderScene(_window);
-        _window.SetCurrentScene(scene);
     }
     private async void NewMapButton_Click(object sender, RoutedEventArgs e)
     {
@@ -798,8 +318,7 @@ public partial class BeginScene : UserControl
             MapLimits.Area(width, height);
 
             var mapData = WorldParser.CreateNew(width, height);
-            var tempPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"NewMap_{width}x{height}_{DateTime.Now:yyyyMMddHHmmss}.bin");
-            WorldParser.SaveToFile(mapData, tempPath);
+            mapData.IsModified = true;
 
             var saveResult = MessageBox.Show(
                 $"已创建 {width}x{height} 的新地图。\n\n是否保存地图文件？",
@@ -811,9 +330,10 @@ public partial class BeginScene : UserControl
                 {
                     Filter = "地图文件 (*.bin)|*.bin|所有文件 (*.*)|*.*",
                     Title = "保存地图文件",
-                    FileName = $"new_map_{width}x{height}.bin"
+                    FileName = $"new_map_{width}x{height}.bin",
+                    InitialDirectory = ProjectInitialDirectory
                 };
-                if (saveDialog.ShowDialog() == true)
+                if (saveDialog.ShowDialog() == true && ValidateProjectDestination(saveDialog.FileName))
                 {
                     WorldParser.SaveToFile(mapData, saveDialog.FileName);
                     MessageBox.Show($"地图文件已保存到:\n{saveDialog.FileName}", "成功", MessageBoxButton.OK, MessageBoxImage.Information);
@@ -827,7 +347,7 @@ public partial class BeginScene : UserControl
             }
             else
             {
-                var scene = new MapRenderScene(_window, tempPath);
+                var scene = new MapRenderScene(_window, initialMap: mapData);
                 _window.SetCurrentScene(scene);
             }
         }
@@ -837,241 +357,4 @@ public partial class BeginScene : UserControl
         }
     }
 
-    private static int ExtractMapNumberFromFileName(string fileName)
-    {
-        var name = System.IO.Path.GetFileNameWithoutExtension(fileName);
-        var parts = name.Split('_');
-        foreach (var part in parts)
-        {
-            if (int.TryParse(part, out int num) && num > 0 && num <= 255)
-                return num;
-        }
-        return 0;
-    }
-    private void AssetButton_Click(object sender, RoutedEventArgs e)
-    {
-        var scene = new AssetBrowserScene(_window);
-        _window.SetCurrentScene(scene);
-    }
-    private void GeneralButton_Click(object sender, RoutedEventArgs e)
-    {
-        var scene = new GeneralEditScene(_window);
-        _window.SetCurrentScene(scene);
-    }
-    private void CountryButton_Click(object sender, RoutedEventArgs e)
-    {
-        var scene = new CountryEditScene(_window);
-        _window.SetCurrentScene(scene);
-    }
-    private void CheckDataButton_Click(object sender, RoutedEventArgs e) { }
-    private void SettingsButton_Click(object sender, RoutedEventArgs e) { }
-    private void RecommendButton_Click(object sender, RoutedEventArgs e) { }
-
-    private void EventEditorButton_Click(object sender, RoutedEventArgs e)
-    {
-        var scene = new ArmyGroupEventEditScene(_window);
-        _window.SetCurrentScene(scene);
-    }
-    private void EventBuffButton_Click(object sender, RoutedEventArgs e)
-    {
-        var scene = new EventBuffEditScene(_window);
-        _window.SetCurrentScene(scene);
-    }
-
-    private void ConquerEventButton_Click(object sender, RoutedEventArgs e)
-    {
-        var scene = new ConquerEventEditScene(_window);
-        _window.SetCurrentScene(scene);
-    }
-
-    private void InGameTechButton_Click(object sender, RoutedEventArgs e)
-    {
-        // 局内科技复用科技树画布编辑器（CountryTechEditScene）。
-        // 注：该场景当前读取 CountryTechSettings.json（国家科技）。
-        // 若局内科技需编辑 TechnologySettings.json，其字段 schema 不同
-        // （Level / NeedID / Position[col,row] / CostGold...），需另建解析器与场景。
-        var scene = new CountryTechEditScene(_window);
-        _window.SetCurrentScene(scene);
-    }
-
-    private void SkillButton_Click(object sender, RoutedEventArgs e)
-    {
-        var scene = new SkillEditScene(_window);
-        _window.SetCurrentScene(scene);
-    }
-
-    private void ArmyBuffButton_Click(object sender, RoutedEventArgs e)
-    {
-        var scene = new ArmyBuffEditScene(_window);
-        _window.SetCurrentScene(scene);
-    }
-
-    private void ArmyButton_Click(object sender, RoutedEventArgs e)
-    {
-        var scene = new ArmyEditScene(_window);
-        _window.SetCurrentScene(scene);
-    }
-
-    private void BuildingButton_Click(object sender, RoutedEventArgs e)
-    {
-        var scene = new BuildingFacilityEditScene(_window);
-        _window.SetCurrentScene(scene);
-    }
-
-    private void ArmyGroupButton_Click(object sender, RoutedEventArgs e)
-    {
-        var scene = new ArmyGroupEditScene(_window);
-        _window.SetCurrentScene(scene);
-    }
-
-    private void LayoutButton_Click(object sender, RoutedEventArgs e)
-    {
-        var scene = new LayoutEditScene(_window);
-        _window.SetCurrentScene(scene);
-    }
-
-    // ============================================================= 导航栏翻页 =============================================================
-    private Button CreatePagerButton(string text, RoutedEventHandler handler)
-    {
-        var tb = new TextBlock
-        {
-            Text = text,
-            Foreground = Brushes.White,
-            FontSize = 18,
-            FontWeight = FontWeights.Bold,
-            Effect = new DropShadowEffect { BlurRadius = 4, ShadowDepth = 2, Opacity = 0.8, Color = Colors.Black }
-        };
-
-        var btn = new Button
-        {
-            Content = tb,
-            BorderThickness = new Thickness(0),
-            FontSize = 18,
-            Margin = new Thickness(0, 0, 10, 0),
-            Cursor = Cursors.Hand,
-            Padding = new Thickness(12, 10, 12, 10),
-            Template = CreateNavButtonTemplate()
-        };
-
-        btn.MouseEnter += (s, e) =>
-        {
-            tb.Foreground = Brushes.Black;
-            tb.Effect = null;
-        };
-        btn.MouseLeave += (s, e) =>
-        {
-            tb.Foreground = Brushes.White;
-            tb.Effect = new DropShadowEffect { BlurRadius = 4, ShadowDepth = 2, Opacity = 0.8, Color = Colors.Black };
-        };
-        btn.Click += handler;
-        return btn;
-    }
-
-    private void NavPrev_Click(object sender, RoutedEventArgs e) => AnimateNavPage(_navOffset - 1);
-
-    private void NavNext_Click(object sender, RoutedEventArgs e) => AnimateNavPage(_navOffset + 1);
-
-    // 翻页滑动动画：整排按钮向点击方向滑出，切换后反向滑入
-    private void AnimateNavPage(int targetOffset)
-    {
-        int total = _navPanel.Children.Count;
-        targetOffset = Math.Max(0, Math.Min(targetOffset, Math.Max(0, total - _navVisibleCount)));
-        if (_navAnimating || targetOffset == _navOffset) return;
-        bool forward = targetOffset > _navOffset;
-        _navAnimating = true;
-
-        var tt = (TranslateTransform)_navPanel.RenderTransform!;
-        double slide = forward ? -70 : 70;
-        var easeIn = new QuadraticEase { EasingMode = EasingMode.EaseIn };
-        var easeOut = new QuadraticEase { EasingMode = EasingMode.EaseOut };
-
-        var outX = new DoubleAnimation(0, slide, TimeSpan.FromMilliseconds(130)) { EasingFunction = easeIn };
-        outX.Completed += (_, _) =>
-        {
-            _navOffset = targetOffset;
-            ApplyNavVisibility();
-
-            var inX = new DoubleAnimation(-slide, 0, TimeSpan.FromMilliseconds(190)) { EasingFunction = easeOut };
-            inX.Completed += (_, _) =>
-            {
-                tt.BeginAnimation(TranslateTransform.XProperty, null);
-                _navAnimating = false;
-            };
-            tt.BeginAnimation(TranslateTransform.XProperty, inX);
-        };
-        tt.BeginAnimation(TranslateTransform.XProperty, outX);
-    }
-
-    private void RecalculateNav()
-    {
-        if (_recalculating || _navPrevButton == null || _navNextButton == null || _recommendBtn == null) return;
-        _recalculating = true;
-        try
-        {
-            int total = _navPanel.Children.Count;
-            if (total == 0) { UpdatePagerState(); return; }
-
-            // 先全部显示，再测量各自期望宽度（包含 Margin）
-            foreach (UIElement c in _navPanel.Children) c.Visibility = Visibility.Visible;
-            _navPanel.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
-
-            double inner = _bottomBar.ActualWidth;
-            double used = _navPrevButton.ActualWidth + _navNextButton.ActualWidth + _recommendBtn.ActualWidth + 40;
-            double avail = inner - used;
-            if (avail <= 0) avail = inner * 0.6;
-
-            // 不改变导航栏总宽，确保至少装下 5 个按钮：扣除外边距后按 5 等分
-            int want = Math.Min(5, total);
-            double totalMargin = 0;
-            foreach (UIElement c in _navPanel.Children)
-                if (c is FrameworkElement fe) totalMargin += fe.Margin.Left + fe.Margin.Right;
-            double targetW = Math.Min(_navTextWidth, Math.Floor((avail - totalMargin) / want));
-            if (targetW > 0)
-            {
-                foreach (UIElement c in _navPanel.Children)
-                    if (c is FrameworkElement fe) fe.Width = targetW;
-                _navPanel.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
-            }
-
-            double acc = 0;
-            int count = 0;
-            for (int i = 0; i < total; i++)
-            {
-                var child = _navPanel.Children[i];
-                double w = child is FrameworkElement fe ? fe.DesiredSize.Width : 0;
-                if (count == 0 || acc + w <= avail) { acc += w; count++; }
-                else break;
-            }
-
-            _navVisibleCount = Math.Max(1, count);
-            if (_navOffset > total - _navVisibleCount) _navOffset = Math.Max(0, total - _navVisibleCount);
-            if (_navOffset < 0) _navOffset = 0;
-            ApplyNavVisibility();
-        }
-        finally
-        {
-            _recalculating = false;
-        }
-    }
-
-    private void ApplyNavVisibility()
-    {
-        int total = _navPanel.Children.Count;
-        for (int i = 0; i < total; i++)
-        {
-            _navPanel.Children[i].Visibility = (i >= _navOffset && i < _navOffset + _navVisibleCount) ? Visibility.Visible : Visibility.Collapsed;
-        }
-        UpdatePagerState();
-    }
-
-    private void UpdatePagerState()
-    {
-        int total = _navPanel.Children.Count;
-        bool canPrev = _navOffset > 0;
-        bool canNext = _navOffset + _navVisibleCount < total;
-        _navPrevButton.IsEnabled = canPrev;
-        _navNextButton.IsEnabled = canNext;
-        _navPrevButton.Opacity = canPrev ? 1 : 0.3;
-        _navNextButton.Opacity = canNext ? 1 : 0.3;
-    }
 }

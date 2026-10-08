@@ -1,3 +1,4 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Text.Encodings.Web;
@@ -32,6 +33,7 @@ public class CountryTechSettingParser
         }
     }
 
+    private readonly JsonTableFile<CountryTechData> _techsFile = new();
     private readonly AssetManager _manager = AssetManager.Default;
     private List<CountryTechData> _techs = new();
     private StringTableParser? _stringTable;
@@ -40,6 +42,9 @@ public class CountryTechSettingParser
     public IReadOnlyList<CountryTechData> Items => _techs;
     public string ConfigPath { get; private set; } = "";
     public string StringTablePath { get; private set; } = "";
+
+    public bool HasChanges => _techsFile.HasChanges(_techs) || _stringTable?.IsDirty == true;
+    public string? LastError { get; private set; }
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -58,39 +63,14 @@ public class CountryTechSettingParser
 
     private void ResolvePaths()
     {
-        if (!_manager.IsLoaded)
-        {
-            try { _manager.ScanDefault(); } catch { }
-        }
-
-        var root = _manager.AssetsRoot;
-        if (!string.IsNullOrEmpty(root) && Directory.Exists(root))
-        {
-            ConfigPath = Path.Combine(root, "json", "CountryTechSettings.json");
-            StringTablePath = Path.Combine(root, "stringtable_tw.ini");
-        }
-        else
-        {
-            var baseDir = AppContext.BaseDirectory;
-            string? candidate = null;
-            string? current = baseDir;
-            for (int i = 0; i < 5 && !string.IsNullOrEmpty(current); i++)
-            {
-                var test = Path.Combine(current, "Resource", "WC4DATA", "assets");
-                if (Directory.Exists(test)) { candidate = test; break; }
-                current = Path.GetDirectoryName(current);
-            }
-            candidate ??= Path.GetFullPath(Path.Combine(baseDir ?? "", "..", "..", "..", "..", "Resource", "WC4DATA", "assets"));
-
-            ConfigPath = Path.Combine(candidate, "json", "CountryTechSettings.json");
-            StringTablePath = Path.Combine(candidate, "stringtable_tw.ini");
-        }
-
-        Debug.WriteLine($"[CountryTechSettingParser] ConfigPath={ConfigPath} StringTablePath={StringTablePath}");
+        string root = _manager.GetActiveAssetsRoot();
+        ConfigPath = Path.Combine(root, "json", "CountryTechSettings.json");
+        StringTablePath = Path.Combine(root, "stringtable_tw.ini");
     }
 
     public void LoadAll()
     {
+        _techsFile.Invalidate();
         LoadTechs();
         _stringTable = new StringTableParser(StringTablePath);
     }
@@ -99,13 +79,12 @@ public class CountryTechSettingParser
     {
         try
         {
-            if (!File.Exists(ConfigPath))
+            if (!ProjectFile.Exists(ConfigPath))
             {
                 Debug.WriteLine($"[CountryTechSettingParser] 文件不存在: {ConfigPath}");
                 return;
             }
-            var json = File.ReadAllText(ConfigPath);
-            var data = JsonSerializer.Deserialize<List<CountryTechData>>(json, JsonOpts);
+            var data = _techsFile.Read(ConfigPath, JsonOpts);
             if (data != null) _techs = data;
         }
         catch (Exception ex)
@@ -167,14 +146,15 @@ public class CountryTechSettingParser
     {
         try
         {
-            var json = JsonSerializer.Serialize(_techs, JsonOpts);
-            File.WriteAllText(ConfigPath, json);
-            _stringTable?.Save();
+            AtomicFile.WriteAllWithStringTable(_stringTable,
+                (ConfigPath, _techsFile.Serialize(ConfigPath, _techs)));
             Debug.WriteLine($"[CountryTechSettingParser] 保存成功: {ConfigPath}");
+            LastError = null;
             return true;
         }
         catch (Exception ex)
         {
+            LastError = ex.Message;
             Debug.WriteLine($"[CountryTechSettingParser] 保存失败: {ex.Message}");
             return false;
         }
@@ -182,9 +162,12 @@ public class CountryTechSettingParser
 
     public void Reload() => LoadAll();
 
-    public static void ClearInstance()
+    public static void ClearInstance(bool preserveChanges = false)
     {
-        lock (_lock) { _instance = null; }
+        lock (_lock)
+        {
+            if (!preserveChanges || _instance?.HasChanges != true) _instance = null;
+        }
     }
 }
 

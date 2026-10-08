@@ -4,6 +4,12 @@ namespace WC4MapEditor.Rendering.Skia;
 
 public sealed class OverlayRender
 {
+    private int _hexColumnOffset;
+    public int HexColumnOffset
+    {
+        get => _hexColumnOffset;
+        set { if (_hexColumnOffset == value) return; _hexColumnOffset = value; _cachedHexesInBrush = null; }
+    }
     private string _helpText = string.Empty;
     private string _modeName = string.Empty;
     private bool _showHelp = true;
@@ -217,7 +223,7 @@ public sealed class OverlayRender
         foreach (var (col, row) in _cachedHexesInBrush)
         {
             double centerX = offsetX + col * hexSpacingX;
-            double rowOffsetY = offsetY + (col & 1) * (hexSpacingY / 2);
+            double rowOffsetY = offsetY + ((col + HexColumnOffset) & 1) * (hexSpacingY / 2);
             double centerY = rowOffsetY + row * hexSpacingY;
 
             canvas.Save();
@@ -228,7 +234,7 @@ public sealed class OverlayRender
         }
     }
 
-    private static List<(int col, int row)> GetHexesInBrush(int centerCol, int centerRow, int brushSize, string brushShape)
+    private List<(int col, int row)> GetHexesInBrush(int centerCol, int centerRow, int brushSize, string brushShape)
     {
         var hexes = new List<(int, int)>();
         if (brushShape == "方形")
@@ -245,7 +251,7 @@ public sealed class OverlayRender
             {
                 for (int col = centerCol - brushSize; col <= centerCol + brushSize; col++)
                 {
-                    if (CalculateHexDistance(centerCol, centerRow, col, row) <= brushSize)
+                    if (CalculateHexDistance(centerCol + HexColumnOffset, centerRow, col + HexColumnOffset, row) <= brushSize)
                         hexes.Add((col, row));
                 }
             }

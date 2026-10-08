@@ -10,21 +10,29 @@ public sealed class BuildingModifier : ModifierBase
     public override string DisplayName => "建筑修改器";
 
     private Building? _copiedBuilding;
-    private bool _copiedLevelsOnly;
+    public enum ClipboardKind { Empty, Single, Levels, Group }
+    public ClipboardKind Clipboard { get; private set; }
     private readonly Random _random = new();
 
-    private Dictionary<int, Building>? _copiedBuildingGroup;
+    private Dictionary<HexCoord, Building>? _copiedBuildingGroup;
     private int _copiedGroupMinCol;
     private int _copiedGroupMinRow;
 
     private static readonly int[] DefaultRandomTypes = { 11, 12, 13, 14, 15 };
+
+    public void ClearClipboard()
+    {
+        _copiedBuilding = null;
+        _copiedBuildingGroup = null;
+        Clipboard = ClipboardKind.Empty;
+    }
 
     public override ModifierResult Apply(int col, int row, object? parameter = null)
     {
         if (!IsValidCoord(col, row)) return ModifierResult.Fail("坐标超出范围");
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
 
-        int coordIndex = row * _mapData.MapWidth + col;
+        int coordIndex = _mapData.ToRecordCoordinate(col, row);
         if (coordIndex > ushort.MaxValue)
             return ModifierResult.Fail("该地图位置超过建筑坐标上限 65535，未写入建筑。");
 
@@ -85,7 +93,7 @@ public sealed class BuildingModifier : ModifierBase
         if (!IsValidCoord(col, row) || _mapData == null) return false;
         if (data is not Building building) return false;
 
-        int index = checked(row * _mapData.MapWidth + col);
+        int index = _mapData.ToRecordCoordinate(col, row);
         if (index > ushort.MaxValue)
             return false;
         building.Coordinate = index;
@@ -109,7 +117,7 @@ public sealed class BuildingModifier : ModifierBase
         int idx = _mapData.FindBuildingIndex(col, row);
         if (idx < 0) return ModifierResult.Fail("该位置没有建筑");
         _copiedBuilding = _mapData.Buildings[idx];
-        _copiedLevelsOnly = false;
+        Clipboard = ClipboardKind.Single;
         _copiedBuildingGroup = null;
         return ModifierResult.Ok("已复制完整建筑数据");
     }
@@ -118,7 +126,9 @@ public sealed class BuildingModifier : ModifierBase
     {
         if (_mapData == null) return 0;
 
-        _copiedBuildingGroup = new Dictionary<int, Building>();
+        var previousGroup = _copiedBuildingGroup;
+        int previousCol = _copiedGroupMinCol, previousRow = _copiedGroupMinRow;
+        _copiedBuildingGroup = new Dictionary<HexCoord, Building>();
         _copiedGroupMinCol = int.MaxValue;
         _copiedGroupMinRow = int.MaxValue;
 
@@ -132,11 +142,17 @@ public sealed class BuildingModifier : ModifierBase
             int relRow = coord.Row;
             _copiedGroupMinCol = Math.Min(_copiedGroupMinCol, relCol);
             _copiedGroupMinRow = Math.Min(_copiedGroupMinRow, relRow);
-            int key = relCol * 10000 + relRow;
-            _copiedBuildingGroup[key] = building;
+            _copiedBuildingGroup[coord] = building;
         }
 
+        if (_copiedBuildingGroup.Count == 0)
+        {
+            _copiedBuildingGroup = previousGroup;
+            _copiedGroupMinCol = previousCol; _copiedGroupMinRow = previousRow;
+            return 0;
+        }
         _copiedBuilding = null;
+        Clipboard = ClipboardKind.Group;
         return _copiedBuildingGroup.Count;
     }
 
@@ -148,22 +164,21 @@ public sealed class BuildingModifier : ModifierBase
         int count = 0;
         foreach (var (key, building) in _copiedBuildingGroup)
         {
-            int relCol = key / 10000 - _copiedGroupMinCol;
-            int relRow = key % 10000 - _copiedGroupMinRow;
+            int relCol = key.Col - _copiedGroupMinCol;
+            int relRow = key.Row - _copiedGroupMinRow;
             int destCol = targetCol + relCol;
             int destRow = targetRow + relRow;
 
             if (destCol < 0 || destCol >= _mapData.MapWidth || destRow < 0 || destRow >= _mapData.MapHeight)
                 continue;
 
-            Apply(destCol, destRow, building);
-            count++;
+            if (Apply(destCol, destRow, building).Success) count++;
         }
 
         return count;
     }
 
-    public bool HasCopiedGroup => _copiedBuildingGroup != null && _copiedBuildingGroup.Count > 0;
+    public bool HasCopiedGroup => Clipboard == ClipboardKind.Group && _copiedBuildingGroup?.Count > 0;
 
     public ModifierResult CopyBuildingLevels(int col, int row)
     {
@@ -181,7 +196,8 @@ public sealed class BuildingModifier : ModifierBase
             MissileLevel = src.MissileLevel,
             NuclearLevel = src.NuclearLevel
         };
-        _copiedLevelsOnly = true;
+        _copiedBuildingGroup = null;
+        Clipboard = ClipboardKind.Levels;
         return ModifierResult.Ok("已复制建筑等级数据");
     }
 
@@ -189,6 +205,7 @@ public sealed class BuildingModifier : ModifierBase
     {
         if (!IsValidCoord(col, row)) return ModifierResult.Fail("坐标超出范围");
         if (_copiedBuilding == null) return ModifierResult.Fail("没有已复制的建筑数据");
+        if (Clipboard == ClipboardKind.Levels) return PasteBuildingLevels(col, row);
         return Apply(col, row, _copiedBuilding);
     }
 
@@ -218,7 +235,8 @@ public sealed class BuildingModifier : ModifierBase
     {
         if (_mapData == null) return ModifierResult.Fail("地图数据未初始化");
 
-        var coord = HexCoord.FromIndex(building.Coordinate, _mapData.MapWidth);
+        if (!_mapData.TryGetLocalCoordinate(building.Coordinate, out var coord) || building.Coordinate > ushort.MaxValue)
+            return ModifierResult.Fail("建筑坐标不在当前地图内，未修改地图。");
         int idx = _mapData.FindBuildingIndex(coord.Col, coord.Row);
         if (idx >= 0)
             _mapData.ReplaceBuilding(idx, building);
@@ -247,7 +265,8 @@ public sealed class BuildingModifier : ModifierBase
         var toRemove = new List<Building>();
         foreach (var building in _mapData.Buildings)
         {
-            var province = mapData.GetProvinceRef(building.Coordinate);
+            if (!mapData.TryGetLocalCoordinate(building.Coordinate, out var coord)) continue;
+            var province = mapData.GetProvinceRef(coord.Col, coord.Row);
             if (building.Coordinate != province.ProvinceValue)
                 toRemove.Add(building);
         }
@@ -452,8 +471,8 @@ public sealed class BuildingModifier : ModifierBase
         int mapWidth = _mapData.MapWidth;
 
         int coord = building.Coordinate;
-        int row = coord / mapWidth;
-        int col = coord % mapWidth;
+        var cell = _mapData.ToLocalCoordinate(coord);
+        int col = cell.Col, row = cell.Row;
 
         int picked = 0;
         bool applied = false;
@@ -550,7 +569,7 @@ public sealed class BuildingModifier : ModifierBase
 
             if (targetBelongId >= 0)
             {
-                var coord = HexCoord.FromIndex(building.Coordinate, _mapData.MapWidth);
+                if (!_mapData.TryGetLocalCoordinate(building.Coordinate, out var coord)) continue;
                 var belongId = _mapData.GetBelongValue(coord.Col, coord.Row);
                 if (belongId != targetBelongId) continue;
             }
@@ -572,7 +591,7 @@ public sealed class BuildingModifier : ModifierBase
         int count = 0;
         foreach (var building in _mapData.Buildings)
         {
-            var coord = HexCoord.FromIndex(building.Coordinate, _mapData.MapWidth);
+            if (!mapData.TryGetLocalCoordinate(building.Coordinate, out var coord) || building.Coordinate is <= 0 or >= ushort.MaxValue) continue;
             ref var province = ref mapData.GetProvinceRef(coord.Col, coord.Row);
             if (province.ProvinceValue == 0 || province.ProvinceValue == 0xFFFF)
             {
@@ -597,7 +616,7 @@ public sealed class BuildingModifier : ModifierBase
         int count = 0;
         foreach (var building in _mapData.Buildings)
         {
-            var coord = HexCoord.FromIndex(building.Coordinate, _mapData.MapWidth);
+            if (!mapData.TryGetLocalCoordinate(building.Coordinate, out var coord)) continue;
             ref var province = ref mapData.GetProvinceRef(coord.Col, coord.Row);
             if (province.ProvinceValue != 0 && province.ProvinceValue != 0xFFFF)
                 count++;
@@ -620,7 +639,7 @@ public sealed class BuildingModifier : ModifierBase
             var province = _mapData.GetProvinceRef(i);
 
             // 省会：省区值等于格子索引，且不是空白省区
-            if (province.ProvinceValue != i || province.ProvinceValue == 0xFFFF)
+            if (province.ProvinceValue != _mapData.ToRecordCoordinate(i % _mapData.MapWidth, i / _mapData.MapWidth) || province.ProvinceValue == 0xFFFF)
                 continue;
 
             var coord = HexCoord.FromIndex(i, _mapData.MapWidth);
@@ -662,8 +681,8 @@ public sealed class BuildingModifier : ModifierBase
             if (!needDirection.Contains(building.BuildingType)) continue;
 
             int coord = building.Coordinate;
-            int row = coord / _mapData.MapWidth;
-            int col = coord % _mapData.MapWidth;
+            if (!_mapData.TryGetLocalCoordinate(coord, out var cell)) continue;
+            int col = cell.Col, row = cell.Row;
 
             var neighborTerrain = GetNeighborTerrain(row, col);
             building.Appearance = (byte)DetermineAppearanceByNeighbors(neighborTerrain);
@@ -776,7 +795,7 @@ public sealed class BuildingModifier : ModifierBase
         for (int i = 0; i < totalCells; i++)
         {
             int provinceValue = _mapData.GetProvinceRef(i).ProvinceValue;
-            if (provinceValue == selectedProvinceValue && provinceValue == i)
+            if (provinceValue == selectedProvinceValue && provinceValue == _mapData.ToRecordCoordinate(i % _mapData.MapWidth, i / _mapData.MapWidth))
             {
                 capitalIndex = i;
                 break;
@@ -785,7 +804,7 @@ public sealed class BuildingModifier : ModifierBase
 
         if (capitalIndex < 0) return;
 
-        int capitalBelongId = _mapData.GetBelongValueByIndex(capitalIndex);
+        int capitalBelongId = _mapData.GetBelongAtRecordCoordinate(capitalIndex);
         if (capitalBelongId >= 0)
         {
             int c = index % _mapData.MapWidth;
@@ -813,8 +832,8 @@ public sealed class BuildingModifier : ModifierBase
     };
 
     /// <summary>六边形邻居方向偏移（奇偶列不同）</summary>
-    private static (string Name, int DR, int DC)[] GetHexDirections(int col)
-        => col % 2 == 0 ? HexDirectionsEven : HexDirectionsOdd;
+    private (string Name, int DR, int DC)[] GetHexDirections(int col)
+        => _mapData?.IsOddColumn(col) == true ? HexDirectionsOdd : HexDirectionsEven;
 
     /// <summary>
     /// 六边形 BFS：统计以 (col,row) 为中心、range 层六边形邻域内的建筑数量（含中心格自身）。
@@ -828,7 +847,7 @@ public sealed class BuildingModifier : ModifierBase
         int mapHeight = _mapData.MapHeight;
 
         int centerIndex = row * mapWidth + col;
-        int count = occupied.Contains(centerIndex) ? 1 : 0;
+        int count = occupied.Contains(_mapData.ToRecordCoordinate(col, row)) ? 1 : 0;
 
         if (range <= 0) return count;
 
@@ -850,7 +869,7 @@ public sealed class BuildingModifier : ModifierBase
                     int idx = nr * mapWidth + nc;
                     if (!visited.Add(idx)) continue;
 
-                    if (occupied.Contains(idx)) count++;
+                    if (occupied.Contains(_mapData.ToRecordCoordinate(nc, nr))) count++;
                     next.Add((nc, nr));
                 }
             }
@@ -944,7 +963,7 @@ public sealed class BuildingModifier : ModifierBase
                 var province = _mapData.GetProvinceRef(index);
 
                 // 省会：省区值等于格子索引
-                if (province.ProvinceValue == index)
+                if (province.ProvinceValue == _mapData.ToRecordCoordinate(col, row))
                 {
                     int belongId = _mapData.GetBelongValueByIndex(index);
                     if (belongId >= 0 && belongId != 0xFF)
@@ -1009,7 +1028,7 @@ public sealed class BuildingModifier : ModifierBase
             : new List<int> { 31, 32, 33, 34 };
 
         // Coordinate 是 int，不能转 short：地图格子索引超过 32767 会被截断成错误坐标
-        var building = Building.CreateDefault(index);
+        var building = Building.CreateDefault(_mapData.ToRecordCoordinate(index % _mapData.MapWidth, index / _mapData.MapWidth));
         building.BuildingType = (byte)buildingType;
         building.Name = 0;
         building.FactoryLevel = 0;
@@ -1068,6 +1087,9 @@ public sealed class BuildingModifier : ModifierBase
             return ModifierResult.Fail("目标坐标超出范围");
         if (fromCol == toCol && fromRow == toRow)
             return ModifierResult.Fail("源与目标为同一格");
+        int targetCoordinate = _mapData.ToRecordCoordinate(toCol, toRow);
+        if (targetCoordinate > ushort.MaxValue)
+            return ModifierResult.Fail("目标建筑坐标超过 65535，未移动建筑。");
 
         int sourceIdx = _mapData.FindBuildingIndex(fromCol, fromRow);
         if (sourceIdx < 0) return ModifierResult.Fail("源格子没有建筑");
@@ -1088,7 +1110,7 @@ public sealed class BuildingModifier : ModifierBase
         }
 
         // 移动建筑本体（删除后索引可能变化，重新查源格）
-        movingBuilding.Coordinate = toRow * mapWidth + toCol;
+        movingBuilding.Coordinate = targetCoordinate;
         int sourceIdxNow = _mapData.FindBuildingIndex(fromCol, fromRow);
         if (sourceIdxNow >= 0)
             _mapData.ReplaceBuilding(sourceIdxNow, movingBuilding);

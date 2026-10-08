@@ -1,3 +1,4 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.IO;
 using SkiaSharp;
 using WC4MapEditor.Core.Assets;
@@ -77,15 +78,11 @@ internal static class LayoutFontProvider
         try
         {
             var manager = AssetManager.Default;
-            if (!manager.IsLoaded)
-            {
-                try { manager.ScanDefault(); } catch { /* ignore */ }
-            }
 
             var entry = manager.Find(PreferredFontRelative);
-            if (entry != null && File.Exists(entry.FullPath))
+            if (entry != null && ProjectFile.Exists(entry.FullPath))
             {
-                var tf = SKTypeface.FromFile(entry.FullPath);
+                var tf = SKTypeface.FromFile(ProjectFile.ResolveRead(entry.FullPath));
                 if (tf != null)
                 {
                     Source = $"assets/{PreferredFontRelative}";
@@ -98,9 +95,9 @@ internal static class LayoutFontProvider
             if (!string.IsNullOrEmpty(root))
             {
                 var path = System.IO.Path.Combine(root, "font", "NotoSans_tw.otf");
-                if (File.Exists(path))
+                if (ProjectFile.Exists(path))
                 {
-                    var tf = SKTypeface.FromFile(path);
+                    var tf = SKTypeface.FromFile(ProjectFile.ResolveRead(path));
                     if (tf != null)
                     {
                         Source = path;
@@ -114,7 +111,7 @@ internal static class LayoutFontProvider
         // 3) 系统中文黑体
         foreach (var p in FallbackFiles)
         {
-            if (!File.Exists(p)) continue;
+            if (!ProjectFile.Exists(p)) continue;
             try
             {
                 var tf = SKTypeface.FromFile(p);
@@ -149,6 +146,17 @@ internal static class LayoutFontProvider
     private static readonly Dictionary<string, BmFont> _bmFonts = new(StringComparer.OrdinalIgnoreCase);
     private static bool _bmResolved;
 
+    public static void ClearCache()
+    {
+        if (_typeface != null && !ReferenceEquals(_typeface, SKTypeface.Default)) _typeface.Dispose();
+        _typeface = null;
+        _resolved = false;
+        Source = "未解析";
+        foreach (var font in _bmFonts.Values.Distinct()) font.Page?.Dispose();
+        _bmFonts.Clear();
+        _bmResolved = false;
+    }
+
     /// <summary>按名查位图字体（支持去 _hd 后缀、前缀匹配）；找不到返回 null。</summary>
     public static BmFont? GetBmFont(string? name)
     {
@@ -169,17 +177,17 @@ internal static class LayoutFontProvider
         try
         {
             var manager = AssetManager.Default;
-            if (!manager.IsLoaded) { try { manager.ScanDefault(); } catch { } }
+            if (!manager.IsLoaded) return;
             var root = manager.AssetsRoot;
-            if (string.IsNullOrEmpty(root) || !Directory.Exists(root)) return;
+            if (string.IsNullOrEmpty(root) || !ProjectFile.DirectoryExists(root)) return;
             var fontDir = System.IO.Path.Combine(root, "font");
-            if (!Directory.Exists(fontDir)) return;
+            if (!ProjectFile.DirectoryExists(fontDir)) return;
 
-            foreach (var fnt in Directory.EnumerateFiles(fontDir, "*.fnt", SearchOption.TopDirectoryOnly))
+            foreach (var fnt in ProjectFile.EnumerateFiles(fontDir, "*.fnt", SearchOption.TopDirectoryOnly))
             {
                 var baseName = System.IO.Path.GetFileNameWithoutExtension(fnt);
                 var png = System.IO.Path.Combine(fontDir, baseName + ".png");
-                if (!File.Exists(png)) continue;
+                if (!ProjectFile.Exists(png)) continue;
                 var font = ParseFnt(fnt, png);
                 if (font is { Ready: true } bf)
                 {
@@ -201,7 +209,7 @@ internal static class LayoutFontProvider
     {
         try
         {
-            var data = File.ReadAllBytes(fntPath);
+            var data = ProjectFile.ReadAllBytes(fntPath);
             if (data.Length < 8) return null;
             var font = new BmFont
             {
@@ -225,8 +233,7 @@ internal static class LayoutFontProvider
                 };
                 font.Glyphs[g.Code] = g;
             }
-            using var stream = File.OpenRead(pngPath);
-            font.Page = SKBitmap.Decode(stream);
+            font.Page = WC4MapEditor.Rendering.Imaging.ProjectImageDecoder.Decode(ProjectFile.ReadAllBytes(pngPath));
             return font;
         }
         catch { return null; }

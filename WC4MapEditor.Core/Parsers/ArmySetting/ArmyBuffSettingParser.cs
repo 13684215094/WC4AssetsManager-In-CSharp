@@ -1,3 +1,4 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Text.Encodings.Web;
@@ -32,6 +33,7 @@ public class ArmyBuffSettingParser
         }
     }
 
+    private readonly JsonTableFile<ArmyBuffSettingData> _buffsFile = new();
     private readonly AssetManager _manager = AssetManager.Default;
     private List<ArmyBuffSettingData> _buffs = new();
     private StringTableParser? _stringTable;
@@ -40,6 +42,9 @@ public class ArmyBuffSettingParser
     public List<ArmyBuffSettingData> Items => _buffs;
     public string ConfigPath { get; private set; } = "";
     public string StringTablePath { get; private set; } = "";
+
+    public bool HasChanges => _buffsFile.HasChanges(_buffs) || _stringTable?.IsDirty == true;
+    public string? LastError { get; private set; }
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -58,39 +63,14 @@ public class ArmyBuffSettingParser
 
     private void ResolvePaths()
     {
-        if (!_manager.IsLoaded)
-        {
-            try { _manager.ScanDefault(); } catch { }
-        }
-
-        var root = _manager.AssetsRoot;
-        if (!string.IsNullOrEmpty(root) && Directory.Exists(root))
-        {
-            ConfigPath = Path.Combine(root, "json", "ArmyBuffSettings.json");
-            StringTablePath = Path.Combine(root, "stringtable_tw.ini");
-        }
-        else
-        {
-            var baseDir = AppContext.BaseDirectory;
-            string? candidate = null;
-            string? current = baseDir;
-            for (int i = 0; i < 5 && !string.IsNullOrEmpty(current); i++)
-            {
-                var test = Path.Combine(current, "Resource", "WC4DATA", "assets");
-                if (Directory.Exists(test)) { candidate = test; break; }
-                current = Path.GetDirectoryName(current);
-            }
-            candidate ??= Path.GetFullPath(Path.Combine(baseDir ?? "", "..", "..", "..", "..", "Resource", "WC4DATA", "assets"));
-
-            ConfigPath = Path.Combine(candidate, "json", "ArmyBuffSettings.json");
-            StringTablePath = Path.Combine(candidate, "stringtable_tw.ini");
-        }
-
-        Debug.WriteLine($"[ArmyBuffSettingParser] ConfigPath={ConfigPath} StringTablePath={StringTablePath}");
+        string root = _manager.GetActiveAssetsRoot();
+        ConfigPath = Path.Combine(root, "json", "ArmyBuffSettings.json");
+        StringTablePath = Path.Combine(root, "stringtable_tw.ini");
     }
 
     public void LoadAll()
     {
+        _buffsFile.Invalidate();
         LoadBuffs();
         _stringTable = new StringTableParser(StringTablePath);
     }
@@ -99,13 +79,12 @@ public class ArmyBuffSettingParser
     {
         try
         {
-            if (!File.Exists(ConfigPath))
+            if (!ProjectFile.Exists(ConfigPath))
             {
                 Debug.WriteLine($"[ArmyBuffSettingParser] 文件不存在: {ConfigPath}");
                 return;
             }
-            var json = File.ReadAllText(ConfigPath);
-            var data = JsonSerializer.Deserialize<List<ArmyBuffSettingData>>(json, JsonOpts);
+            var data = _buffsFile.Read(ConfigPath, JsonOpts);
             if (data != null) _buffs = data;
         }
         catch (Exception ex)
@@ -153,14 +132,15 @@ public class ArmyBuffSettingParser
     {
         try
         {
-            var json = JsonSerializer.Serialize(_buffs, JsonOpts);
-            File.WriteAllText(ConfigPath, json);
-            _stringTable?.Save();
+            AtomicFile.WriteAllWithStringTable(_stringTable,
+                (ConfigPath, _buffsFile.Serialize(ConfigPath, _buffs)));
             Debug.WriteLine($"[ArmyBuffSettingParser] 保存成功: {ConfigPath}");
+            LastError = null;
             return true;
         }
         catch (Exception ex)
         {
+            LastError = ex.Message;
             Debug.WriteLine($"[ArmyBuffSettingParser] 保存失败: {ex.Message}");
             return false;
         }
@@ -168,9 +148,12 @@ public class ArmyBuffSettingParser
 
     public void Reload() => LoadAll();
 
-    public static void ClearInstance()
+    public static void ClearInstance(bool preserveChanges = false)
     {
-        lock (_lock) { _instance = null; }
+        lock (_lock)
+        {
+            if (!preserveChanges || _instance?.HasChanges != true) _instance = null;
+        }
     }
 }
 

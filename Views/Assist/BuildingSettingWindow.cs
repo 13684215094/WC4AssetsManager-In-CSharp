@@ -606,7 +606,13 @@ public sealed class BuildingSettingWindow : Window
 
     private void ConfirmAndClose()
     {
-        SaveBuildingData();
+        try { SaveBuildingData(); }
+        catch (ArgumentException ex)
+        {
+            MessageBox.Show(this, ex.Message, "输入无效", MessageBoxButton.OK, MessageBoxImage.Warning);
+            _textBoxes.GetValueOrDefault("name")?.Focus();
+            return;
+        }
         _confirmed = true;
         PlayFadeOutAndClose();
     }

@@ -12,7 +12,6 @@ public sealed class ConfirmDialog : IDisposable
 {
     private readonly Window _owner;
     private Border? _overlay;
-    private Border? _dialogPanel;
     private TaskCompletionSource<bool>? _tcs;
     private bool _isClosed;
 

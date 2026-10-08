@@ -1,6 +1,8 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
@@ -26,6 +28,7 @@ public partial class MainWindow : Window
     private const int WS_CAPTION = 0xC00000;
     private const int GWL_STYLE = -16;
     private const int WM_NCHITTEST = 0x84;
+    private const int WM_GETMINMAXINFO = 0x24;
     private const int HTLEFT = 10;
     private const int HTRIGHT = 11;
     private const int HTTOP = 12;
@@ -42,10 +45,48 @@ public partial class MainWindow : Window
     [DllImport("user32.dll")]
     private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
 
+    [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativePoint { public int X, Y; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRect { public int Left, Top, Right, Bottom; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MinMaxInfo
+    {
+        public NativePoint Reserved, MaxSize, MaxPosition, MinTrackSize, MaxTrackSize;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MonitorInfo
+    {
+        public int Size;
+        public NativeRect Monitor, Work;
+        public uint Flags;
+    }
+
     private HwndSource? _hwndSource;
     private Grid _mainGrid = null!;
+    private Grid _sceneHost = null!;
+    private Border _windowControls = null!;
+    private Button _maximizeButton = null!;
     private UserControl? _currentScene;
     private bool _isClosing;
+    private bool _isSwitchingScene;
+    private readonly HashSet<Key> _forwardedMapKeys = [];
+    private readonly DispatcherTimer _contextTimer = new() { Interval = TimeSpan.FromMilliseconds(250) };
+    private TextBlock _projectContext = null!;
+    private TextBlock _documentState = null!;
+    private Button _saveDocument = null!;
+
+    public GameProjectSession Projects { get; } = new();
 
     /// <summary>
     /// 鼠标输入管理器（由 DI 注入，供各渲染场景共享）
@@ -84,6 +125,13 @@ public partial class MainWindow : Window
         SetupWindow();
         Loaded += MainWindow_Loaded;
         Closed += MainWindow_Closed;
+        Deactivated += (_, _) => { KeyboardManager.ResetState(); _forwardedMapKeys.Clear(); };
+        PreviewLostKeyboardFocus += (_, args) =>
+        {
+            if (_currentScene is RenderSceneBase map && map.IsMapKeyboardTarget(args.OldFocus) && !map.IsMapKeyboardTarget(args.NewFocus))
+            { KeyboardManager.ResetState(); _forwardedMapKeys.Clear(); }
+        };
+        _contextTimer.Tick += (_, _) => { _contextTimer.Stop(); UpdateDocumentContext(); };
     }
 
     private void SetupWindow()
@@ -91,8 +139,8 @@ public partial class MainWindow : Window
         Title = ConfigManager.Instance.GetText("TitleBarText", "WC4 Map Editor");
         Width = 1250;
         Height = 700;
-        MinWidth = 125;
-        MinHeight = 70;
+        MinWidth = 760;
+        MinHeight = 520;
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
         Background = Brushes.Transparent;
         WindowStyle = WindowStyle.None;
@@ -111,8 +159,146 @@ public partial class MainWindow : Window
         _mainGrid.Background = new SolidColorBrush(ColorFromInt(ConfigManager.Instance.GetThemeColor()));
 
         Content = _mainGrid;
+        var layout = new Grid();
+        layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        layout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        _mainGrid.Children.Add(layout);
+        CreateWindowControls();
+        layout.Children.Add(_windowControls);
+        _sceneHost = new Grid();
+        _sceneHost.AddHandler(TextBox.TextChangedEvent, new TextChangedEventHandler((_, _) => QueueDocumentContext()));
+        _sceneHost.AddHandler(Selector.SelectionChangedEvent, new SelectionChangedEventHandler((_, _) => QueueDocumentContext()));
+        _sceneHost.AddHandler(ButtonBase.ClickEvent, new RoutedEventHandler((_, _) => QueueDocumentContext()));
+        _sceneHost.AddHandler(Mouse.MouseUpEvent, new MouseButtonEventHandler((_, _) => QueueDocumentContext()), true);
+        Grid.SetRow(_sceneHost, 1);
+        layout.Children.Add(_sceneHost);
+        StateChanged += (_, _) => UpdateWindowControlsState();
         PreviewKeyDown += MainWindow_PreviewKeyDown;
         PreviewKeyUp += MainWindow_PreviewKeyUp;
+    }
+
+    private void CreateWindowControls()
+    {
+        _windowControls = new Border
+        {
+            Background = new SolidColorBrush(Color.FromRgb(25, 25, 30)),
+            Padding = new Thickness(8, 3, 8, 3)
+        };
+        _windowControls.MouseLeftButtonDown += (_, e) =>
+        {
+            if (e.ClickCount == 2) ToggleMaximize();
+            else if (e.LeftButton == MouseButtonState.Pressed && WindowState == WindowState.Normal) DragMove();
+        };
+        var titleBar = new DockPanel { LastChildFill = true };
+        var buttons = new StackPanel { Orientation = Orientation.Horizontal };
+        buttons.Children.Add(CreateWindowButton("−", "最小化窗口", (_, _) => MinimizeWindow()));
+        _maximizeButton = CreateWindowButton("□", "最大化/全屏（F11）", (_, _) => ToggleMaximize());
+        buttons.Children.Add(_maximizeButton);
+        var closeButton = CreateWindowButton("×", "关闭窗口", (_, _) => CloseApplication());
+        closeButton.Foreground = new SolidColorBrush(Color.FromRgb(255, 150, 150));
+        buttons.Children.Add(closeButton);
+        DockPanel.SetDock(buttons, Dock.Right);
+        titleBar.Children.Add(buttons);
+        var documentActions = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        _documentState = new TextBlock { Foreground = Brushes.LightGray, Margin = new Thickness(8, 0, 8, 0), VerticalAlignment = VerticalAlignment.Center };
+        _saveDocument = new Button { Content = "保存 (Ctrl+S)", Padding = new Thickness(8, 3, 8, 3), Margin = new Thickness(4, 0, 10, 0) };
+        _saveDocument.Click += (_, _) => SaveCurrentDocument();
+        documentActions.Children.Add(_documentState); documentActions.Children.Add(_saveDocument);
+        DockPanel.SetDock(documentActions, Dock.Right); titleBar.Children.Add(documentActions);
+        _projectContext = new TextBlock
+        {
+            Text = Title,
+            Focusable = true,
+            Foreground = Brushes.White,
+            FontSize = 13,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(8, 0, 12, 0),
+            TextTrimming = TextTrimming.CharacterEllipsis
+        };
+        KeyboardNavigation.SetIsTabStop(_projectContext, false);
+        titleBar.Children.Add(_projectContext);
+        _windowControls.Child = titleBar;
+    }
+
+    private void QueueDocumentContext()
+    {
+        _contextTimer.Stop(); _contextTimer.Start();
+    }
+
+    private void UpdateDocumentContext()
+    {
+        var project = Projects.Current;
+        _projectContext.Text = project == null ? Title : $"{IOPath.GetFileName(project.SourcePath.TrimEnd(IOPath.DirectorySeparatorChar))} · {Title}";
+        _projectContext.ToolTip = project == null ? Title : $"来源（只读）：{project.SourcePath}\n增量输出：{project.OutputRoot}";
+        bool editable = _currentScene is IUnsavedScene;
+        bool dirty = (_currentScene as IUnsavedScene)?.HasUnsavedChanges == true;
+        _documentState.Text = dirty ? "有未保存修改 / 待修正输入" : editable ? "无未保存修改" : "";
+        _documentState.Foreground = dirty ? Brushes.LightGoldenrodYellow : Brushes.LightGray;
+        _saveDocument.Visibility = editable ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void SaveCurrentDocument()
+    {
+        if (_isClosing || _isSwitchingScene || _currentScene is not IUnsavedScene document || IsDialogOverlayOpen()) return;
+        bool saved = CommitInputsAndRestoreFocus(document.SaveChanges);
+        UpdateDocumentContext();
+        if (saved) _documentState.Text = "已保存到输出目录";
+    }
+
+    private T CommitInputsAndRestoreFocus<T>(Func<T> action)
+    {
+        var previous = Keyboard.FocusedElement;
+        try
+        {
+            // Move logical focus as well, so fields that commit on LostFocus are included.
+            _projectContext.Focus();
+            return action();
+        }
+        finally
+        {
+            if (IsActive && !IsDialogOverlayOpen() && previous is UIElement { IsVisible: true, IsEnabled: true } element &&
+                Window.GetWindow(element) == this && (Keyboard.FocusedElement == null ||
+                    ReferenceEquals(Keyboard.FocusedElement, _projectContext) || ReferenceEquals(Keyboard.FocusedElement, previous)))
+                Keyboard.Focus(element);
+        }
+    }
+
+    private static Button CreateWindowButton(string content, string tooltip, RoutedEventHandler handler)
+    {
+        var button = new Button
+        {
+            Content = content,
+            Width = 34,
+            Height = 28,
+            Padding = new Thickness(0),
+            Margin = new Thickness(1),
+            FontSize = 17,
+            Foreground = Brushes.White,
+            Background = Brushes.Transparent,
+            BorderThickness = new Thickness(0),
+            Cursor = Cursors.Hand,
+            ToolTip = tooltip
+        };
+        button.Click += handler;
+        System.Windows.Automation.AutomationProperties.SetName(button, tooltip);
+        return button;
+    }
+
+    private void UpdateWindowControlsState()
+    {
+        if (_windowControls == null) return;
+        bool maximized = WindowState == WindowState.Maximized;
+        _maximizeButton.Content = maximized ? "❐" : "□";
+        _maximizeButton.ToolTip = maximized ? "还原窗口（F11）" : "最大化/全屏（F11）";
+        System.Windows.Automation.AutomationProperties.SetName(_maximizeButton, (string)_maximizeButton.ToolTip);
+        _mainGrid.Margin = maximized ? new Thickness(0) : new Thickness(10);
+        _mainGrid.Effect = maximized ? null : new DropShadowEffect
+        {
+            BlurRadius = 15,
+            ShadowDepth = 5,
+            Opacity = 0.6,
+            Color = Colors.Black
+        };
     }
 
     private void MainWindow_Loaded(object? sender, RoutedEventArgs e)
@@ -120,13 +306,12 @@ public partial class MainWindow : Window
         RenderSceneManager.Instance.SceneSwitchRequested += OnSceneSwitchRequested;
 
         double targetTop = Top;
-        double screenHeight = SystemParameters.PrimaryScreenHeight;
-        Top = screenHeight;
-        Opacity = 0;
+        double screenBottom = SystemParameters.WorkArea.Bottom;
 
-        var topAnim = new DoubleAnimation(screenHeight, targetTop, TimeSpan.FromMilliseconds(500))
-        { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } };
-        var opacityAnim = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(400));
+        var topAnim = new DoubleAnimation(screenBottom, targetTop, TimeSpan.FromMilliseconds(500))
+        { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }, FillBehavior = FillBehavior.Stop };
+        var opacityAnim = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(400))
+        { FillBehavior = FillBehavior.Stop };
 
         BeginAnimation(TopProperty, topAnim);
         BeginAnimation(OpacityProperty, opacityAnim);
@@ -155,7 +340,7 @@ public partial class MainWindow : Window
     private async void ShowLogoAnimationAsync()
     {
         string logoPath = IOPath.Combine(ConfigManager.Instance.GetLogoPath(), "Logo.png");
-        if (!System.IO.File.Exists(logoPath)) { SwitchToBeginScene(); return; }
+        if (!ProjectFile.Exists(logoPath)) { SwitchToBeginScene(); return; }
 
         var logoWindow = new Window
         {
@@ -339,6 +524,19 @@ public partial class MainWindow : Window
         SetCurrentScene(beginScene);
     }
 
+    public void ShowProjectLoader()
+    {
+        if (!ConfirmAllUnsavedChanges("切换项目")) return;
+        SetCurrentScene(new BeginScene(this, showProjectLoader: true));
+    }
+
+    public void CloseProject()
+    {
+        if (!ConfirmAllUnsavedChanges("关闭项目")) return;
+        Projects.Activate(null);
+        SwitchToBeginScene();
+    }
+
     private void RemoveWindowBorder()
     {
         IntPtr hwnd = new WindowInteropHelper(this).Handle;
@@ -352,9 +550,26 @@ public partial class MainWindow : Window
 
     private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
-        if (msg == WM_NCHITTEST)
+        if (msg == WM_GETMINMAXINFO)
         {
-            var mp = new Point(lParam.ToInt32() & 0xFFFF, (lParam.ToInt32() >> 16) & 0xFFFF);
+            var monitor = MonitorFromWindow(hwnd, 2);
+            var info = new MonitorInfo { Size = Marshal.SizeOf<MonitorInfo>() };
+            if (monitor != IntPtr.Zero && GetMonitorInfo(monitor, ref info))
+            {
+                // Borderless windows still maximize within the current monitor's taskbar work area.
+                var limits = Marshal.PtrToStructure<MinMaxInfo>(lParam);
+                limits.MaxPosition.X = info.Work.Left - info.Monitor.Left;
+                limits.MaxPosition.Y = info.Work.Top - info.Monitor.Top;
+                limits.MaxSize.X = info.Work.Right - info.Work.Left;
+                limits.MaxSize.Y = info.Work.Bottom - info.Work.Top;
+                Marshal.StructureToPtr(limits, lParam, false);
+                handled = true;
+            }
+        }
+        else if (msg == WM_NCHITTEST && WindowState == WindowState.Normal)
+        {
+            long position = lParam.ToInt64();
+            var mp = new Point((short)(position & 0xFFFF), (short)((position >> 16) & 0xFFFF));
             var wp = PointFromScreen(mp);
             bool l = wp.X < BORDER_WIDTH, r = wp.X > ActualWidth - BORDER_WIDTH;
             bool t = wp.Y < BORDER_WIDTH, b = wp.Y > ActualHeight - BORDER_WIDTH;
@@ -374,7 +589,11 @@ public partial class MainWindow : Window
     {
         if (_isClosing) { base.OnClosing(e); return; }
         e.Cancel = true;
+        if (_isSwitchingScene) return;
+        if (!ConfirmAllUnsavedChanges("关闭窗口")) return;
         _isClosing = true;
+        _sceneHost.IsEnabled = false;
+        _saveDocument.IsEnabled = false;
         RenderTransformOrigin = new System.Windows.Point(0.5, 0.5);
         var st = new ScaleTransform(1, 1);
         RenderTransform = st;
@@ -390,40 +609,55 @@ public partial class MainWindow : Window
 
     private void MainWindow_Closed(object? sender, EventArgs e)
     {
+        _contextTimer.Stop();
         if (_currentScene is IDisposable d) d.Dispose();
         _currentScene = null;
     }
 
     private void MainWindow_PreviewKeyDown(object? sender, KeyEventArgs e)
     {
-        // 对话框覆盖层打开时按模态处理：窗口级快捷键让位给对话框自身的输入，
-        // 这样 Tab 才能在输入框之间切换焦点，而不是触发“查看格子信息”。
+        if (e.Key == Key.F11 && Keyboard.Modifiers == ModifierKeys.None)
+        {
+            if (!e.IsRepeat && !IsDialogOverlayOpen()) ToggleMaximize();
+            e.Handled = true;
+            return;
+        }
+
+        if (_isClosing || _isSwitchingScene) { e.Handled = true; return; }
         if (IsDialogOverlayOpen()) return;
+        if (e.Key == Key.S && Keyboard.Modifiers == ModifierKeys.Control && _currentScene is IUnsavedScene)
+        {
+            if (!e.IsRepeat) SaveCurrentDocument();
+            e.Handled = true; return;
+        }
+        if (_currentScene is not RenderSceneBase { ReceivesMapKeyboardInput: true } || Keyboard.Modifiers != ModifierKeys.None) return;
+        KeyboardManager.SetModifierState(KeyModifiers.None);
 
         if (e.Key == Key.F3)
         {
             KeyboardManager.ProcessKeyDown((int)Key.F3);
+            _forwardedMapKeys.Add(Key.F3);
             e.Handled = true;
         }
         else if (e.Key == Key.Tab)
         {
             KeyboardManager.ProcessKeyDown((int)Key.Tab);
+            _forwardedMapKeys.Add(Key.Tab);
             e.Handled = true;
         }
     }
 
     private void MainWindow_PreviewKeyUp(object? sender, KeyEventArgs e)
     {
-        if (IsDialogOverlayOpen()) return;
-
-        if (e.Key == Key.F3)
+        if (_currentScene is IUnsavedScene) QueueDocumentContext();
+        if (e.Key == Key.F11)
         {
-            KeyboardManager.ProcessKeyUp((int)Key.F3);
             e.Handled = true;
+            return;
         }
-        else if (e.Key == Key.Tab)
+        if (_forwardedMapKeys.Remove(e.Key))
         {
-            KeyboardManager.ProcessKeyUp((int)Key.Tab);
+            KeyboardManager.ProcessKeyUp((int)e.Key);
             e.Handled = true;
         }
     }
@@ -454,8 +688,10 @@ public partial class MainWindow : Window
 
     private void OnSceneSwitchRequested(object? sender, SceneSwitchRequestEventArgs e)
     {
+        if (Projects.Current == null) return;
         Dispatcher.Invoke(() =>
         {
+            if (_isClosing || _isSwitchingScene) return;
             var newScene = CreateRenderScene(e.TargetSceneType, e.MapFilePath);
             if (newScene != null)
             {
@@ -480,8 +716,32 @@ public partial class MainWindow : Window
 
     public void SetCurrentScene(UserControl scene)
     {
+        if (ReferenceEquals(scene, _currentScene)) return;
+        if (_isClosing || _isSwitchingScene)
+        {
+            if (scene is IDisposable pending) pending.Dispose();
+            return;
+        }
+        if (Projects.Current == null && scene is not BeginScene)
+        {
+            if (scene is IDisposable rejected) rejected.Dispose();
+            return;
+        }
+        if (_currentScene is IUnsavedScene document &&
+            !(_currentScene is RenderSceneBase && scene is RenderSceneBase) &&
+            !ConfirmUnsavedDocument(document, "离开编辑器"))
+        {
+            if (scene is IDisposable cancelled) cancelled.Dispose();
+            return;
+        }
+        KeyboardManager.ResetState(); _forwardedMapKeys.Clear();
+        QueueDocumentContext();
         if (_currentScene != null)
         {
+            // The leave decision is final; the fading editor must no longer accept edits or another switch.
+            _isSwitchingScene = true;
+            _sceneHost.IsEnabled = false;
+            _saveDocument.IsEnabled = false;
             // 如果是渲染场景（战役/征服等），显示加载画面
             if (scene is RenderSceneBase)
             {
@@ -491,10 +751,11 @@ public partial class MainWindow : Window
             {
                 FadeOutScene(() =>
                 {
-                    _mainGrid.Children.Remove(_currentScene);
+                    _sceneHost.Children.Remove(_currentScene);
                     if (_currentScene is IDisposable d) d.Dispose();
                     _currentScene = scene;
-                    _mainGrid.Children.Add(scene);
+                    CompleteSceneSwitch();
+                    _sceneHost.Children.Add(scene);
                     FadeInScene(scene);
                 });
             }
@@ -502,9 +763,65 @@ public partial class MainWindow : Window
         else
         {
             _currentScene = scene;
-            _mainGrid.Children.Add(scene);
+            _sceneHost.Children.Add(scene);
             FadeInScene(scene);
         }
+    }
+
+    public bool ConfirmUnsavedDocument(IUnsavedScene document, string action)
+        => CommitInputsAndRestoreFocus(() => ConfirmUnsavedDocumentCore(document, action));
+
+    private bool ConfirmUnsavedDocumentCore(IUnsavedScene document, string action)
+    {
+        if (!document.HasUnsavedChanges) return true;
+        var choice = MessageBox.Show(this, $"存在未保存的修改。是否保存后{action}？\n是：保存；否：放弃修改；取消：继续编辑。",
+            "未保存的修改", MessageBoxButton.YesNoCancel, MessageBoxImage.Warning);
+        if (choice == MessageBoxResult.Cancel) return false;
+        if (choice == MessageBoxResult.Yes) return document.SaveChanges();
+        document.DiscardChanges();
+        return true;
+    }
+
+    public bool ConfirmAllUnsavedChanges(string action)
+        => CommitInputsAndRestoreFocus(() => ConfirmAllUnsavedChangesCore(action));
+
+    private bool ConfirmAllUnsavedChangesCore(string action)
+    {
+        var document = _currentScene as IUnsavedScene;
+        var manager = RenderSceneManager.Instance;
+        if (document?.HasUnsavedChanges != true && !manager.HasUnsavedChanges) return true;
+        var choice = MessageBox.Show(this, $"当前编辑器或地图场景存在未保存的修改。是否全部保存后{action}？\n是：保存；否：放弃修改；取消：继续编辑。",
+            "未保存的修改", MessageBoxButton.YesNoCancel, MessageBoxImage.Warning);
+        if (choice == MessageBoxResult.Cancel) return false;
+        if (choice == MessageBoxResult.No)
+        {
+            document?.DiscardChanges();
+            foreach (var scene in manager.AllScenes.ToArray()) manager.DiscardSceneChanges(scene.SceneId);
+            return true;
+        }
+        if (document?.HasUnsavedChanges == true && !document.SaveChanges()) return false;
+        foreach (var scene in manager.AllScenes.Where(s => s.HasUnsavedChanges).ToArray())
+        {
+            string path = scene.MapFilePath;
+            if (string.IsNullOrEmpty(path))
+            {
+                var picker = new SaveFileDialog
+                {
+                    Title = $"保存地图：{scene.SceneName}",
+                    Filter = scene.SceneType == RenderSceneType.Test ? "世界地图|*.bin" : "关卡地图|*.btl",
+                    InitialDirectory = scene.Project?.AssetsRoot ?? Environment.CurrentDirectory
+                };
+                if (picker.ShowDialog(this) != true) return false;
+                path = picker.FileName;
+            }
+            try { manager.SaveScene(scene.SceneId, path); }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, $"保存失败：{scene.SceneName}", MessageBoxButton.OK, MessageBoxImage.Error);
+                return false;
+            }
+        }
+        return true;
     }
 
     private void ShowLoadingAndSwitchScene(UserControl newScene)
@@ -513,13 +830,13 @@ public partial class MainWindow : Window
         string loadingImagePath = ConfigManager.Instance.GetLoadingBackgroundImagePath();
         Image? loadingImage = null;
 
-        if (!string.IsNullOrEmpty(loadingImagePath) && System.IO.File.Exists(loadingImagePath))
+        if (!string.IsNullOrEmpty(loadingImagePath) && ProjectFile.Exists(loadingImagePath))
         {
             try
             {
                 var bitmap = new BitmapImage();
                 bitmap.BeginInit();
-                bitmap.UriSource = new Uri(loadingImagePath, UriKind.Absolute);
+                bitmap.UriSource = new Uri(ProjectFile.ResolveRead(loadingImagePath), UriKind.Absolute);
                 bitmap.CacheOption = BitmapCacheOption.OnLoad;
                 bitmap.EndInit();
                 bitmap.Freeze();
@@ -530,7 +847,7 @@ public partial class MainWindow : Window
                     Stretch = Stretch.UniformToFill,
                     Opacity = 0
                 };
-                _mainGrid.Children.Add(loadingImage);
+                _sceneHost.Children.Add(loadingImage);
                 loadingImage.BeginAnimation(UIElement.OpacityProperty,
                     new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(200)));
             }
@@ -543,13 +860,15 @@ public partial class MainWindow : Window
             var fo = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(200));
             fo.Completed += (s, e) =>
             {
-                _mainGrid.Children.Remove(_currentScene);
+                _sceneHost.Children.Remove(_currentScene);
                 if (_currentScene is IDisposable d) d.Dispose();
 
                 // 切换到新场景（先隐藏）
                 newScene.Opacity = 0;
                 _currentScene = newScene;
-                _mainGrid.Children.Add(newScene);
+                CompleteSceneSwitch();
+                _sceneHost.Children.Add(newScene);
+                QueueDocumentContext();
 
                 // 给新场景一点加载时间，然后淡出加载画面，显示新场景
                 var loadTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
@@ -567,8 +886,8 @@ public partial class MainWindow : Window
                         var fadeOut = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(300));
                         fadeOut.Completed += (s3, e3) =>
                         {
-                            if (_mainGrid.Children.Contains(loadingImage))
-                                _mainGrid.Children.Remove(loadingImage);
+                            if (_sceneHost.Children.Contains(loadingImage))
+                                _sceneHost.Children.Remove(loadingImage);
                         };
                         loadingImage.BeginAnimation(UIElement.OpacityProperty, fadeOut);
                     }
@@ -581,7 +900,9 @@ public partial class MainWindow : Window
         {
             newScene.Opacity = 0;
             _currentScene = newScene;
-            _mainGrid.Children.Add(newScene);
+            CompleteSceneSwitch();
+            _sceneHost.Children.Add(newScene);
+            QueueDocumentContext();
             newScene.BeginAnimation(UIElement.OpacityProperty,
                 new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(300)));
 
@@ -590,8 +911,8 @@ public partial class MainWindow : Window
                 var fadeOut = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(300));
                 fadeOut.Completed += (s3, e3) =>
                 {
-                    if (_mainGrid.Children.Contains(loadingImage))
-                        _mainGrid.Children.Remove(loadingImage);
+                    if (_sceneHost.Children.Contains(loadingImage))
+                        _sceneHost.Children.Remove(loadingImage);
                 };
                 loadingImage.BeginAnimation(UIElement.OpacityProperty, fadeOut);
             }
@@ -600,8 +921,16 @@ public partial class MainWindow : Window
 
     private void FadeInScene(UserControl scene)
     {
+        QueueDocumentContext();
         scene.Opacity = 0;
         scene.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(300)));
+    }
+
+    private void CompleteSceneSwitch()
+    {
+        _isSwitchingScene = false;
+        _sceneHost.IsEnabled = true;
+        _saveDocument.IsEnabled = true;
     }
 
     private void FadeOutScene(Action onComplete)
@@ -632,7 +961,11 @@ public partial class MainWindow : Window
 
     public void CloseApplication() => Close();
     public void MinimizeWindow() => WindowState = WindowState.Minimized;
-    public void ToggleMaximize() => WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
+    public void ToggleMaximize()
+    {
+        WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
+        UpdateWindowControlsState();
+    }
     public void ReturnToMainScene() => SwitchToBeginScene();
 
     /// <summary>

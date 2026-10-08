@@ -1,3 +1,4 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Text;
 using WC4MapEditor.Core.Config;
 using WC4MapEditor.Core.Models;
@@ -148,13 +149,13 @@ public static class BTLFormatChecker
         if (string.IsNullOrWhiteSpace(filePath))
             return Fail("（空路径）", 0, "路径为空");
 
-        if (!File.Exists(filePath))
+        if (!ProjectFile.Exists(filePath))
             return Fail(filePath, 0, "文件不存在");
 
         byte[] data;
         try
         {
-            data = File.ReadAllBytes(filePath);
+            data = ProjectFile.ReadAllBytes(filePath);
         }
         catch (Exception ex)
         {

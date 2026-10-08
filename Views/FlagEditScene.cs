@@ -1,3 +1,4 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
@@ -13,8 +14,19 @@ using Path = System.IO.Path;
 
 namespace WC4MapEditor.Views;
 
-public class FlagEditScene : UserControl
+public class FlagEditScene : UserControl, IUnsavedScene
 {
+    private string _savedFingerprint = "";
+    private string CurrentFingerprint => BitmapFingerprint.Create(_legacyMode ? _legacyCanvasImage : _workingCanvas,
+        _legacyMode ? $"{_selectRect}|{_resize1W}:{_resize1H}:{_resize2W}:{_resize2H}" : "");
+    public bool HasUnsavedChanges => CurrentFingerprint != _savedFingerprint;
+    public bool SaveChanges()
+    {
+        if (_legacyMode) OnSaveLegacy(this, new RoutedEventArgs()); else OnMakeFlag(this, new RoutedEventArgs());
+        return !HasUnsavedChanges;
+    }
+    public void DiscardChanges() => _savedFingerprint = CurrentFingerprint;
+
     private static readonly SKSamplingOptions HighQuality = new(SKFilterMode.Linear, SKMipmapMode.Linear);
 
     private readonly MainWindow _window;
@@ -96,12 +108,14 @@ public class FlagEditScene : UserControl
 
     public FlagEditScene(MainWindow window, int countryId, string countryName)
     {
+        Unloaded += (_, _) => (_flagService as IDisposable)?.Dispose();
         _window = window;
         _countryId = countryId;
         _countryName = countryName;
         InitializeUI();
         LoadExistingFlags();
         InitializeEmptyCanvas(); // 初始化空白画布
+        _savedFingerprint = CurrentFingerprint;
         Focusable = true;
         Loaded += (_, _) => Keyboard.Focus(this);
         KeyDown += OnKeyDown;
@@ -1221,13 +1235,20 @@ public class FlagEditScene : UserControl
         }
 
         string outputDir = _parser.TacticalMapDir;
-        if (string.IsNullOrEmpty(outputDir) || !Directory.Exists(outputDir))
+        if (_window.Projects.Current == null && (string.IsNullOrEmpty(outputDir) || !ProjectFile.DirectoryExists(outputDir)))
             outputDir = Path.Combine(AppContext.BaseDirectory, "Output");
+        try { _window.Projects.Current?.ValidateOutputPath(Path.Combine(outputDir, $"flag_{_countryId}.png")); }
+        catch (Exception ex)
+        {
+            MessageBox.Show(_window, ex.Message, "保存位置错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
 
         var result = _editorService.MakeFlagWorkflow(_workingCanvas, _countryId, outputDir);
 
         if (result.Success)
         {
+            _savedFingerprint = CurrentFingerprint;
             _flagService.RefreshCache();
 
             var msg = "国旗生成成功！\n\n";
@@ -1273,16 +1294,28 @@ public class FlagEditScene : UserControl
         y1 = Math.Max(0, Math.Min(y1, _legacyCanvasImage.Height));
 
         var circleCropped = _editorService.CropCircularRegion(_legacyCanvasImage, x0, y0, x1, y1);
+        if (circleCropped == null)
+        {
+            MessageBox.Show("圆形裁剪失败，请检查选区。", "保存失败", MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
 
         string outputDir = _parser.TacticalMapDir;
-        if (string.IsNullOrEmpty(outputDir) || !Directory.Exists(outputDir))
+        if (_window.Projects.Current == null && (string.IsNullOrEmpty(outputDir) || !ProjectFile.DirectoryExists(outputDir)))
             outputDir = Path.Combine(AppContext.BaseDirectory, "Output");
+        try { _window.Projects.Current?.ValidateOutputPath(Path.Combine(outputDir, $"flag_{_countryId}.png")); }
+        catch (Exception ex)
+        {
+            MessageBox.Show(_window, ex.Message, "保存位置错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
 
         var result = _editorService.SaveFlagImages(_legacyCanvasImage, circleCropped, _countryId.ToString(), outputDir, _resize1W, _resize1H, _resize2W, _resize2H);
         circleCropped?.Dispose();
 
         if (result.Success)
         {
+            _savedFingerprint = CurrentFingerprint;
             var msg = $"保存成功！\n\n";
             if (result.FlagPath != null) msg += $"国旗: {result.FlagPath}\n";
             if (result.CirclePath != null) msg += $"圆形国旗: {result.CirclePath}\n";
@@ -1299,44 +1332,8 @@ public class FlagEditScene : UserControl
 
     // ========== 辅助方法 ==========
 
-    private static BitmapSource? SkBitmapToBitmapSource(SKBitmap bitmap)
-    {
-        try
-        {
-            var info = bitmap.Info;
-            var wb = new WriteableBitmap(info.Width, info.Height, 96, 96, PixelFormats.Pbgra32, null);
-            wb.Lock();
-            try
-            {
-                using var pixmap = bitmap.PeekPixels();
-                var srcPtr = pixmap.GetPixels();
-                for (int y = 0; y < info.Height; y++)
-                {
-                    var dstPtr = System.IntPtr.Add(wb.BackBuffer, y * wb.BackBufferStride);
-                    var row = new byte[info.Width * 4];
-                    System.Runtime.InteropServices.Marshal.Copy(System.IntPtr.Add(srcPtr, y * pixmap.RowBytes), row, 0, row.Length);
-                    for (int i = 0; i < row.Length; i += 4)
-                    {
-                        byte r = row[i], g = row[i + 1], b = row[i + 2], a = row[i + 3];
-                        if (a < 255)
-                        {
-                            r = (byte)(r * a / 255); g = (byte)(g * a / 255); b = (byte)(b * a / 255);
-                        }
-                        row[i] = b; row[i + 1] = g; row[i + 2] = r; row[i + 3] = a;
-                    }
-                    System.Runtime.InteropServices.Marshal.Copy(row, 0, dstPtr, row.Length);
-                }
-                wb.AddDirtyRect(new Int32Rect(0, 0, info.Width, info.Height));
-            }
-            finally
-            {
-                wb.Unlock();
-            }
-            wb.Freeze();
-            return wb;
-        }
-        catch { return null; }
-    }
+    private static BitmapSource SkBitmapToBitmapSource(SKBitmap bitmap)
+        => WC4MapEditor.Views.Assist.SkiaBitmapSource.Create(bitmap);
 
     private void SetStatus(string text)
     {

@@ -1,3 +1,4 @@
+using ProjectFile = WC4MapEditor.Core.Assets.ProjectFiles;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
@@ -9,6 +10,8 @@ using System.Windows.Media;
 using System.Windows.Media.Effects;
 using Microsoft.Win32;
 using WC4MapEditor.Core.Assets;
+using WC4MapEditor.Services;
+using WC4MapEditor.Views.Dialogs;
 
 namespace WC4MapEditor.Views;
 
@@ -22,17 +25,22 @@ public partial class AssetBrowserScene : UserControl
     private TextBox _searchBox = null!;
     private ComboBox _extFilter = null!;
     private TextBlock _statusText = null!;
+    private TextBlock _projectText = null!;
     private StackPanel _categoryPanel = null!;
 
     private AssetKind? _selectedKind;
     private bool _showAllFiles;
+    private Func<AssetEntry, bool>? _projectFilter;
     private Button? _allFilesButton;
     private readonly ObservableCollection<AssetEntry> _entries = new();
 
-    public AssetBrowserScene(MainWindow window)
+    public AssetBrowserScene(MainWindow window, Func<AssetEntry, bool>? projectFilter = null)
     {
+        if (window.Projects.Current == null) throw new InvalidOperationException("请先加载游戏项目。");
         _window = window;
         _manager = AssetManager.Default;
+        _projectFilter = projectFilter;
+        _showAllFiles = true;
         InitializeComponent();
         SetupUI();
         InitializeAssetCache();
@@ -76,7 +84,7 @@ public partial class AssetBrowserScene : UserControl
         _categoryPanel = new StackPanel();
         sideContent.Children.Add(_categoryPanel);
 
-        sidebar.Child = sideContent;
+        sidebar.Child = new ScrollViewer { Content = sideContent, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
         _mainGrid.Children.Add(sidebar);
 
         // ---- Splitter ----
@@ -94,6 +102,7 @@ public partial class AssetBrowserScene : UserControl
         var contentArea = new Grid();
         Grid.SetColumn(contentArea, 2);
 
+        contentArea.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         contentArea.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         contentArea.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
@@ -170,19 +179,21 @@ public partial class AssetBrowserScene : UserControl
         refreshBtn.Click += (s, e) => RefreshAssets();
         topPanel.Children.Add(refreshBtn);
 
-        var chooseRoot = new Button { Content = "选择目录", Height = 26, Margin = new Thickness(8, 0, 0, 0) };
-        chooseRoot.Click += (_, _) =>
-        {
-            var picker = new OpenFolderDialog { Title = "选择 assets 目录" };
-            if (picker.ShowDialog(_window) == true) RefreshAssets(picker.FolderName);
-        };
-        topPanel.Children.Add(chooseRoot);
+        var switchProject = new Button { Content = "切换项目", Height = 26, Margin = new Thickness(8, 0, 0, 0) };
+        switchProject.Click += (_, _) => _window.ShowProjectLoader();
+        topPanel.Children.Add(switchProject);
         var audit = new Button { Content = "数据检查", Height = 26, Margin = new Thickness(8, 0, 0, 0) };
         audit.Click += (_, _) =>
         {
             if (_manager.IsLoaded) new AssetAuditWindow(_window, _manager.AssetsRoot).ShowDialog();
         };
         topPanel.Children.Add(audit);
+        var changes = new Button { Content = "输出变更", Height = 26, Margin = new Thickness(8, 0, 0, 0) };
+        changes.Click += (_, _) =>
+        {
+            if (_window.Projects.Current is { } project) new ProjectChangesWindow(_window, project).ShowDialog();
+        };
+        topPanel.Children.Add(changes);
 
         var backBtn = new Button
         {
@@ -202,6 +213,15 @@ public partial class AssetBrowserScene : UserControl
 
         topBar.Children.Add(topPanel);
         contentArea.Children.Add(topBar);
+
+        _projectText = new TextBlock
+        {
+            Foreground = Brushes.LightGray,
+            Margin = new Thickness(12, 8, 12, 8),
+            TextWrapping = TextWrapping.Wrap
+        };
+        Grid.SetRow(_projectText, 1);
+        contentArea.Children.Add(_projectText);
 
         // File list
         _fileList = new ListView
@@ -236,14 +256,14 @@ public partial class AssetBrowserScene : UserControl
         gv.Columns.Add(CreateColumn("大小", 90, nameof(AssetEntry.Size)));
         gv.Columns.Add(CreateColumn("类别", 110, nameof(AssetEntry.Kind)));
         gv.Columns.Add(CreateColumn("修改时间", 150, nameof(AssetEntry.LastModifiedUtc)));
-        gv.Columns.Add(CreateColumn("路径", 0, nameof(AssetEntry.RelativePath)));
+        gv.Columns.Add(CreateColumn("相对路径", 350, nameof(AssetEntry.RelativePath)));
         _fileList.View = gv;
         _fileList.MouseDoubleClick += FileList_MouseDoubleClick;
         _fileList.KeyDown += FileList_KeyDown;
         _fileList.ItemsSource = _entries;
 
         contentArea.Children.Add(_fileList);
-        Grid.SetRow(_fileList, 1);
+        Grid.SetRow(_fileList, 2);
 
         _mainGrid.Children.Add(contentArea);
         Grid.SetColumn(contentArea, 2);
@@ -289,9 +309,11 @@ public partial class AssetBrowserScene : UserControl
     {
         try
         {
-            if (!_manager.IsLoaded) _manager.ScanDefault();
+            if (!_manager.IsLoaded) _manager.Scan(_window.Projects.Current!.AssetsRoot);
             PopulateCategories();
             PopulateExtensions();
+            ApplyFilter();
+            UpdateProjectText();
             UpdateStatus($"已加载 {_manager.Count} 个文件");
         }
         catch (Exception ex)
@@ -342,7 +364,7 @@ public partial class AssetBrowserScene : UserControl
         {
             AssetKind.Stage, AssetKind.Conquest, AssetKind.Event, AssetKind.Frontier,
             AssetKind.Legend, AssetKind.GeneralStage, AssetKind.Warzone, AssetKind.InvadeCorps,
-            AssetKind.OtherStageBtl
+            AssetKind.OtherStageBtl, AssetKind.World
         };
 
         foreach (var kind in stageKinds)
@@ -402,6 +424,7 @@ public partial class AssetBrowserScene : UserControl
 
     private void AllFilesButton_Click(object sender, RoutedEventArgs e)
     {
+        _projectFilter = null;
         _showAllFiles = true;
         _selectedKind = null;
 
@@ -421,6 +444,8 @@ public partial class AssetBrowserScene : UserControl
     private void CategoryButton_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button btn || btn.Tag is not AssetKind kind) return;
+
+        _projectFilter = null;
 
         _showAllFiles = false;
 
@@ -464,10 +489,11 @@ public partial class AssetBrowserScene : UserControl
         }
 
         // 应用扩展名和搜索过滤（全部文件模式下也需要）
+        if (_projectFilter != null) results = results.Where(_projectFilter).ToList();
         if (ext != null)
             results = results.Where(r => string.Equals(r.Extension, ext.TrimStart('.'), StringComparison.OrdinalIgnoreCase)).ToList();
         if (!string.IsNullOrEmpty(search))
-            results = results.Where(r => r.FileNameWithoutExtension.Contains(search, StringComparison.OrdinalIgnoreCase)).ToList();
+            results = results.Where(r => r.RelativePath.Contains(search, StringComparison.OrdinalIgnoreCase)).ToList();
 
         foreach (var entry in results)
             _entries.Add(entry);
@@ -505,8 +531,8 @@ public partial class AssetBrowserScene : UserControl
         var fileDropList = new System.Collections.Specialized.StringCollection();
         foreach (var entry in selectedItems)
         {
-            if (File.Exists(entry.FullPath))
-                fileDropList.Add(entry.FullPath);
+            if (ProjectFile.Exists(entry.FullPath))
+                fileDropList.Add(ProjectFile.ResolveRead(entry.FullPath));
         }
 
         if (fileDropList.Count > 0)
@@ -526,47 +552,71 @@ public partial class AssetBrowserScene : UserControl
     private void FileList_MouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
         if (_fileList.SelectedItem is not AssetEntry entry) return;
-
-        if (entry.Extension.Equals("btl", StringComparison.OrdinalIgnoreCase))
+        try { _window.Projects.Current?.ValidateOutputPath(entry.FullPath); }
+        catch (Exception ex)
         {
-            if (entry.Kind == AssetKind.Conquest)
+            MessageBox.Show(_window, ex.Message, "资源路径", MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
+
+        try
+        {
+            if (entry.Extension.Equals("btl", StringComparison.OrdinalIgnoreCase))
             {
-                var scene = new ConquestRenderScene(_window, entry.FullPath);
+                if (entry.Kind == AssetKind.Conquest)
+                {
+                    var scene = new ConquestRenderScene(_window, entry.FullPath);
+                    _window.SetCurrentScene(scene);
+                }
+                else
+                {
+                    var scene = new StageRenderScene(_window, entry.FullPath);
+                    _window.SetCurrentScene(scene);
+                }
+            }
+            else if (entry.Kind == AssetKind.World)
+            {
+                _window.SetCurrentScene(new MapRenderScene(_window, entry.FullPath));
+            }
+            else if (entry.Extension.Equals("pkm", StringComparison.OrdinalIgnoreCase))
+            {
+                _window.SetCurrentScene(new PkmPreviewScene(_window, entry.FullPath));
+            }
+            else if (ImageExtensions.Contains(entry.Extension))
+            {
+                string? xmlPath = FindAssociatedXml(entry.FullPath);
+                string? sourceDir = System.IO.Path.GetDirectoryName(entry.FullPath);
+                if (string.IsNullOrEmpty(sourceDir)) sourceDir = Environment.CurrentDirectory;
+                var scene = new TacticalMapEditScene(_window, entry.FullPath, xmlPath, sourceDir);
                 _window.SetCurrentScene(scene);
+            }
+            else if (entry.Extension.Equals("json", StringComparison.OrdinalIgnoreCase) && JsonTableDocument.CanOpen(entry.FullPath))
+            {
+                _window.SetCurrentScene(new JsonTableEditScene(_window, entry.FullPath));
+            }
+            else if (entry.Extension.Equals("json", StringComparison.OrdinalIgnoreCase) ||
+                     entry.Extension.Equals("xml", StringComparison.OrdinalIgnoreCase) ||
+                     entry.Extension.Equals("ini", StringComparison.OrdinalIgnoreCase) ||
+                     entry.Extension.Equals("strings", StringComparison.OrdinalIgnoreCase) ||
+                     entry.Extension.Equals("fsh", StringComparison.OrdinalIgnoreCase) ||
+                     entry.Extension.Equals("vsh", StringComparison.OrdinalIgnoreCase))
+            {
+                _window.SetCurrentScene(new TextResourceEditScene(_window, entry.FullPath));
             }
             else
             {
-                var scene = new StageRenderScene(_window, entry.FullPath);
-                _window.SetCurrentScene(scene);
+                // Open containing folder
+                try
+                {
+                    Process.Start("explorer.exe", $"/select,\"{ProjectFile.ResolveRead(entry.FullPath)}\"");
+                }
+                catch { }
             }
         }
-        else if (ImageExtensions.Contains(entry.Extension))
+        catch (Exception ex)
         {
-            string? xmlPath = FindAssociatedXml(entry.FullPath);
-            string? sourceDir = System.IO.Path.GetDirectoryName(entry.FullPath);
-            if (string.IsNullOrEmpty(sourceDir)) sourceDir = Environment.CurrentDirectory;
-            var scene = new TacticalMapEditScene(_window, entry.FullPath, xmlPath, sourceDir);
-            _window.SetCurrentScene(scene);
-        }
-        else if (entry.Extension.Equals("json", StringComparison.OrdinalIgnoreCase) ||
-                 entry.Extension.Equals("xml", StringComparison.OrdinalIgnoreCase) ||
-                 entry.Extension.Equals("ini", StringComparison.OrdinalIgnoreCase))
-        {
-            // Open in default text editor
-            try
-            {
-                Process.Start(new ProcessStartInfo(entry.FullPath) { UseShellExecute = true });
-            }
-            catch { }
-        }
-        else
-        {
-            // Open containing folder
-            try
-            {
-                Process.Start("explorer.exe", $"/select,\"{entry.FullPath}\"");
-            }
-            catch { }
+            UpdateStatus($"资源加载失败：{entry.RelativePath} · {ex.Message}");
+            MessageBox.Show(_window, $"{entry.RelativePath}\n{ex.Message}", "资源加载失败", MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
 
@@ -575,28 +625,35 @@ public partial class AssetBrowserScene : UserControl
         string dir = IOPath.GetDirectoryName(imageFilePath) ?? "";
         string name = IOPath.GetFileNameWithoutExtension(imageFilePath);
         string xmlPath = IOPath.Combine(dir, name + ".xml");
-        if (File.Exists(xmlPath)) return xmlPath;
+        if (ProjectFile.Exists(xmlPath)) return xmlPath;
         return null;
     }
 
-    private void RefreshAssets(string? selectedRoot = null)
+    private void RefreshAssets()
     {
         try
         {
-            string root = selectedRoot ?? (_manager.IsLoaded ? _manager.AssetsRoot : AssetManager.GetDefaultAssetsPath());
-            _manager.Scan(root, forceReload: true);
+            _window.Projects.RefreshAssets();
             _entries.Clear();
             _extFilter.Items.Clear();
             _extFilter.Items.Add("全部");
             _extFilter.SelectedIndex = 0;
             PopulateCategories();
             PopulateExtensions();
-            UpdateStatus($"已刷新，共 {_manager.Count} 个文件：{_manager.AssetsRoot}");
+            ApplyFilter();
+            UpdateProjectText();
+            UpdateStatus($"已刷新文件列表，共 {_manager.Count} 个文件；编辑草稿保留，外部配置修改请在对应编辑器中重载。");
         }
         catch (Exception ex)
         {
             UpdateStatus($"刷新失败: {ex.Message}");
         }
+    }
+
+    private void UpdateProjectText()
+    {
+        var project = _window.Projects.Current;
+        _projectText.Text = $"来源：{project!.SourcePath}\n保存：{project.OutputRoot}（{(project.IsIncremental ? "增量输出，仅新增或修改文件" : "旧版完整副本")}）";
     }
 
     private void UpdateStatus(string text)
@@ -626,6 +683,7 @@ public partial class AssetBrowserScene : UserControl
         AssetKind.Font => "字体",
         AssetKind.Shader => "着色器",
         AssetKind.StringTable => "字符串表",
+        AssetKind.World => "世界地形地图",
         _ => "其它"
     };
 }
