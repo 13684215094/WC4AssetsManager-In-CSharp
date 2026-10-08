@@ -39,9 +39,53 @@ public class Program
         root.Subcommands.Add(BuildWorldCommand());
         root.Subcommands.Add(BuildScreenshotCommand());
         root.Subcommands.Add(BuildAssetCommand());
+        root.Subcommands.Add(BuildProjectCommand());
         root.Subcommands.Add(BuildModifyCommand());
 
         return root;
+    }
+
+    private static Command BuildProjectCommand()
+    {
+        var command = new Command("project", "创建或查看游戏项目副本，保留原目录结构");
+        var source = new Argument<string>("source") { Description = "原游戏项目目录或 assets 目录" };
+        var output = new Argument<string>("output") { Description = "新的或空的输出目录" };
+        var create = new Command("create", "将完整项目复制到输出目录，用于编辑");
+        create.Arguments.Add(source);
+        create.Arguments.Add(output);
+        create.SetAction(result =>
+        {
+            try
+            {
+                var project = GameProjectWorkspace.Create(result.GetValue(source)!, result.GetValue(output)!);
+                PrintProject(project);
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"创建项目失败：{ex.Message}");
+                return 2;
+            }
+        });
+        command.Subcommands.Add(create);
+        var directory = new Argument<string>("directory") { Description = "已创建的项目输出目录" };
+        var info = new Command("info", "查看项目的来源、输出与资源目录");
+        info.Arguments.Add(directory);
+        info.SetAction(result =>
+        {
+            try { PrintProject(GameProjectWorkspace.Open(result.GetValue(directory)!)); return 0; }
+            catch (Exception ex) { Console.Error.WriteLine($"打开项目失败：{ex.Message}"); return 2; }
+        });
+        command.Subcommands.Add(info);
+        return command;
+    }
+
+    private static void PrintProject(GameProjectWorkspace project)
+    {
+        var assets = new AssetManager(new AssetCache());
+        assets.Scan(project.AssetsRoot);
+        Console.WriteLine($"来源目录：{project.SourceRoot}\n编辑与保存目录：{project.OutputRoot}");
+        Console.Write(assets.GetSummaryReport());
     }
 
     private static Command BuildStageCommand()

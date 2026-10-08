@@ -77,7 +77,7 @@ public class Camera
     {
         double worldX = col * HexHorizontalSpacing * _zoomLevel;
         double worldY = row * HexVerticalSpacing * _zoomLevel;
-        if (col % 2 == 1)
+        if ((col & 1) == 1)
             worldY += (HexVerticalSpacing / 2) * _zoomLevel;
         return (worldX, worldY);
     }
@@ -114,7 +114,7 @@ public class Camera
         double scaledHexWidth = HexHorizontalSpacing * _zoomLevel;
         double scaledHexHeight = HexVerticalSpacing * _zoomLevel;
         int col = (int)Math.Round(world.Item1 / scaledHexWidth);
-        double rowOffset = (col % 2 == 1) ? (HexVerticalSpacing / 2) * _zoomLevel : 0;
+        double rowOffset = (col & 1) == 1 ? (HexVerticalSpacing / 2) * _zoomLevel : 0;
         int row = (int)Math.Round((world.Item2 - rowOffset) / scaledHexHeight);
         return (col, row);
     }

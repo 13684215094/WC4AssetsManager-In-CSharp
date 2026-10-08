@@ -639,7 +639,14 @@ public sealed class EditModeManager
         for (int i = 0; i < beforeSnapshot.Length; i++)
             beforeSnapshot[i] = _mapData.GetTerrainRef(i);
 
-        applyChange();
+        bool wasModified = _mapData.IsModified;
+        try { applyChange(); }
+        catch
+        {
+            for (int i = 0; i < beforeSnapshot.Length; i++) _mapData.GetTerrainRef(i) = beforeSnapshot[i];
+            _mapData.IsModified = wasModified;
+            throw;
+        }
 
         RecordChangesFromSnapshot(description, beforeSnapshot);
     }
@@ -656,7 +663,14 @@ public sealed class EditModeManager
         for (int i = 0; i < beforeSnapshot.Length; i++)
             beforeSnapshot[i] = _mapData.GetProvinceRef(i);
 
-        applyChange();
+        bool wasModified = _mapData.IsModified;
+        try { applyChange(); }
+        catch
+        {
+            for (int i = 0; i < beforeSnapshot.Length; i++) _mapData.GetProvinceRef(i) = beforeSnapshot[i];
+            _mapData.IsModified = wasModified;
+            throw;
+        }
 
         RecordProvinceChangesFromSnapshot(description, beforeSnapshot);
     }

@@ -13,6 +13,7 @@ using Microsoft.Win32;
 using SkiaSharp;
 using SkiaSharp.Views.Desktop;
 using SkiaSharp.Views.WPF;
+using WC4MapEditor.Core.Assets;
 using WC4MapEditor.Core.Parsers;
 using WC4MapEditor.Rendering.Imaging;
 
@@ -44,10 +45,12 @@ public class TacticalMapEditScene : UserControl, IDisposable
     private TacticalMapObject? _copiedObject;
     private SKTypeface? _cachedTypeface;
     private readonly string? _sourceDirectory;
+    private readonly GameProjectWorkspace? _project;
 
     public TacticalMapEditScene(MainWindow window, string imageFilePath, string? xmlFilePath = null, string? sourceDirectory = null)
     {
         _window = window;
+        _project = window.Projects.Current;
         _sourceDirectory = sourceDirectory;
         Focusable = true;
         SetupUI();
@@ -307,6 +310,12 @@ public class TacticalMapEditScene : UserControl, IDisposable
     {
         try
         {
+            imageFilePath = _project?.GetEditablePath(imageFilePath) ?? imageFilePath;
+            if (xmlFilePath != null) xmlFilePath = _project?.GetEditablePath(xmlFilePath) ?? xmlFilePath;
+            _sourceBitmap?.Dispose();
+            _sourceBitmap = null;
+            foreach (var bitmap in _objectBitmapCache.Values) bitmap.Dispose();
+            _objectBitmapCache.Clear();
             if (!_editor.LoadFromFiles(imageFilePath, xmlFilePath))
             {
                 UpdateStatus("加载失败");
@@ -1036,163 +1045,72 @@ public class TacticalMapEditScene : UserControl, IDisposable
 
     #region Toolbar Actions
 
+    private bool ValidateProjectOutput(string path)
+    {
+        try { _project?.ValidateOutputPath(path); return true; }
+        catch (Exception ex)
+        {
+            MessageBox.Show(_window, ex.Message, "保存位置", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return false;
+        }
+    }
+
     private void OnSave(object? sender, RoutedEventArgs e)
     {
-        if (!_editor.IsLoaded) return;
-
-        bool xmlOk = true, imgOk = true;
-
-        if (!string.IsNullOrEmpty(_editor.XmlFilePath))
-            xmlOk = _editor.SaveXml();
-        else
-            xmlOk = SaveXmlWithDialog();
-
-        if (!string.IsNullOrEmpty(_editor.ImageFilePath))
-            imgOk = SaveCompositeImage(_editor.ImageFilePath);
-
-        if (xmlOk && imgOk)
-            UpdateStatus("已保存 (XML + 图片)");
-        else if (xmlOk)
-            UpdateStatus("XML已保存，图片保存失败");
-        else if (imgOk)
-            UpdateStatus("图片已保存，XML保存失败");
-        else
-            UpdateStatus("保存失败");
+        if (!_editor.IsLoaded || _sourceBitmap == null || string.IsNullOrEmpty(_editor.ImageFilePath)) return;
+        string? xmlPath = _editor.XmlFilePath ?? (_editor.Objects.Count > 0 ? IOPath.ChangeExtension(_editor.ImageFilePath, ".xml") : null);
+        if (!SaveImageAndXml(_editor.ImageFilePath, xmlPath)) UpdateStatus("保存失败，请检查格式、图块和输出位置");
     }
 
     private void OnSaveAs(object? sender, RoutedEventArgs e)
     {
-        if (!_editor.IsLoaded) return;
-
+        if (!_editor.IsLoaded || _sourceBitmap == null) return;
         var dlg = new SaveFileDialog
         {
-            Filter = "PNG图片|*.png|WebP图片|*.webp|所有文件|*.*",
+            Filter = "PNG图片|*.png|WebP图片|*.webp|JPEG图片|*.jpg",
             Title = "另存为",
+            InitialDirectory = _project?.AssetsRoot ?? Environment.CurrentDirectory,
             FileName = IOPath.GetFileNameWithoutExtension(_editor.ImageFilePath ?? "tacticalmap")
         };
         if (dlg.ShowDialog() != true) return;
-
-        string imagePath = dlg.FileName;
-        string xmlPath = IOPath.ChangeExtension(imagePath, ".xml");
-
-        bool imgOk = SaveCompositeImage(imagePath);
-        bool xmlOk = _editor.SaveXml(xmlPath);
-
-        if (imgOk && xmlOk)
-            UpdateStatus($"已另存为: {imagePath}");
-        else
-            UpdateStatus("另存为失败");
+        string? xmlPath = _editor.XmlFilePath != null || _editor.Objects.Count > 0
+            ? IOPath.ChangeExtension(dlg.FileName, ".xml") : null;
+        if (!SaveImageAndXml(dlg.FileName, xmlPath)) UpdateStatus("另存为失败");
     }
 
-    private bool SaveCompositeImage(string outputPath)
+    private bool SaveImageAndXml(string imagePath, string? xmlPath)
     {
+        if (!_editor.IsLoaded || _sourceBitmap == null || !ValidateProjectOutput(imagePath) ||
+            (xmlPath != null && !ValidateProjectOutput(xmlPath))) return false;
         try
         {
-            BuildObjectBitmapCache(); // 先确保每个对象都有独立像素（补缺语义，不会覆盖已导入更新的）
-            int w = Math.Max(1, _sourceBitmap?.Width ?? 1);
-            int h = Math.Max(1, _sourceBitmap?.Height ?? 1);
-
-            // 【核心】与py版 export_canvas_as_png 完全一致：
-            // 不用 _sourceBitmap 打底（它的像素是上次打包的结果，可能已过时），
-            // 而是把每个对象持有的独立像素 按 obj.X/Y/W/H 缩放到 一张全新合成图上。
-            // 这样保证 XML 的 obj.X/Y/W/H + 保存的图片像素，下次打开时100%对应，
-            // 且 ImportImageFiles 更新的新像素/新尺寸 会完整写进 PNG。
-            var info = new SKImageInfo(w, h, SKColorType.Rgba8888, SKAlphaType.Premul,
-                _sourceBitmap?.Info.ColorSpace);
-            using var surface = SKSurface.Create(info);
-            var canvas = surface.Canvas;
-            canvas.Clear(SKColors.Transparent);
-            foreach (var obj in _editor.Objects)
-            {
-                if (obj.Width <= 0 || obj.Height <= 0) continue;
-                if (!_objectBitmapCache.TryGetValue(obj.Name, out var bmp)) continue;
-                var dstRect = new SKRect(obj.X, obj.Y, obj.X + obj.Width, obj.Y + obj.Height);
-                var srcRect = new SKRect(0, 0, bmp.Width, bmp.Height);
-                canvas.DrawBitmap(bmp, srcRect, dstRect);
-            }
-
-            using var image = surface.Snapshot();
-            using var data = outputPath.EndsWith(".webp", StringComparison.OrdinalIgnoreCase)
-                ? image.Encode(SKEncodedImageFormat.Webp, 90)
-                : image.Encode(SKEncodedImageFormat.Png, 100);
-
-            if (data == null) return false;
-            byte[] bytes = data.ToArray();
-            File.WriteAllBytes(outputPath, bytes);
-            Debug.WriteLine($"[TacEditScene] 图片已保存: {outputPath} ({w}x{h})");
-
-            // 【保存后同步内存sourceBitmap】：把写盘的新合成图读回来替换内存中的_sourceBitmap。
-            // 这样后续的整理对象、属性修改、切图导出等操作所基于的"源图"
-            // 就和磁盘上的文件 100% 一致，不会出现"图像内容与xml数据对不上"。
-            var newSource = LoadBitmapFromBytes(bytes);
-            if (newSource != null)
-            {
-                // 不直接 Dispose 旧位图，避免 PaintSurface 并发访问时的野指针闪退
-                _sourceBitmap = newSource;
-                if (_camera != null)
-                {
-                    _camera.WorldWidth = Math.Max(1, newSource.Width);
-                    _camera.WorldHeight = Math.Max(1, newSource.Height);
-                }
-                // 对象的cache（独立像素）永远持有正确纹理，不需要重建
-            }
-            return true;
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"[TacEditScene] 保存图片失败: {ex.Message}");
-            return false;
-        }
-    }
-
-    private bool SaveCompositeImage(string outputPath, int clipX, int clipY, int clipW, int clipH)
-    {
-        try
-        {
-            if (clipW <= 0 || clipH <= 0) return false;
             BuildObjectBitmapCache();
-
-            var info = new SKImageInfo(clipW, clipH, SKColorType.Rgba8888, SKAlphaType.Premul,
-                _sourceBitmap?.Info.ColorSpace);
-            using var surface = SKSurface.Create(info);
-            var canvas = surface.Canvas;
-            canvas.Clear(SKColors.Transparent);
-            // 【核心】同样仅用对象的独立像素按裁剪偏移+对象 W/H 缩放合成
-            foreach (var obj in _editor.Objects)
+            using var composite = AtlasCompositeRenderer.Compose(_sourceBitmap, _editor.Objects, _objectBitmapCache);
+            byte[] bytes = AtlasCompositeRenderer.Encode(composite, imagePath);
+            var replacement = LoadBitmapFromBytes(bytes) ?? throw new InvalidOperationException("保存图片的校验失败");
+            try
             {
-                if (obj.Width <= 0 || obj.Height <= 0) continue;
-                if (!_objectBitmapCache.TryGetValue(obj.Name, out var bmp)) continue;
-                var dstRect = new SKRect(obj.X - clipX, obj.Y - clipY, obj.X - clipX + obj.Width, obj.Y - clipY + obj.Height);
-                var srcRect = new SKRect(0, 0, bmp.Width, bmp.Height);
-                canvas.DrawBitmap(bmp, srcRect, dstRect);
+                if (xmlPath != null)
+                    WC4MapEditor.Core.Parsers.AtomicFile.WriteAll((imagePath, bytes), (xmlPath, _editor.SerializeXml(imagePath)));
+                else WC4MapEditor.Core.Parsers.AtomicFile.Write(imagePath, bytes);
             }
-
-            using var image = surface.Snapshot();
-            using var data = outputPath.EndsWith(".webp", StringComparison.OrdinalIgnoreCase)
-                ? image.Encode(SKEncodedImageFormat.Webp, 90)
-                : image.Encode(SKEncodedImageFormat.Png, 100);
-
-            if (data == null) return false;
-            File.WriteAllBytes(outputPath, data.ToArray());
+            catch { replacement.Dispose(); throw; }
+            var previous = _sourceBitmap;
+            _sourceBitmap = replacement;
+            previous.Dispose();
+            _editor.MarkSaved(imagePath, xmlPath, bytes);
+            _editor.SetImageSize(replacement.Width, replacement.Height);
+            if (_camera != null) { _camera.WorldWidth = replacement.Width; _camera.WorldHeight = replacement.Height; }
+            WC4MapEditor.Core.Assets.AssetManager.Default.InvalidateData();
+            UpdateStatus($"已保存: {imagePath}");
             return true;
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"[TacEditScene] 保存裁剪图片失败: {ex.Message}");
+            Debug.WriteLine($"[TacEditScene] 保存失败: {ex.Message}");
+            MessageBox.Show(_window, ex.Message, "保存失败", MessageBoxButton.OK, MessageBoxImage.Warning);
             return false;
         }
-    }
-
-    private bool SaveXmlWithDialog()
-    {
-        var dlg = new SaveFileDialog
-        {
-            Filter = "XML文件|*.xml|所有文件|*.*",
-            Title = "保存XML",
-            FileName = IOPath.GetFileNameWithoutExtension(_editor.ImageFilePath ?? "tacticalmap") + ".xml"
-        };
-        if (dlg.ShowDialog() != true) return false;
-        return _editor.SaveXml(dlg.FileName);
     }
 
     private void OnFitToWindow(object? sender, RoutedEventArgs e)
@@ -1544,8 +1462,9 @@ public class TacticalMapEditScene : UserControl, IDisposable
     // 保留旧函数名（兼容可能其他未查找到的地方），走新语义
     private SKBitmap? ClipFromSourceBitmap(TacticalMapObject obj) => GetObjectPixels(obj);
 
-    private static bool SaveBitmapAsPng(SKBitmap bmp, string path)
+    private bool SaveBitmapAsPng(SKBitmap bmp, string path)
     {
+        if (!ValidateProjectOutput(path)) return false;
         using var img = bmp.Encode(SKEncodedImageFormat.Png, 100);
         if (img == null) return false;
         using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
@@ -1815,6 +1734,7 @@ public class TacticalMapEditScene : UserControl, IDisposable
             FileName = IOPath.GetFileNameWithoutExtension(_editor.ImageFilePath ?? "canvas") + ".png"
         };
         if (dlg.ShowDialog() != true) return;
+        if (!ValidateProjectOutput(dlg.FileName)) return;
         using var encoded = _sourceBitmap.Encode(SKEncodedImageFormat.Png, 100);
         if (encoded == null) { UpdateStatus("导出失败"); return; }
         File.WriteAllBytes(dlg.FileName, encoded.ToArray());

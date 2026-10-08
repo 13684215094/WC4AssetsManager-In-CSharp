@@ -513,6 +513,7 @@ public class FlagEditorService : IFlagEditorService
                         Debug.WriteLine($"[FlagEditorService] 使用路径: img={tacticalImagePath}, xml={tacticalXmlPath}");
                         var tmEditor = new TacticalMapEditor();
                         var loadOk = tmEditor.LoadFromFiles(tacticalImagePath, tacticalXmlPath);
+                        if (!loadOk) throw new InvalidDataException("Tactical flag atlas load failed.");
                         Debug.WriteLine($"[FlagEditorService] TacticalMapEditor加载: {loadOk}");
 
                         if (loadOk)
@@ -532,6 +533,12 @@ public class FlagEditorService : IFlagEditorService
                             }
 
                             var batchOk = tmEditor.AddImagesAndArrange(imagesToAdd, tacticalImagePath, tacticalXmlPath);
+                            if (!batchOk)
+                            {
+                                bigFlagCopy.Dispose();
+                                smallFlagCopy?.Dispose();
+                                throw new IOException("Tactical atlas update failed.");
+                            }
                             Debug.WriteLine($"[FlagEditorService] 批量添加并整理布局结果: {batchOk}");
 
                             bigFlagCopy.Dispose();
@@ -546,14 +553,14 @@ public class FlagEditorService : IFlagEditorService
                     {
                         Debug.WriteLine($"[FlagEditorService] TacticalMap文件不存在，回退到独立文件保存");
                         var flagPath = Path.Combine(outputDir, $"flag_{countryId}.png");
-                        SaveImage(maskedFlag, flagPath, SKEncodedImageFormat.Png, 100);
+                        if (!SaveImage(maskedFlag, flagPath, SKEncodedImageFormat.Png, 100)) throw new IOException("Flag image save failed.");
                         result.FlagPath = flagPath;
                         Debug.WriteLine($"[FlagEditorService] 保存大国旗: {flagPath}");
 
                         if (smallFlag != null)
                         {
                             var smallFlagPath = Path.Combine(outputDir, $"f_{countryId:D2}.png");
-                            SaveImage(smallFlag, smallFlagPath, SKEncodedImageFormat.Png, 100);
+                            if (!SaveImage(smallFlag, smallFlagPath, SKEncodedImageFormat.Png, 100)) throw new IOException("Small flag save failed.");
                             result.SmallFlagPath = smallFlagPath;
                             Debug.WriteLine($"[FlagEditorService] 保存小国旗: {smallFlagPath}");
                         }
@@ -571,6 +578,7 @@ public class FlagEditorService : IFlagEditorService
                     {
                         var hdEditor = new HdAtlasEditor();
                         var hdLoadOk = hdEditor.LoadFromFiles(hdImagePath, hdXmlPath);
+                        if (!hdLoadOk) throw new InvalidDataException("HD flag atlas load failed.");
                         Debug.WriteLine($"[FlagEditorService] HdAtlasEditor加载: {hdLoadOk}");
 
                         if (hdLoadOk)
@@ -578,6 +586,7 @@ public class FlagEditorService : IFlagEditorService
                             var hdFlagCopy = maskedFlag.Copy();
                             var hdOk = hdEditor.AddImageAndSave(countryId, hdFlagCopy, hdImagePath, hdXmlPath);
                             hdFlagCopy.Dispose();
+                            if (!hdOk) throw new IOException("HD flag atlas update failed.");
                             Debug.WriteLine($"[FlagEditorService] HD国旗添加结果: {hdOk}");
                             result.HdFlagPath = $"hdatlas:flag_{countryId}.png";
                         }
@@ -585,7 +594,7 @@ public class FlagEditorService : IFlagEditorService
                     else
                     {
                         var hdFlagPath = Path.Combine(outputDir, $"flag_hd_{countryId}.png");
-                        SaveImage(maskedFlag, hdFlagPath, SKEncodedImageFormat.Png, 100);
+                        if (!SaveImage(maskedFlag, hdFlagPath, SKEncodedImageFormat.Png, 100)) throw new IOException("HD flag image save failed.");
                         result.HdFlagPath = hdFlagPath;
                         Debug.WriteLine($"[FlagEditorService] HD图集文件不存在，保存到: {hdFlagPath}");
                     }

@@ -94,13 +94,17 @@ public sealed class AssetCache
                 return _entries.Count;
             }
 
-            ClearInternal();
-            _assetsRoot = resolved;
-
             var sw = Stopwatch.StartNew();
+            var entries = new List<AssetEntry>();
             foreach (string file in Directory.EnumerateFiles(resolved, "*", SearchOption.AllDirectories))
             {
-                AssetEntry entry = BuildEntry(resolved, file);
+                entries.Add(BuildEntry(resolved, file));
+            }
+            // Publish only a complete scan; failed reads keep the active project intact.
+            ClearInternal();
+            _assetsRoot = resolved;
+            foreach (var entry in entries)
+            {
                 _entries.Add(entry);
                 IndexEntry(entry);
             }
@@ -316,8 +320,16 @@ public sealed class AssetCache
             TopDirectory = top,
             Size = info.Length,
             LastModifiedUtc = info.LastWriteTimeUtc,
-            Kind = ClassifyKind(top, nameNoExt, ext),
+            Kind = (ext is "bin" or "dat") && HasWorldHeader(fullPath)
+                ? AssetKind.World : ClassifyKind(top, nameNoExt, ext),
         };
+    }
+
+    private static bool HasWorldHeader(string path)
+    {
+        using var stream = File.OpenRead(path);
+        Span<byte> header = stackalloc byte[8];
+        return stream.Read(header) == header.Length && header.SequenceEqual(new byte[] { 0x59, 0x53, 0x41, 0x45, 4, 0, 0, 0 });
     }
 
     /// <summary>依据顶层目录、文件名前缀和扩展名推断语义类别。</summary>

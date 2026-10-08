@@ -9,6 +9,8 @@ using System.Windows.Media;
 using System.Windows.Media.Effects;
 using Microsoft.Win32;
 using WC4MapEditor.Core.Assets;
+using WC4MapEditor.Services;
+using WC4MapEditor.Views.Dialogs;
 
 namespace WC4MapEditor.Views;
 
@@ -22,6 +24,7 @@ public partial class AssetBrowserScene : UserControl
     private TextBox _searchBox = null!;
     private ComboBox _extFilter = null!;
     private TextBlock _statusText = null!;
+    private TextBlock _projectText = null!;
     private StackPanel _categoryPanel = null!;
 
     private AssetKind? _selectedKind;
@@ -76,7 +79,7 @@ public partial class AssetBrowserScene : UserControl
         _categoryPanel = new StackPanel();
         sideContent.Children.Add(_categoryPanel);
 
-        sidebar.Child = sideContent;
+        sidebar.Child = new ScrollViewer { Content = sideContent, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
         _mainGrid.Children.Add(sidebar);
 
         // ---- Splitter ----
@@ -94,6 +97,7 @@ public partial class AssetBrowserScene : UserControl
         var contentArea = new Grid();
         Grid.SetColumn(contentArea, 2);
 
+        contentArea.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         contentArea.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         contentArea.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
@@ -170,11 +174,25 @@ public partial class AssetBrowserScene : UserControl
         refreshBtn.Click += (s, e) => RefreshAssets();
         topPanel.Children.Add(refreshBtn);
 
-        var chooseRoot = new Button { Content = "选择目录", Height = 26, Margin = new Thickness(8, 0, 0, 0) };
+        var createProject = new Button { Content = "加载游戏项目", Height = 26, Margin = new Thickness(8, 0, 0, 0) };
+        createProject.Click += CreateProject_Click;
+        topPanel.Children.Add(createProject);
+        var openProject = new Button { Content = "继续编辑项目", Height = 26, Margin = new Thickness(8, 0, 0, 0) };
+        openProject.Click += OpenProject_Click;
+        topPanel.Children.Add(openProject);
+
+        var chooseRoot = new Button { Content = "浏览其他资源目录", Height = 26, Margin = new Thickness(8, 0, 0, 0) };
         chooseRoot.Click += (_, _) =>
         {
+            if (!ConfirmProjectSwitch()) return;
             var picker = new OpenFolderDialog { Title = "选择 assets 目录" };
-            if (picker.ShowDialog(_window) == true) RefreshAssets(picker.FolderName);
+            if (picker.ShowDialog(_window) != true) return;
+            try
+            {
+                _window.Projects.Activate(null, picker.FolderName);
+                RefreshAssets();
+            }
+            catch (Exception ex) { MessageBox.Show(_window, ex.Message, "加载资源失败", MessageBoxButton.OK, MessageBoxImage.Error); }
         };
         topPanel.Children.Add(chooseRoot);
         var audit = new Button { Content = "数据检查", Height = 26, Margin = new Thickness(8, 0, 0, 0) };
@@ -202,6 +220,15 @@ public partial class AssetBrowserScene : UserControl
 
         topBar.Children.Add(topPanel);
         contentArea.Children.Add(topBar);
+
+        _projectText = new TextBlock
+        {
+            Foreground = Brushes.LightGray,
+            Margin = new Thickness(12, 8, 12, 8),
+            TextWrapping = TextWrapping.Wrap
+        };
+        Grid.SetRow(_projectText, 1);
+        contentArea.Children.Add(_projectText);
 
         // File list
         _fileList = new ListView
@@ -236,14 +263,14 @@ public partial class AssetBrowserScene : UserControl
         gv.Columns.Add(CreateColumn("大小", 90, nameof(AssetEntry.Size)));
         gv.Columns.Add(CreateColumn("类别", 110, nameof(AssetEntry.Kind)));
         gv.Columns.Add(CreateColumn("修改时间", 150, nameof(AssetEntry.LastModifiedUtc)));
-        gv.Columns.Add(CreateColumn("路径", 0, nameof(AssetEntry.RelativePath)));
+        gv.Columns.Add(CreateColumn("相对路径", 350, nameof(AssetEntry.RelativePath)));
         _fileList.View = gv;
         _fileList.MouseDoubleClick += FileList_MouseDoubleClick;
         _fileList.KeyDown += FileList_KeyDown;
         _fileList.ItemsSource = _entries;
 
         contentArea.Children.Add(_fileList);
-        Grid.SetRow(_fileList, 1);
+        Grid.SetRow(_fileList, 2);
 
         _mainGrid.Children.Add(contentArea);
         Grid.SetColumn(contentArea, 2);
@@ -292,6 +319,8 @@ public partial class AssetBrowserScene : UserControl
             if (!_manager.IsLoaded) _manager.ScanDefault();
             PopulateCategories();
             PopulateExtensions();
+            ApplyFilter();
+            UpdateProjectText();
             UpdateStatus($"已加载 {_manager.Count} 个文件");
         }
         catch (Exception ex)
@@ -342,7 +371,7 @@ public partial class AssetBrowserScene : UserControl
         {
             AssetKind.Stage, AssetKind.Conquest, AssetKind.Event, AssetKind.Frontier,
             AssetKind.Legend, AssetKind.GeneralStage, AssetKind.Warzone, AssetKind.InvadeCorps,
-            AssetKind.OtherStageBtl
+            AssetKind.OtherStageBtl, AssetKind.World
         };
 
         foreach (var kind in stageKinds)
@@ -526,6 +555,12 @@ public partial class AssetBrowserScene : UserControl
     private void FileList_MouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
         if (_fileList.SelectedItem is not AssetEntry entry) return;
+        try { _window.Projects.Current?.ValidateOutputPath(entry.FullPath); }
+        catch (Exception ex)
+        {
+            MessageBox.Show(_window, ex.Message, "资源路径", MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
 
         if (entry.Extension.Equals("btl", StringComparison.OrdinalIgnoreCase))
         {
@@ -539,6 +574,10 @@ public partial class AssetBrowserScene : UserControl
                 var scene = new StageRenderScene(_window, entry.FullPath);
                 _window.SetCurrentScene(scene);
             }
+        }
+        else if (entry.Kind == AssetKind.World)
+        {
+            _window.SetCurrentScene(new MapRenderScene(_window, entry.FullPath));
         }
         else if (ImageExtensions.Contains(entry.Extension))
         {
@@ -585,18 +624,84 @@ public partial class AssetBrowserScene : UserControl
         {
             string root = selectedRoot ?? (_manager.IsLoaded ? _manager.AssetsRoot : AssetManager.GetDefaultAssetsPath());
             _manager.Scan(root, forceReload: true);
+            GameProjectSession.ReloadEditors();
             _entries.Clear();
             _extFilter.Items.Clear();
             _extFilter.Items.Add("全部");
             _extFilter.SelectedIndex = 0;
             PopulateCategories();
             PopulateExtensions();
+            ApplyFilter();
+            UpdateProjectText();
             UpdateStatus($"已刷新，共 {_manager.Count} 个文件：{_manager.AssetsRoot}");
         }
         catch (Exception ex)
         {
             UpdateStatus($"刷新失败: {ex.Message}");
         }
+    }
+
+    private bool ConfirmProjectSwitch()
+        => Services.RenderSceneManager.Instance.SceneCount == 0 || MessageBox.Show(_window,
+            "切换项目将关闭当前地图场景。请先保存需要保留的修改。是否继续？", "切换项目",
+            MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes;
+
+    private async void CreateProject_Click(object sender, RoutedEventArgs e)
+    {
+        if (!ConfirmProjectSwitch()) return;
+        var source = new OpenFolderDialog { Title = "选择游戏项目目录（含 assets）或 assets 目录" };
+        if (source.ShowDialog(_window) != true) return;
+        var output = new OpenFolderDialog
+        {
+            Title = "选择新的或空的输出目录：将完整复制项目并在副本中编辑",
+            InitialDirectory = IOPath.GetDirectoryName(source.FolderName) ?? source.FolderName
+        };
+        if (output.ShowDialog(_window) != true) return;
+
+        using var cancellation = new CancellationTokenSource();
+        var progressWindow = new ProgressWindow("加载游戏项目") { Owner = _window };
+        progressWindow.CancellationRequested += cancellation.Cancel;
+        var progress = new Progress<ProjectCopyProgress>(value => progressWindow.UpdateStatus(
+            $"复制 {value.CompletedFiles}/{value.TotalFiles}：{value.RelativePath}",
+            value.TotalBytes == 0 ? 0 : 100.0 * value.CopiedBytes / value.TotalBytes));
+        _mainGrid.IsEnabled = false;
+        progressWindow.Show();
+        try
+        {
+            var project = await Task.Run(() => GameProjectWorkspace.Create(source.FolderName, output.FolderName,
+                progress, cancellation.Token));
+            _window.Projects.Activate(project);
+            RefreshAssets();
+            UpdateStatus($"项目已加载：{project.OutputRoot}；保存将写入此目录");
+        }
+        catch (OperationCanceledException) { UpdateStatus("已取消加载项目"); }
+        catch (Exception ex) { MessageBox.Show(_window, ex.Message, "加载项目失败", MessageBoxButton.OK, MessageBoxImage.Error); }
+        finally
+        {
+            progressWindow.PlayFadeOutAndClose();
+            _mainGrid.IsEnabled = true;
+        }
+    }
+
+    private void OpenProject_Click(object sender, RoutedEventArgs e)
+    {
+        if (!ConfirmProjectSwitch()) return;
+        var picker = new OpenFolderDialog { Title = "选择已创建的项目输出目录（含 .wc4-project.json）" };
+        if (picker.ShowDialog(_window) != true) return;
+        try
+        {
+            _window.Projects.Activate(GameProjectWorkspace.Open(picker.FolderName));
+            RefreshAssets();
+        }
+        catch (Exception ex) { MessageBox.Show(_window, ex.Message, "打开项目失败", MessageBoxButton.OK, MessageBoxImage.Error); }
+    }
+
+    private void UpdateProjectText()
+    {
+        var project = _window.Projects.Current;
+        _projectText.Text = project == null
+            ? $"资源目录：{_manager.AssetsRoot}\n可选择“加载游戏项目”，将完整项目复制到输出目录后编辑。"
+            : $"来源：{project.SourceRoot}\n编辑与保存：{project.OutputRoot}（保留相对目录结构）";
     }
 
     private void UpdateStatus(string text)
@@ -626,6 +731,7 @@ public partial class AssetBrowserScene : UserControl
         AssetKind.Font => "字体",
         AssetKind.Shader => "着色器",
         AssetKind.StringTable => "字符串表",
+        AssetKind.World => "世界地形地图",
         _ => "其它"
     };
 }

@@ -33,6 +33,7 @@ public class ConquerEventSettingParser
         }
     }
 
+    private readonly JsonTableFile<ConquerEventData> _eventsFile = new();
     private readonly AssetManager _manager = AssetManager.Default;
     private List<ConquerEventData> _events = new();
     private StringTableParser? _stringTable;
@@ -92,6 +93,7 @@ public class ConquerEventSettingParser
 
     public void LoadAll()
     {
+        _eventsFile.Invalidate();
         LoadEvents();
         _stringTable = new StringTableParser(StringTablePath);
     }
@@ -105,8 +107,7 @@ public class ConquerEventSettingParser
                 Debug.WriteLine($"[ConquerEventSettingParser] 文件不存在: {ConfigPath}");
                 return;
             }
-            var json = File.ReadAllText(ConfigPath);
-            var data = JsonSerializer.Deserialize<List<ConquerEventData>>(json, JsonOpts);
+            var data = _eventsFile.Read(ConfigPath, JsonOpts);
             if (data != null) _events = data;
         }
         catch (Exception ex)
@@ -154,9 +155,8 @@ public class ConquerEventSettingParser
     {
         try
         {
-            var json = JsonSerializer.Serialize(_events, JsonOpts);
-            File.WriteAllText(ConfigPath, json);
-            _stringTable?.Save();
+            AtomicFile.WriteAllWithStringTable(_stringTable,
+                (ConfigPath, _eventsFile.Serialize(ConfigPath, _events)));
             Debug.WriteLine($"[ConquerEventSettingParser] 保存成功: {ConfigPath}");
             return true;
         }

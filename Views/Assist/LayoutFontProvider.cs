@@ -149,6 +149,17 @@ internal static class LayoutFontProvider
     private static readonly Dictionary<string, BmFont> _bmFonts = new(StringComparer.OrdinalIgnoreCase);
     private static bool _bmResolved;
 
+    public static void ClearCache()
+    {
+        if (_typeface != null && !ReferenceEquals(_typeface, SKTypeface.Default)) _typeface.Dispose();
+        _typeface = null;
+        _resolved = false;
+        Source = "未解析";
+        foreach (var font in _bmFonts.Values.Distinct()) font.Page?.Dispose();
+        _bmFonts.Clear();
+        _bmResolved = false;
+    }
+
     /// <summary>按名查位图字体（支持去 _hd 后缀、前缀匹配）；找不到返回 null。</summary>
     public static BmFont? GetBmFont(string? name)
     {

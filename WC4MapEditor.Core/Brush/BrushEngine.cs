@@ -1,3 +1,5 @@
+using WC4MapEditor.Core.Models;
+
 namespace WC4MapEditor.Core.Brush;
 
 public sealed class BrushEngine
@@ -74,14 +76,6 @@ public sealed class BrushEngine
 
     public static int CalculateHexDistance(int col1, int row1, int col2, int row2)
     {
-        int x1 = col1;
-        int z1 = row1 - (col1 >> 1);
-        int y1 = -x1 - z1;
-
-        int x2 = col2;
-        int z2 = row2 - (col2 >> 1);
-        int y2 = -x2 - z2;
-
-        return (Math.Abs(x1 - x2) + Math.Abs(y1 - y2) + Math.Abs(z1 - z2)) >> 1;
+        return new HexCoord(col1, row1).DistanceTo(new HexCoord(col2, row2));
     }
 }

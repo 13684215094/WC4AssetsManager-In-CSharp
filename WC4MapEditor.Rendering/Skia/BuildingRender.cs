@@ -86,11 +86,7 @@ public class BuildingRender : IDisposable
     /// </summary>
     public void ReloadCityNames()
     {
-        // 丢弃全进程共享的城市名表并重建。
-        lock (_sharedCityNamesLock)
-        {
-            _sharedCityNames = null;
-        }
+        ClearCityNameCache();
 
         _cityNames = GetSharedCityNames();
         _cityNameCache.Clear();
@@ -129,6 +125,11 @@ public class BuildingRender : IDisposable
 
     private static readonly object _sharedCityNamesLock = new();
     private static Dictionary<int, string>? _sharedCityNames;
+
+    public static void ClearCityNameCache()
+    {
+        lock (_sharedCityNamesLock) { _sharedCityNames = null; }
+    }
 
     /// <summary>
     /// 全进程共享的城市名表。原实现每次构造 BuildingRender 都会向 StringTableParser

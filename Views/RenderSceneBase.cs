@@ -9,6 +9,7 @@ using System.Windows.Media.Effects;
 using SkiaSharp;
 using SkiaSharp.Views.WPF;
 using WC4MapEditor.Core.Brush;
+using WC4MapEditor.Core.Assets;
 using WC4MapEditor.Core.Commands;
 // 与 WPF 的 System.Windows.Input.CommandManager 同名，使用别名消除歧义
 using CoreCommandManager = WC4MapEditor.Core.Commands.CommandManager;
@@ -25,6 +26,7 @@ using WC4MapEditor.Core.Models;
 using WC4MapEditor.Core.Parsers.Stage;
 using WC4MapEditor.Core.Parsers.World;
 using WC4MapEditor.Core.Parsers.Conquest;
+using WC4MapEditor.Core.Parsers.BTL;
 using WC4MapEditor.Rendering.Helpers;
 using WC4MapEditor.Rendering.Skia;
 using WC4MapEditor.Views.Assist;
@@ -51,10 +53,43 @@ public abstract class RenderSceneBase : UserControl, IDisposable
     private const double BrushMinDragDistance = 5.0;
     private const double BrushInterpolationStep = 4.0;
     private int _sceneId = -1;
+    private GameProjectWorkspace? _project;
+    private ProjectMapDocument? _projectMap;
+
+    protected string ResolveMapInputPath(string path) => _project?.GetEditablePath(path) ?? path;
+    protected string MapInitialDirectory => _project?.AssetsRoot ?? Environment.CurrentDirectory;
+    private string EditingSceneType => _projectMap?.ExternalWorldPath != null ? "conquest" : SceneType;
+
+    private void BindProjectMap()
+    {
+        _projectMap = _project != null && _mapData != null
+            ? ProjectMapDocument.Attach(_project, _mapData!) : null;
+        UpdateProjectMapInfo();
+    }
+
+    private void UpdateProjectMapInfo()
+    {
+        if (_projectMap?.ExternalWorldPath != null)
+            _debugConsole.WriteLine($"[项目] 底图：{_projectMap.ExternalWorldPath}；在 world.bin 场景编辑地形，在此场景编辑 BTL 对象与省区。");
+        if (_sceneNameLabel != null)
+            _sceneNameLabel.ToolTip = _project == null ? null : $"保存目录：{_project.OutputRoot}" +
+                (_projectMap?.ExternalWorldPath != null ? "\n底图来自 world.bin；地形请在 world.bin 场景中编辑。" : "");
+    }
+
+    private bool CacheCurrentScene()
+    {
+        if (_sceneId < 0) return true;
+        var manager = RenderSceneManager.Instance;
+        if (manager.CacheSceneToDisk(_sceneId)) return true;
+        MessageBox.Show(Window, manager.GetScene(_sceneId)?.CacheError ?? "无法保留当前场景，请先保存或撤销修改。",
+            "无法切换场景", MessageBoxButton.OK, MessageBoxImage.Warning);
+        return false;
+    }
 
     internal void AssignSceneId(int sceneId)
     {
         _sceneId = sceneId;
+        _project = RenderSceneManager.Instance.GetScene(sceneId)?.Project;
     }
 
     private StackPanel? _sceneTabPanel;
@@ -122,6 +157,20 @@ public abstract class RenderSceneBase : UserControl, IDisposable
         }
     }
 
+    private bool SaveCurrentMap(string path)
+    {
+        _project?.ValidateOutputPath(path);
+        bool saved;
+        if (_projectMap != null) { _projectMap.Save(path); saved = true; }
+        else saved = SaveMapDataByFileType(_mapData!, path);
+        if (saved)
+        {
+            _fileStateManager.MarkSaved(path);
+            if (_sceneId >= 0) RenderSceneManager.Instance.MarkSceneSaved(_sceneId, path);
+        }
+        return saved;
+    }
+
     private static MapData? LoadBtlByFileName(string filePath)
     {
         var name = System.IO.Path.GetFileNameWithoutExtension(filePath).ToLowerInvariant();
@@ -133,6 +182,7 @@ public abstract class RenderSceneBase : UserControl, IDisposable
     protected RenderSceneBase(MainWindow window)
     {
         Window = window;
+        _project = window.Projects.Current;
         _mouseManager = window.MouseManager;
         _debugConsole = window.DebugConsole;
         _keyboardManager = window.KeyboardManager;
@@ -331,7 +381,17 @@ public abstract class RenderSceneBase : UserControl, IDisposable
         _renderEngine = new MainRender(RenderEngineFactory.Create());
         Debug.WriteLine($"[Timing] 创建渲染引擎: {sw.ElapsedMilliseconds}ms"); sw.Restart();
 
-        _mapData = LoadMapData();
+        try
+        {
+            _mapData = _sceneId >= 0 ? RenderSceneManager.Instance.LoadSceneFromDisk(_sceneId) : LoadMapData();
+            if (_mapData != null) BindProjectMap();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(Window, $"加载地图失败：{ex.Message}", "加载错误", MessageBoxButton.OK, MessageBoxImage.Error);
+            Window.ReturnToMainScene();
+            return;
+        }
         Debug.WriteLine($"[Timing] LoadMapData: {sw.ElapsedMilliseconds}ms"); sw.Restart();
         if (_mapData == null)
         {
@@ -420,9 +480,9 @@ public abstract class RenderSceneBase : UserControl, IDisposable
         _editModeManager.RecognizeTextBuildingsRequested += OnRecognizeTextBuildingsRequested;
 
         _fileStateManager.OpenFile(_mapData, _mapData.FilePath, SceneType);
-        _editModeManager.SetSceneType(SceneType);
+        _editModeManager.SetSceneType(EditingSceneType);
 
-        var availableModes = _editModeManager.GetAvailableModes(SceneType);
+        var availableModes = _editModeManager.GetAvailableModes(EditingSceneType);
         if (availableModes.Count > 0)
             _editModeManager.SwitchMode(availableModes[0]);
 
@@ -488,6 +548,7 @@ public abstract class RenderSceneBase : UserControl, IDisposable
         var sceneManager = RenderSceneManager.Instance;
         if (_sceneId >= 0)
         {
+            sceneManager.SetSceneMapData(_sceneId, _mapData!, _projectMap);
             sceneManager.ActivateScene(_sceneId);
             var existingScene = sceneManager.GetScene(_sceneId);
             if (existingScene != null && _sceneNameLabel != null)
@@ -498,8 +559,8 @@ public abstract class RenderSceneBase : UserControl, IDisposable
             var sceneName = !string.IsNullOrEmpty(_mapData.FilePath)
                 ? System.IO.Path.GetFileNameWithoutExtension(_mapData.FilePath)
                 : SceneTitle;
-            _sceneId = sceneManager.CreateScene(sceneName, _mapData.FilePath, RenderSceneManager.MapSceneTypeToRenderSceneType(SceneType));
-            sceneManager.SetSceneMapData(_sceneId, _mapData);
+            _sceneId = sceneManager.CreateScene(sceneName, _mapData.FilePath, RenderSceneManager.MapSceneTypeToRenderSceneType(SceneType), _project);
+            sceneManager.SetSceneMapData(_sceneId, _mapData, _projectMap);
             sceneManager.ActivateScene(_sceneId);
 
             if (_sceneNameLabel != null)
@@ -759,15 +820,8 @@ public abstract class RenderSceneBase : UserControl, IDisposable
         {
             try
             {
-                if (SaveMapDataByFileType(_mapData, _mapData.FilePath))
+                if (SaveCurrentMap(_mapData.FilePath))
                 {
-                    _fileStateManager.MarkSaved();
-
-                    // 已写回原始文件，场景的磁盘缓存就过期了：不失效的话，
-                    // 切走再切回来会加载到比原文件更旧的缓存，看起来像"保存没生效"。
-                    if (_sceneId >= 0)
-                        RenderSceneManager.Instance.InvalidateSceneCache(_sceneId);
-
                     MessageBox.Show($"地图已保存到:\n{_mapData.FilePath}", "保存成功", MessageBoxButton.OK, MessageBoxImage.Information);
                     _debugConsole.WriteLine($"[保存] 已保存到: {_mapData.FilePath}");
                 }
@@ -822,6 +876,7 @@ public abstract class RenderSceneBase : UserControl, IDisposable
 
             if (saveDialog.ShowDialog() != true) return;
 
+            _project?.ValidateOutputPath(saveDialog.FileName);
             string outputPath = saveDialog.FileName;
             _debugConsole.WriteLine("[截图] 开始生成地图截图...");
 
@@ -1082,6 +1137,7 @@ public abstract class RenderSceneBase : UserControl, IDisposable
 
         try
         {
+            _project?.ValidateOutputPath(saveDialog.FileName);
             await Task.Run(() =>
             {
                 _geoCalculator.CalculateAndExport(_mapData, saveDialog.FileName);
@@ -1130,6 +1186,7 @@ public abstract class RenderSceneBase : UserControl, IDisposable
 
         try
         {
+            _project?.ValidateOutputPath(saveDialog.FileName);
             await Task.Run(() => _geoCalculator.ExportReferencePointsOnly(saveDialog.FileName));
             MessageBox.Show($"参考点配置已保存到:\n{saveDialog.FileName}", "成功",
                 MessageBoxButton.OK, MessageBoxImage.Information);
@@ -1203,6 +1260,7 @@ public abstract class RenderSceneBase : UserControl, IDisposable
 
         try
         {
+            _project?.ValidateOutputPath(saveDialog.FileName);
             await Task.Run(() => _geoCalculator.ExportGridOnly(_mapData, saveDialog.FileName));
             MessageBox.Show($"格子数据已保存到:\n{saveDialog.FileName}", "成功",
                 MessageBoxButton.OK, MessageBoxImage.Information);
@@ -1312,7 +1370,7 @@ public abstract class RenderSceneBase : UserControl, IDisposable
         using var dialog = new ConfirmDialog(Window)
         {
             Title = "返回确认",
-            Message = "是否确认返回上一级？\n未保存的更改将会丢失。",
+            Message = "是否确认返回上一级？\n地图修改会暂存在当前场景，请及时保存到文件。",
             ConfirmText = "返回",
             CancelText = "取消"
         };
@@ -1323,6 +1381,7 @@ public abstract class RenderSceneBase : UserControl, IDisposable
 
         if (result)
         {
+            if (!CacheCurrentScene()) { _confirmDialogShowing = false; return; }
             CloseAllAssistWindows();
             Window.ReturnToMainScene();
         }
@@ -1957,6 +2016,7 @@ public abstract class RenderSceneBase : UserControl, IDisposable
 
     private void BackButton_Click(object sender, RoutedEventArgs e)
     {
+        if (!CacheCurrentScene()) return;
         CloseAllAssistWindows();
         Window.ReturnToMainScene();
     }
@@ -1979,15 +2039,19 @@ public abstract class RenderSceneBase : UserControl, IDisposable
         {
             Title = "选择地图文件",
             Filter = "地图文件 (*.bin)|*.bin|战役/征服文件 (*.btl)|*.btl|所有文件 (*.*)|*.*",
-            InitialDirectory = System.IO.Directory.GetCurrentDirectory()
+            InitialDirectory = MapInitialDirectory
         };
 
         if (dialog.ShowDialog() == true)
         {
             try
             {
-                var detectedType = RenderSceneManager.GetSceneTypeByFilePath(dialog.FileName);
+                string inputPath = ResolveMapInputPath(dialog.FileName);
+                var detectedType = RenderSceneManager.GetSceneTypeByFilePath(inputPath);
                 var currentType = RenderSceneManager.MapSceneTypeToRenderSceneType(SceneType);
+                var mapData = LoadMapDataByFileType(inputPath);
+                if (mapData == null) throw new InvalidDataException("无法识别地图格式。");
+                var projectMap = _project != null ? ProjectMapDocument.Attach(_project, mapData) : null;
 
                 if (detectedType != currentType)
                 {
@@ -1995,29 +2059,26 @@ public abstract class RenderSceneBase : UserControl, IDisposable
                     var sceneName = System.IO.Path.GetFileNameWithoutExtension(dialog.FileName);
                     var sceneCount = sceneManager.SceneCount;
                     var fullSceneName = $"场景 {sceneCount + 1}:{sceneName}";
-                    var newSceneId = sceneManager.CreateScene(fullSceneName, dialog.FileName, detectedType);
+                    if (!CacheCurrentScene()) return;
+                    var newSceneId = sceneManager.CreateScene(fullSceneName, inputPath, detectedType, _project);
+                    sceneManager.SetSceneMapData(newSceneId, mapData, projectMap);
                     sceneManager.RequestSceneSwitch(newSceneId);
                     return;
                 }
 
-                var mapData = ReloadMapData(dialog.FileName);
-                if (mapData == null)
-                {
-                    System.Windows.MessageBox.Show("加载地图文件失败！", "错误");
-                    return;
-                }
-
-                mapData.FilePath = dialog.FileName;
+                mapData.FilePath = inputPath;
 
                 var sceneManager2 = RenderSceneManager.Instance;
 
                 if (_sceneId >= 0)
                 {
-                    sceneManager2.CacheSceneToDisk(_sceneId);
+                    if (!CacheCurrentScene()) return;
                     sceneManager2.ReleaseSceneMemory(_sceneId);
                 }
 
                 _mapData = mapData;
+                _projectMap = projectMap;
+                UpdateProjectMapInfo();
                 _camera = new Camera
                 {
                     MapWidth = _mapData.MapWidth,
@@ -2038,13 +2099,16 @@ public abstract class RenderSceneBase : UserControl, IDisposable
         _editModeManager.SetViewLayerImageProvider(_renderEngine.ViewLayerImageProvider);
                 _editModeManager.SetCliCommandExecutor(new Services.WpfCliCommandExecutor(_commandManager));
                 _editModeManager.SetRecognizeTerrainCallback(RecognizeTerrainFromViewLayer);
-                _fileStateManager.OpenFile(_mapData, dialog.FileName, SceneType);
+                _fileStateManager.OpenFile(_mapData, inputPath, SceneType);
+                _editModeManager.SetSceneType(EditingSceneType);
+                var modes = _editModeManager.GetAvailableModes(EditingSceneType);
+                if (!modes.Contains(_editModeManager.CurrentMode) && modes.Count > 0) _editModeManager.SwitchMode(modes[0]);
 
                 var sceneName2 = System.IO.Path.GetFileNameWithoutExtension(dialog.FileName);
                 var sceneCount2 = sceneManager2.SceneCount;
                 var fullSceneName2 = $"场景 {sceneCount2 + 1}:{sceneName2}";
-                _sceneId = sceneManager2.CreateScene(fullSceneName2, dialog.FileName, RenderSceneManager.MapSceneTypeToRenderSceneType(SceneType));
-                sceneManager2.SetSceneMapData(_sceneId, _mapData);
+                _sceneId = sceneManager2.CreateScene(fullSceneName2, inputPath, RenderSceneManager.MapSceneTypeToRenderSceneType(SceneType), _project);
+                sceneManager2.SetSceneMapData(_sceneId, _mapData, _projectMap);
                 sceneManager2.ActivateScene(_sceneId);
 
                 if (_sceneNameLabel != null)
@@ -2060,6 +2124,11 @@ public abstract class RenderSceneBase : UserControl, IDisposable
     private void SaveButton_Click(object sender, RoutedEventArgs e)
     {
         if (_mapData == null) return;
+        if (_project != null && !string.IsNullOrEmpty(_mapData.FilePath))
+        {
+            OnQuickSave();
+            return;
+        }
 
         bool isBtlScene = SceneType == "stage" || SceneType == "conquest";
         string currentExt = !string.IsNullOrEmpty(_mapData.FilePath)
@@ -2102,25 +2171,19 @@ public abstract class RenderSceneBase : UserControl, IDisposable
             Filter = filter,
             FilterIndex = defaultFilterIndex,
             FileName = defaultFileName,
-            InitialDirectory = System.IO.Directory.GetCurrentDirectory()
+            InitialDirectory = MapInitialDirectory
         };
 
         if (dialog.ShowDialog() == true)
         {
             try
             {
-                if (!SaveMapDataByFileType(_mapData, dialog.FileName))
+                if (!SaveCurrentMap(dialog.FileName))
                 {
                     System.Windows.MessageBox.Show("保存失败！", "错误");
                     return;
                 }
                 _mapData.FilePath = dialog.FileName;
-                _fileStateManager.MarkSaved();
-
-                // 同 Ctrl+S：已写回文件，场景磁盘缓存作废
-                if (_sceneId >= 0)
-                    RenderSceneManager.Instance.InvalidateSceneCache(_sceneId);
-
                 System.Windows.MessageBox.Show($"地图已保存到:\n{dialog.FileName}", "保存成功");
             }
             catch (Exception ex)
@@ -2135,8 +2198,10 @@ public abstract class RenderSceneBase : UserControl, IDisposable
         var result = System.Windows.MessageBox.Show("确定要创建新地图吗？当前未保存的修改将丢失。", "新建地图", MessageBoxButton.YesNo, MessageBoxImage.Question);
         if (result != MessageBoxResult.Yes) return;
 
-        var newMapData = new MapData(60, 60);
+        var newMapData = SceneType == "world" ? WorldParser.CreateNew(60, 60) : BTLParser.CreateNew(60, 60);
+        newMapData.IsModified = true;
         _mapData = newMapData;
+        BindProjectMap();
         _camera = new Camera
         {
             MapWidth = _mapData.MapWidth,
@@ -2157,6 +2222,15 @@ public abstract class RenderSceneBase : UserControl, IDisposable
         _editModeManager.SetCliCommandExecutor(new Services.WpfCliCommandExecutor(_commandManager));
         _editModeManager.SetRecognizeTerrainCallback(RecognizeTerrainFromViewLayer);
         _fileStateManager.OpenFile(_mapData, "", SceneType);
+        _editModeManager.SetSceneType(EditingSceneType);
+        var modes = _editModeManager.GetAvailableModes(EditingSceneType);
+        if (!modes.Contains(_editModeManager.CurrentMode) && modes.Count > 0) _editModeManager.SwitchMode(modes[0]);
+        var manager = RenderSceneManager.Instance;
+        if (_sceneId >= 0) manager.RemoveScene(_sceneId);
+        _sceneId = manager.CreateScene("新地图", "", RenderSceneManager.MapSceneTypeToRenderSceneType(SceneType), _project);
+        manager.SetSceneMapData(_sceneId, _mapData, _projectMap);
+        manager.ActivateScene(_sceneId);
+        if (_sceneNameLabel != null) _sceneNameLabel.Text = "新地图";
     }
 
     private void ViewLayerButton_Click(object sender, RoutedEventArgs e)
@@ -2341,6 +2415,7 @@ public abstract class RenderSceneBase : UserControl, IDisposable
             }
 
             Debug.WriteLine($"[RenderScene] 切换到场景 {targetSceneId}");
+            if (!CacheCurrentScene()) return;
 
             var targetType = RenderSceneManager.MapSceneTypeToRenderSceneType(SceneType);
             if (targetScene.SceneType != targetType)
@@ -2349,20 +2424,19 @@ public abstract class RenderSceneBase : UserControl, IDisposable
                 return;
             }
 
-            if (_sceneId >= 0)
-            {
-                sceneManager.CacheSceneToDisk(_sceneId);
-                sceneManager.ReleaseSceneMemory(_sceneId);
-            }
-
             var mapData = sceneManager.LoadSceneFromDisk(targetSceneId);
             if (mapData == null)
             {
                 System.Windows.MessageBox.Show("加载场景数据失败！", "错误");
                 return;
             }
+            var projectMap = targetScene.Project != null ? ProjectMapDocument.Attach(targetScene.Project, mapData) : null;
+            if (_sceneId >= 0) sceneManager.ReleaseSceneMemory(_sceneId);
 
             _mapData = mapData;
+            _project = targetScene.Project;
+            _projectMap = projectMap;
+            UpdateProjectMapInfo();
             _camera = new Camera
             {
                 MapWidth = _mapData.MapWidth,
@@ -2383,11 +2457,14 @@ public abstract class RenderSceneBase : UserControl, IDisposable
         _editModeManager.SetViewLayerImageProvider(_renderEngine.ViewLayerImageProvider);
             _editModeManager.SetCliCommandExecutor(new Services.WpfCliCommandExecutor(_commandManager));
             _editModeManager.SetRecognizeTerrainCallback(RecognizeTerrainFromViewLayer);
-            _editModeManager.SetSceneType(SceneType);
+            _editModeManager.SetSceneType(EditingSceneType);
             _fileStateManager.OpenFile(_mapData, targetScene.MapFilePath, SceneType);
+            var modes = _editModeManager.GetAvailableModes(EditingSceneType);
+            if (!modes.Contains(_editModeManager.CurrentMode) && modes.Count > 0) _editModeManager.SwitchMode(modes[0]);
 
             sceneManager.ActivateScene(targetSceneId);
             _sceneId = targetSceneId;
+            sceneManager.SetSceneMapData(_sceneId, _mapData, _projectMap);
 
             if (_sceneNameLabel != null)
                 _sceneNameLabel.Text = targetScene.SceneName;
@@ -3278,7 +3355,7 @@ public abstract class RenderSceneBase : UserControl, IDisposable
 
         if (action == "cycle_mode")
         {
-            _editModeManager.CycleMode(SceneType);
+            _editModeManager.CycleMode(EditingSceneType);
             return;
         }
 
@@ -3560,6 +3637,7 @@ public abstract class RenderSceneBase : UserControl, IDisposable
 
     private void OnEditModeDataModified(object? sender, EventArgs e)
     {
+        _fileStateManager.MarkDirty();
         _renderEngine.InvalidateTerrainCache();
         // 军团领域层按归属值缓存了国家颜色，军团配色一改这份缓存就是旧的，必须清掉
         // （C 键 / U 键批量改色、以及任何改动军团颜色的操作都走这里）

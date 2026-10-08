@@ -27,6 +27,9 @@ public class CountrySettingParser
         }
     }
 
+    private readonly JsonTableFile<CountrySettingData> _countriesFile = new();
+    private readonly JsonTableFile<ConquerCountrySettingData> _conquerCountriesFile = new();
+    private readonly JsonTableFile<ConquerSettingData> _conquersFile = new();
     private readonly AssetManager _manager = AssetManager.Default;
 
     private List<CountrySettingData> _countries = new();
@@ -111,6 +114,9 @@ public class CountrySettingParser
 
     private void LoadAll()
     {
+        _countriesFile.Invalidate();
+        _conquerCountriesFile.Invalidate();
+        _conquersFile.Invalidate();
         LoadCountries();
         LoadConquerCountries();
         LoadConquers();
@@ -125,8 +131,7 @@ public class CountrySettingParser
                 Debug.WriteLine($"[CountrySettingParser] CountrySettings.json 不存在: {CountrySettingsPath}");
                 return;
             }
-            var json = File.ReadAllText(CountrySettingsPath);
-            var data = JsonSerializer.Deserialize<List<CountrySettingData>>(json, JsonOpts);
+            var data = _countriesFile.Read(CountrySettingsPath, JsonOpts);
             if (data != null)
             {
                 _countries = data;
@@ -148,8 +153,7 @@ public class CountrySettingParser
                 Debug.WriteLine($"[CountrySettingParser] ConquerCountrySettings.json 不存在: {ConquerCountrySettingsPath}");
                 return;
             }
-            var json = File.ReadAllText(ConquerCountrySettingsPath);
-            var data = JsonSerializer.Deserialize<List<ConquerCountrySettingData>>(json, JsonOpts);
+            var data = _conquerCountriesFile.Read(ConquerCountrySettingsPath, JsonOpts);
             if (data != null)
             {
                 _conquerCountries = data;
@@ -171,8 +175,7 @@ public class CountrySettingParser
                 Debug.WriteLine($"[CountrySettingParser] ConquerSettings.json 不存在: {ConquerSettingsPath}");
                 return;
             }
-            var json = File.ReadAllText(ConquerSettingsPath);
-            var data = JsonSerializer.Deserialize<List<ConquerSettingData>>(json, JsonOpts);
+            var data = _conquersFile.Read(ConquerSettingsPath, JsonOpts);
             if (data != null)
             {
                 _conquers = data;
@@ -231,8 +234,7 @@ public class CountrySettingParser
     {
         try
         {
-            var json = JsonSerializer.Serialize(_countries, JsonOpts);
-            File.WriteAllText(CountrySettingsPath, json);
+            _countriesFile.Save(CountrySettingsPath, _countries);
             Debug.WriteLine($"[CountrySettingParser] 保存 CountrySettings.json 成功");
             return true;
         }
@@ -247,8 +249,7 @@ public class CountrySettingParser
     {
         try
         {
-            var json = JsonSerializer.Serialize(_conquerCountries, JsonOpts);
-            File.WriteAllText(ConquerCountrySettingsPath, json);
+            _conquerCountriesFile.Save(ConquerCountrySettingsPath, _conquerCountries);
             Debug.WriteLine($"[CountrySettingParser] 保存 ConquerCountrySettings.json 成功");
             return true;
         }
@@ -261,6 +262,11 @@ public class CountrySettingParser
 
     public void Reload()
     {
+        ResolvePaths();
+        _stringTableParser = null;
+        _countries.Clear();
+        _conquerCountries.Clear();
+        _conquers.Clear();
         LoadAll();
     }
 

@@ -38,10 +38,14 @@ public class ArmySettingParser
         }
     }
 
+    private readonly JsonTableFile<ArmySettingData> _unitsFile = new();
     private readonly AssetManager _manager = AssetManager.Default;
     private List<ArmySettingData> _units = new();
     private StringTableParser? _stringTable;
     private readonly Dictionary<int, ArmyPosEntry> _pos = new();
+    private XDocument? _positionDocument;
+    private readonly Dictionary<int, (int X, int Y, double Scale)> _positionBaseline = new();
+    private bool _positionsLoaded;
 
     public IReadOnlyList<ArmySettingData> All => _units;
     public List<ArmySettingData> Items => _units;
@@ -105,6 +109,7 @@ public class ArmySettingParser
 
     public void LoadAll()
     {
+        _unitsFile.Invalidate();
         LoadUnits();
         LoadXmlPos();
         _stringTable = new StringTableParser(StringTablePath);
@@ -119,8 +124,7 @@ public class ArmySettingParser
                 Debug.WriteLine($"[ArmySettingParser] 文件不存在: {ConfigPath}");
                 return;
             }
-            var json = File.ReadAllText(ConfigPath);
-            var data = JsonSerializer.Deserialize<List<ArmySettingData>>(json, JsonOpts);
+            var data = _unitsFile.Read(ConfigPath, JsonOpts);
             if (data != null) _units = data;
         }
         catch (Exception ex)
@@ -162,35 +166,35 @@ public class ArmySettingParser
 
     public void LoadXmlPos()
     {
-        _pos.Clear();
+        _positionsLoaded = false;
         try
         {
-            if (!File.Exists(XmlPosPath))
+            var document = File.Exists(XmlPosPath) ? XDocument.Load(XmlPosPath, LoadOptions.PreserveWhitespace)
+                : new XDocument(new XElement("units"));
+            var root = document.Element("units") ?? throw new InvalidDataException("Expected a units root.");
+            var positions = new Dictionary<int, ArmyPosEntry>();
+            foreach (var element in root.Elements("unit"))
             {
-                Debug.WriteLine($"[ArmySettingParser] def_armypos.xml 不存在: {XmlPosPath}");
-                return;
-            }
-            var doc = XDocument.Load(XmlPosPath);
-            var root = doc.Element("units");
-            if (root == null) return;
-            foreach (var el in root.Elements("unit"))
-            {
-                var id = (int?)el.Attribute("id");
-                if (id == null) continue;
-                _pos[id.Value] = new ArmyPosEntry
+                int id = (int?)element.Attribute("id") ?? throw new InvalidDataException("Missing unit id.");
+                var entry = new ArmyPosEntry
                 {
-                    Id = id.Value,
-                    PosX = (int?)el.Attribute("x") ?? 0,
-                    PosY = (int?)el.Attribute("y") ?? 0,
-                    Scale = (double?)el.Attribute("scale") ?? 1.0
+                    Id = id, PosX = (int?)element.Attribute("x") ?? 0,
+                    PosY = (int?)element.Attribute("y") ?? 0, Scale = (double?)element.Attribute("scale") ?? 1.0
                 };
+                if (!double.IsFinite(entry.Scale) || entry.Scale <= 0 || !positions.TryAdd(id, entry))
+                    throw new InvalidDataException("Invalid or duplicate unit position.");
             }
-            Debug.WriteLine($"[ArmySettingParser] 已加载 {_pos.Count} 个兵种坐标");
+            _pos.Clear();
+            _positionBaseline.Clear();
+            foreach (var entry in positions.Values)
+            {
+                _pos.Add(entry.Id, entry);
+                _positionBaseline.Add(entry.Id, (entry.PosX, entry.PosY, entry.Scale));
+            }
+            _positionDocument = document;
+            _positionsLoaded = true;
         }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"[ArmySettingParser] 加载 def_armypos.xml 失败: {ex.Message}");
-        }
+        catch (Exception ex) { Debug.WriteLine($"[ArmySettingParser] Position load failed: {ex.Message}"); }
     }
 
     public ArmyPosEntry? GetPos(int id) => _pos.GetValueOrDefault(id);
@@ -207,56 +211,49 @@ public class ArmySettingParser
 
     public bool RemovePos(int id) => _pos.Remove(id);
 
+    private byte[] SerializePositions()
+    {
+        if (!_positionsLoaded || _positionDocument == null) throw new InvalidOperationException("Load unit positions successfully before saving.");
+        var document = new XDocument(_positionDocument);
+        var root = document.Root!;
+        foreach (var element in root.Elements("unit").ToList())
+            if (!_pos.ContainsKey((int)element.Attribute("id")!)) element.Remove();
+        foreach (var entry in _pos.Values)
+        {
+            if (!double.IsFinite(entry.Scale) || entry.Scale <= 0) throw new InvalidDataException("Invalid unit scale.");
+            var element = root.Elements("unit").FirstOrDefault(node => (int)node.Attribute("id")! == entry.Id);
+            bool created = element == null;
+            if (created) { element = new XElement("unit", new XAttribute("id", entry.Id)); root.Add(element); }
+            var baseline = _positionBaseline.GetValueOrDefault(entry.Id);
+            if (created || baseline.X != entry.PosX) element!.SetAttributeValue("x", entry.PosX);
+            if (created || baseline.Y != entry.PosY) element!.SetAttributeValue("y", entry.PosY);
+            if (created || baseline.Scale != entry.Scale) element!.SetAttributeValue("scale", entry.Scale.ToString("R", CultureInfo.InvariantCulture));
+        }
+        using var stream = new MemoryStream();
+        document.Save(stream, SaveOptions.DisableFormatting);
+        return stream.ToArray();
+    }
+
     public bool SaveXmlPos()
     {
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(XmlPosPath)!);
-            var settings = new XmlWriterSettings
-            {
-                Indent = true,
-                IndentChars = "\t",
-                OmitXmlDeclaration = false,
-                Encoding = System.Text.Encoding.UTF8
-            };
-            using var writer = XmlWriter.Create(XmlPosPath, settings);
-            writer.WriteStartElement("units");
-            foreach (var kv in _pos.Values.OrderBy(p => p.Id))
-            {
-                writer.WriteStartElement("unit");
-                writer.WriteAttributeString("id", kv.Id.ToString(CultureInfo.InvariantCulture));
-                writer.WriteAttributeString("x", kv.PosX.ToString(CultureInfo.InvariantCulture));
-                writer.WriteAttributeString("y", kv.PosY.ToString(CultureInfo.InvariantCulture));
-                writer.WriteAttributeString("scale", kv.Scale.ToString("0.0######", CultureInfo.InvariantCulture));
-                writer.WriteEndElement();
-            }
-            writer.WriteEndElement();
-            Debug.WriteLine($"[ArmySettingParser] 已保存 def_armypos.xml {_pos.Count} 项 -> {XmlPosPath}");
+            _unitsFile.Serialize(ConfigPath, _units);
+            AtomicFile.Write(XmlPosPath, SerializePositions());
             return true;
         }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"[ArmySettingParser] 保存 def_armypos.xml 失败: {ex.Message}");
-            return false;
-        }
+        catch (Exception ex) { Debug.WriteLine($"[ArmySettingParser] Position save failed: {ex.Message}"); return false; }
     }
 
     public bool SaveAll()
     {
         try
         {
-            var json = JsonSerializer.Serialize(_units, JsonOpts);
-            File.WriteAllText(ConfigPath, json);
-            _stringTable?.Save();
-            SaveXmlPos();
-            Debug.WriteLine($"[ArmySettingParser] 保存成功: {ConfigPath}");
+            AtomicFile.WriteAllWithStringTable(_stringTable,
+                (ConfigPath, _unitsFile.Serialize(ConfigPath, _units)), (XmlPosPath, SerializePositions()));
             return true;
         }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"[ArmySettingParser] 保存失败: {ex.Message}");
-            return false;
-        }
+        catch (Exception ex) { Debug.WriteLine($"[ArmySettingParser] Save failed: {ex.Message}"); return false; }
     }
 
     public void Reload() => LoadAll();

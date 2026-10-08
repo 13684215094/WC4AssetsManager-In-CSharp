@@ -183,6 +183,16 @@ public partial class BeginScene : UserControl
 
         titleStack.Children.Add(titleLabel);
         titleStack.Children.Add(versionLabel);
+        if (_window.Projects.Current is { } project)
+            titleStack.Children.Add(new TextBlock
+            {
+                Text = $"当前项目：{project.OutputRoot}\n编辑结果保存在此目录",
+                Foreground = Brushes.White,
+                FontSize = 14,
+                Margin = new Thickness(5, 10, 0, 0),
+                TextWrapping = TextWrapping.Wrap,
+                MaxWidth = 800
+            });
         mainContent.Children.Add(titleStack);
         _mainGrid.Children.Add(mainContent);
 
@@ -217,6 +227,7 @@ public partial class BeginScene : UserControl
         _navPanel.Children.Add(_campaignGroup);
         _navPanel.Children.Add(_conquestGroup);
         _navPanel.Children.Add(_mapGroup);
+        _navPanel.Children.Add(CreateNavButton("游戏项目", AssetButton_Click));
         _navPanel.Children.Add(_assetButton);
         _navPanel.Children.Add(_generalButton);
         _navPanel.Children.Add(_countryButton);
@@ -572,6 +583,14 @@ public partial class BeginScene : UserControl
     }
 
     private void MusicToggleButton_Click(object sender, RoutedEventArgs e) { }
+    private string ProjectInitialDirectory => _window.Projects.Current?.AssetsRoot ?? Environment.CurrentDirectory;
+
+    private bool ValidateProjectDestination(string path)
+    {
+        try { _window.Projects.Current?.ValidateOutputPath(path); return true; }
+        catch (Exception ex) { MessageBox.Show(_window, ex.Message, "保存位置", MessageBoxButton.OK, MessageBoxImage.Error); return false; }
+    }
+
     private void CampaignButton_Click(object sender, RoutedEventArgs e)
     {
         var scene = new StageRenderScene(_window);
@@ -641,9 +660,10 @@ public partial class BeginScene : UserControl
             {
                 Filter = "战役文件 (*.btl)|*.btl|所有文件 (*.*)|*.*",
                 Title = "保存战役文件",
-                FileName = $"new_campaign_{mapWidth}x{mapHeight}.btl"
+                FileName = $"new_campaign_{mapWidth}x{mapHeight}.btl",
+                InitialDirectory = ProjectInitialDirectory
             };
-            if (saveDialog.ShowDialog() == true)
+            if (saveDialog.ShowDialog() == true && ValidateProjectDestination(saveDialog.FileName))
             {
                 if (parser.SaveData(saveDialog.FileName))
                 {
@@ -675,14 +695,15 @@ public partial class BeginScene : UserControl
         var mapDialog = new OpenFileDialog
         {
             Filter = "世界地图文件 (*.bin)|*.bin|所有文件 (*.*)|*.*",
-            Title = "选择地图文件（获取尺寸）"
+            Title = "选择地图文件（获取尺寸）",
+            InitialDirectory = ProjectInitialDirectory
         };
         var baseDir = AppDomain.CurrentDomain.BaseDirectory;
         var mapsFolder = System.IO.Path.Combine(baseDir, "Maps");
-        if (Directory.Exists(mapsFolder)) mapDialog.InitialDirectory = mapsFolder;
+        if (_window.Projects.Current == null && Directory.Exists(mapsFolder)) mapDialog.InitialDirectory = mapsFolder;
 
         if (mapDialog.ShowDialog() != true) return;
-        var selectedMapFilePath = mapDialog.FileName;
+        var selectedMapFilePath = _window.Projects.Current?.GetEditablePath(mapDialog.FileName) ?? mapDialog.FileName;
 
         var mapData = WorldParser.LoadFromFile(selectedMapFilePath);
         if (mapData == null)
@@ -746,9 +767,10 @@ public partial class BeginScene : UserControl
             {
                 Filter = "征服文件 (*.btl)|*.btl|所有文件 (*.*)|*.*",
                 Title = "保存征服文件",
-                FileName = $"conquest_{mapFileName}_{mapNumber}_{actualMapWidth}x{actualMapHeight}.btl"
+                FileName = $"conquest_{mapFileName}_{mapNumber}_{actualMapWidth}x{actualMapHeight}.btl",
+                InitialDirectory = ProjectInitialDirectory
             };
-            if (saveDialog.ShowDialog() == true)
+            if (saveDialog.ShowDialog() == true && ValidateProjectDestination(saveDialog.FileName))
             {
                 if (parser.SaveData(saveDialog.FileName))
                 {
@@ -798,8 +820,7 @@ public partial class BeginScene : UserControl
             MapLimits.Area(width, height);
 
             var mapData = WorldParser.CreateNew(width, height);
-            var tempPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"NewMap_{width}x{height}_{DateTime.Now:yyyyMMddHHmmss}.bin");
-            WorldParser.SaveToFile(mapData, tempPath);
+            mapData.IsModified = true;
 
             var saveResult = MessageBox.Show(
                 $"已创建 {width}x{height} 的新地图。\n\n是否保存地图文件？",
@@ -811,9 +832,10 @@ public partial class BeginScene : UserControl
                 {
                     Filter = "地图文件 (*.bin)|*.bin|所有文件 (*.*)|*.*",
                     Title = "保存地图文件",
-                    FileName = $"new_map_{width}x{height}.bin"
+                    FileName = $"new_map_{width}x{height}.bin",
+                    InitialDirectory = ProjectInitialDirectory
                 };
-                if (saveDialog.ShowDialog() == true)
+                if (saveDialog.ShowDialog() == true && ValidateProjectDestination(saveDialog.FileName))
                 {
                     WorldParser.SaveToFile(mapData, saveDialog.FileName);
                     MessageBox.Show($"地图文件已保存到:\n{saveDialog.FileName}", "成功", MessageBoxButton.OK, MessageBoxImage.Information);
@@ -827,7 +849,7 @@ public partial class BeginScene : UserControl
             }
             else
             {
-                var scene = new MapRenderScene(_window, tempPath);
+                var scene = new MapRenderScene(_window, initialMap: mapData);
                 _window.SetCurrentScene(scene);
             }
         }

@@ -33,6 +33,7 @@ public class EventBuffSettingParser
         }
     }
 
+    private readonly JsonTableFile<EventBuffData> _buffsFile = new();
     private readonly AssetManager _manager = AssetManager.Default;
     private List<EventBuffData> _buffs = new();
     private StringTableParser? _stringTable;
@@ -92,6 +93,7 @@ public class EventBuffSettingParser
 
     public void LoadAll()
     {
+        _buffsFile.Invalidate();
         LoadBuffs();
         _stringTable = new StringTableParser(StringTablePath);
     }
@@ -105,8 +107,7 @@ public class EventBuffSettingParser
                 Debug.WriteLine($"[EventBuffSettingParser] 文件不存在: {ConfigPath}");
                 return;
             }
-            var json = File.ReadAllText(ConfigPath);
-            var data = JsonSerializer.Deserialize<List<EventBuffData>>(json, JsonOpts);
+            var data = _buffsFile.Read(ConfigPath, JsonOpts);
             if (data != null) _buffs = data;
         }
         catch (Exception ex)
@@ -164,9 +165,8 @@ public class EventBuffSettingParser
     {
         try
         {
-            var json = JsonSerializer.Serialize(_buffs, JsonOpts);
-            File.WriteAllText(ConfigPath, json);
-            _stringTable?.Save();
+            AtomicFile.WriteAllWithStringTable(_stringTable,
+                (ConfigPath, _buffsFile.Serialize(ConfigPath, _buffs)));
             Debug.WriteLine($"[EventBuffSettingParser] 保存成功: {ConfigPath}");
             return true;
         }

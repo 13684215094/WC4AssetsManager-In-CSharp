@@ -34,6 +34,11 @@ public class ArmyGroupSettingParser
         }
     }
 
+    private readonly JsonTableFile<ArmyGroupSettingData> _armyGroupsFile = new();
+    private readonly JsonTableFile<ArmyGroupReinforcementData> _reinforcementsFile = new();
+    private readonly JsonTableFile<EventSettingData> _eventsFile = new();
+    private readonly JsonTableFile<EventStageSettingData> _stagesFile = new();
+    private readonly JsonTableFile<EventCalendarSettingData> _calendarsFile = new();
     private readonly AssetManager _manager = AssetManager.Default;
     private List<ArmyGroupSettingData> _armyGroups = new();
     private List<ArmyGroupReinforcementData> _reinforcements = new();
@@ -107,15 +112,20 @@ public class ArmyGroupSettingParser
 
     public void LoadAll()
     {
-        _armyGroups = LoadTable<ArmyGroupSettingData>(ConfigPath, _armyGroups);
-        _reinforcements = LoadTable<ArmyGroupReinforcementData>(ReinforcementPath, _reinforcements);
-        _events = LoadTable<EventSettingData>(EventPath, _events);
-        _stages = LoadTable<EventStageSettingData>(EventStagePath, _stages);
-        _calendars = LoadTable<EventCalendarSettingData>(EventCalendarPath, _calendars);
+        _armyGroupsFile.Invalidate();
+        _reinforcementsFile.Invalidate();
+        _eventsFile.Invalidate();
+        _stagesFile.Invalidate();
+        _calendarsFile.Invalidate();
+        _armyGroups = LoadTable(ConfigPath, _armyGroups, _armyGroupsFile);
+        _reinforcements = LoadTable(ReinforcementPath, _reinforcements, _reinforcementsFile);
+        _events = LoadTable(EventPath, _events, _eventsFile);
+        _stages = LoadTable(EventStagePath, _stages, _stagesFile);
+        _calendars = LoadTable(EventCalendarPath, _calendars, _calendarsFile);
         _stringTable = new StringTableParser(StringTablePath);
     }
 
-    private List<T> LoadTable<T>(string path, List<T> fallback)
+    private List<T> LoadTable<T>(string path, List<T> fallback, JsonTableFile<T> table) where T : class
     {
         try
         {
@@ -124,8 +134,7 @@ public class ArmyGroupSettingParser
                 Debug.WriteLine($"[ArmyGroupSettingParser] 文件不存在: {path}");
                 return new List<T>();
             }
-            var json = File.ReadAllText(path);
-            return JsonSerializer.Deserialize<List<T>>(json, JsonOpts) ?? new List<T>();
+            return table.Read(path, JsonOpts);
         }
         catch (Exception ex)
         {
@@ -195,12 +204,12 @@ public class ArmyGroupSettingParser
     {
         try
         {
-            File.WriteAllText(ConfigPath, JsonSerializer.Serialize(_armyGroups, JsonOpts));
-            File.WriteAllText(ReinforcementPath, JsonSerializer.Serialize(_reinforcements, JsonOpts));
-            File.WriteAllText(EventPath, JsonSerializer.Serialize(_events, JsonOpts));
-            File.WriteAllText(EventStagePath, JsonSerializer.Serialize(_stages, JsonOpts));
-            File.WriteAllText(EventCalendarPath, JsonSerializer.Serialize(_calendars, JsonOpts));
-            _stringTable?.Save();
+            AtomicFile.WriteAllWithStringTable(_stringTable,
+                (ConfigPath, _armyGroupsFile.Serialize(ConfigPath, _armyGroups)),
+                (ReinforcementPath, _reinforcementsFile.Serialize(ReinforcementPath, _reinforcements)),
+                (EventPath, _eventsFile.Serialize(EventPath, _events)),
+                (EventStagePath, _stagesFile.Serialize(EventStagePath, _stages)),
+                (EventCalendarPath, _calendarsFile.Serialize(EventCalendarPath, _calendars)));
             Debug.WriteLine("[ArmyGroupSettingParser] 五表保存成功");
             return true;
         }

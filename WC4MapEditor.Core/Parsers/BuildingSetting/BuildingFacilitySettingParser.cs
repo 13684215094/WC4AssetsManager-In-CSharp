@@ -33,6 +33,8 @@ public class BuildingFacilitySettingParser
         }
     }
 
+    private readonly JsonTableFile<BuildingSettingData> _buildingsFile = new();
+    private readonly JsonTableFile<FacilitySettingData> _facilitiesFile = new();
     private readonly AssetManager _manager = AssetManager.Default;
     private List<BuildingSettingData> _buildings = new();
     private List<FacilitySettingData> _facilities = new();
@@ -92,6 +94,8 @@ public class BuildingFacilitySettingParser
 
     public void LoadAll()
     {
+        _buildingsFile.Invalidate();
+        _facilitiesFile.Invalidate();
         LoadBuildings();
         LoadFacilities();
     }
@@ -105,8 +109,7 @@ public class BuildingFacilitySettingParser
                 Debug.WriteLine($"[BuildingFacilitySettingParser] 文件不存在: {BuildingConfigPath}");
                 return;
             }
-            var json = File.ReadAllText(BuildingConfigPath);
-            var data = JsonSerializer.Deserialize<List<BuildingSettingData>>(json, JsonOpts);
+            var data = _buildingsFile.Read(BuildingConfigPath, JsonOpts);
             if (data != null) _buildings = data;
         }
         catch (Exception ex)
@@ -124,8 +127,7 @@ public class BuildingFacilitySettingParser
                 Debug.WriteLine($"[BuildingFacilitySettingParser] 文件不存在: {FacilityConfigPath}");
                 return;
             }
-            var json = File.ReadAllText(FacilityConfigPath);
-            var data = JsonSerializer.Deserialize<List<FacilitySettingData>>(json, JsonOpts);
+            var data = _facilitiesFile.Read(FacilityConfigPath, JsonOpts);
             if (data != null) _facilities = data;
         }
         catch (Exception ex)
@@ -168,8 +170,10 @@ public class BuildingFacilitySettingParser
     {
         try
         {
-            File.WriteAllText(BuildingConfigPath, JsonSerializer.Serialize(_buildings, JsonOpts));
-            File.WriteAllText(FacilityConfigPath, JsonSerializer.Serialize(_facilities, JsonOpts));
+            AtomicFile.WriteAll(
+                (BuildingConfigPath, _buildingsFile.Serialize(BuildingConfigPath, _buildings)),
+                (FacilityConfigPath, _facilitiesFile.Serialize(FacilityConfigPath, _facilities)));
+            AssetManager.Default.InvalidateData();
             Debug.WriteLine($"[BuildingFacilitySettingParser] 保存成功: {BuildingConfigPath} / {FacilityConfigPath}");
             return true;
         }

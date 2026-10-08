@@ -32,8 +32,8 @@ public sealed class FileStateManager
         _currentMapData = mapData;
         _currentFilePath = filePath;
         _fileType = fileType;
-        _isDirty = false;
         _undoManager.Clear();
+        _isDirty = mapData.IsModified;
         Debug.WriteLine($"[FileState] 打开文件: {filePath} ({fileType})");
         FileChanged?.Invoke();
         DirtyStateChanged?.Invoke();
@@ -53,6 +53,7 @@ public sealed class FileStateManager
 
     public void MarkDirty()
     {
+        if (_currentMapData != null) _currentMapData.IsModified = true;
         if (!_isDirty)
         {
             _isDirty = true;
@@ -60,8 +61,10 @@ public sealed class FileStateManager
         }
     }
 
-    public void MarkSaved()
+    public void MarkSaved(string? filePath = null)
     {
+        if (filePath != null) _currentFilePath = filePath;
+        if (_currentMapData != null) _currentMapData.IsModified = false;
         if (_isDirty)
         {
             _isDirty = false;

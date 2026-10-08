@@ -32,6 +32,7 @@ public class ArmyGroupEventSettingParser
         }
     }
 
+    private readonly JsonTableFile<ArmyGroupEventData> _eventsFile = new();
     private readonly AssetManager _manager = AssetManager.Default;
     private List<ArmyGroupEventData> _events = new();
     private StringTableParser? _stringTable;
@@ -91,6 +92,7 @@ public class ArmyGroupEventSettingParser
 
     public void LoadAll()
     {
+        _eventsFile.Invalidate();
         LoadEvents();
         _stringTable = new StringTableParser(StringTablePath);
     }
@@ -104,8 +106,7 @@ public class ArmyGroupEventSettingParser
                 Debug.WriteLine($"[ArmyGroupEventSettingParser] 文件不存在: {ConfigPath}");
                 return;
             }
-            var json = File.ReadAllText(ConfigPath);
-            var data = JsonSerializer.Deserialize<List<ArmyGroupEventData>>(json, JsonOpts);
+            var data = _eventsFile.Read(ConfigPath, JsonOpts);
             if (data != null) _events = data;
         }
         catch (Exception ex)
@@ -153,9 +154,8 @@ public class ArmyGroupEventSettingParser
     {
         try
         {
-            var json = JsonSerializer.Serialize(_events, JsonOpts);
-            File.WriteAllText(ConfigPath, json);
-            _stringTable?.Save();
+            AtomicFile.WriteAllWithStringTable(_stringTable,
+                (ConfigPath, _eventsFile.Serialize(ConfigPath, _events)));
             Debug.WriteLine($"[ArmyGroupEventSettingParser] 保存成功: {ConfigPath}");
             return true;
         }

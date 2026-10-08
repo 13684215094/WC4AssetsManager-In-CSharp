@@ -32,6 +32,7 @@ public class CountryTechSettingParser
         }
     }
 
+    private readonly JsonTableFile<CountryTechData> _techsFile = new();
     private readonly AssetManager _manager = AssetManager.Default;
     private List<CountryTechData> _techs = new();
     private StringTableParser? _stringTable;
@@ -91,6 +92,7 @@ public class CountryTechSettingParser
 
     public void LoadAll()
     {
+        _techsFile.Invalidate();
         LoadTechs();
         _stringTable = new StringTableParser(StringTablePath);
     }
@@ -104,8 +106,7 @@ public class CountryTechSettingParser
                 Debug.WriteLine($"[CountryTechSettingParser] 文件不存在: {ConfigPath}");
                 return;
             }
-            var json = File.ReadAllText(ConfigPath);
-            var data = JsonSerializer.Deserialize<List<CountryTechData>>(json, JsonOpts);
+            var data = _techsFile.Read(ConfigPath, JsonOpts);
             if (data != null) _techs = data;
         }
         catch (Exception ex)
@@ -167,9 +168,8 @@ public class CountryTechSettingParser
     {
         try
         {
-            var json = JsonSerializer.Serialize(_techs, JsonOpts);
-            File.WriteAllText(ConfigPath, json);
-            _stringTable?.Save();
+            AtomicFile.WriteAllWithStringTable(_stringTable,
+                (ConfigPath, _techsFile.Serialize(ConfigPath, _techs)));
             Debug.WriteLine($"[CountryTechSettingParser] 保存成功: {ConfigPath}");
             return true;
         }

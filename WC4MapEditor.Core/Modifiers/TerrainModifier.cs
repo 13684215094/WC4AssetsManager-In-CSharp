@@ -510,41 +510,11 @@ public sealed class TerrainModifier : ModifierBase, IBrushTarget
     /// <summary>
     /// 获取指定边的邻居格子位置
     /// </summary>
-    private void GetNeighborPosition(int col, int row, int edgeIndex, out int neighborCol, out int neighborRow)
+    private static void GetNeighborPosition(int col, int row, int edgeIndex, out int neighborCol, out int neighborRow)
     {
-        // 根据格子编号的奇偶性计算邻居坐标（基于索引的奇偶性）
-        int index = row * _mapData!.MapWidth + col;
-        bool isEven = (index % 2 == 0);
-
-        neighborCol = col;
-        neighborRow = row;
-
-        if (isEven)
-        {
-            // 偶数编号格子
-            switch (edgeIndex)
-            {
-                case 0: neighborRow = row - 1; break;           // 上边
-                case 1: neighborCol = col + 1; neighborRow = row - 1; break; // 右上边
-                case 2: neighborCol = col + 1; break;           // 右下边
-                case 3: neighborRow = row + 1; break;           // 下边
-                case 4: neighborCol = col - 1; break;           // 左下边
-                case 5: neighborCol = col - 1; neighborRow = row - 1; break; // 左上边
-            }
-        }
-        else
-        {
-            // 奇数编号格子
-            switch (edgeIndex)
-            {
-                case 0: neighborRow = row - 1; break;           // 上边
-                case 1: neighborCol = col + 1; break;           // 右上边
-                case 2: neighborCol = col + 1; neighborRow = row + 1; break; // 右下边
-                case 3: neighborRow = row + 1; break;           // 下边
-                case 4: neighborCol = col - 1; neighborRow = row + 1; break; // 左下边
-                case 5: neighborCol = col - 1; break;           // 左上边
-            }
-        }
+        var neighbor = new HexCoord(col, row).GetNeighbor(edgeIndex);
+        neighborCol = neighbor.Col;
+        neighborRow = neighbor.Row;
     }
 
     /// <summary>

@@ -29,12 +29,19 @@ public class HdAtlasParser
 {
     private static readonly object _lock = new();
     private static readonly Dictionary<string, HdAtlasParser> _cache = new(StringComparer.OrdinalIgnoreCase);
+    private static long _cacheRevision = -1;
 
     /// <summary>按图集名（不带扩展名）获取解析器，首次访问时加载。</summary>
     public static HdAtlasParser Get(string baseName)
     {
         lock (_lock)
         {
+            long revision = AssetManager.Default.Revision;
+            if (_cacheRevision != revision)
+            {
+                _cache.Clear();
+                _cacheRevision = revision;
+            }
             if (_cache.TryGetValue(baseName, out var cached)) return cached;
             var parser = new HdAtlasParser(baseName);
             parser.Load();

@@ -1221,8 +1221,14 @@ public class FlagEditScene : UserControl
         }
 
         string outputDir = _parser.TacticalMapDir;
-        if (string.IsNullOrEmpty(outputDir) || !Directory.Exists(outputDir))
+        if (_window.Projects.Current == null && (string.IsNullOrEmpty(outputDir) || !Directory.Exists(outputDir)))
             outputDir = Path.Combine(AppContext.BaseDirectory, "Output");
+        try { _window.Projects.Current?.ValidateOutputPath(Path.Combine(outputDir, $"flag_{_countryId}.png")); }
+        catch (Exception ex)
+        {
+            MessageBox.Show(_window, ex.Message, "保存位置错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
 
         var result = _editorService.MakeFlagWorkflow(_workingCanvas, _countryId, outputDir);
 
@@ -1275,8 +1281,14 @@ public class FlagEditScene : UserControl
         var circleCropped = _editorService.CropCircularRegion(_legacyCanvasImage, x0, y0, x1, y1);
 
         string outputDir = _parser.TacticalMapDir;
-        if (string.IsNullOrEmpty(outputDir) || !Directory.Exists(outputDir))
+        if (_window.Projects.Current == null && (string.IsNullOrEmpty(outputDir) || !Directory.Exists(outputDir)))
             outputDir = Path.Combine(AppContext.BaseDirectory, "Output");
+        try { _window.Projects.Current?.ValidateOutputPath(Path.Combine(outputDir, $"flag_{_countryId}.png")); }
+        catch (Exception ex)
+        {
+            MessageBox.Show(_window, ex.Message, "保存位置错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
 
         var result = _editorService.SaveFlagImages(_legacyCanvasImage, circleCropped, _countryId.ToString(), outputDir, _resize1W, _resize1H, _resize2W, _resize2H);
         circleCropped?.Dispose();

@@ -47,6 +47,8 @@ public partial class MainWindow : Window
     private UserControl? _currentScene;
     private bool _isClosing;
 
+    public GameProjectSession Projects { get; } = new();
+
     /// <summary>
     /// 鼠标输入管理器（由 DI 注入，供各渲染场景共享）
     /// </summary>

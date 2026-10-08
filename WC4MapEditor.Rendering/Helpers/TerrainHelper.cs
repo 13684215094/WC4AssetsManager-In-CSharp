@@ -3,6 +3,7 @@ using System.IO;
 using System.Text.Json;
 using SkiaSharp;
 using WC4MapEditor.Core.Config;
+using WC4MapEditor.Core.Parsers.HdAtlas;
 
 namespace WC4MapEditor.Rendering.Helpers;
 
@@ -21,11 +22,18 @@ public class TerrainHelper
     private Dictionary<string, string> _terrainImages = new();
 
     private readonly string _textureFolderPath;
+    private readonly Dictionary<int, MapTerrainEntry> _projectTerrains;
+    private readonly Dictionary<string, SKImage?> _atlasSurfaces = new();
+    private readonly Dictionary<string, SKImage> _atlasTiles = new();
+    private readonly List<string> _atlasTileOrder = new();
+    private static readonly string[] TerrainAtlases = { "terrain_hd", "plant_hd", "buildings_hd", "terrain", "plant", "buildings" };
 
     public TerrainHelper(string textureFolderName)
     {
         ConfigManager.Instance.Initialize();
         _textureFolderPath = ConfigManager.Instance.GetTexturePath(textureFolderName);
+        _projectTerrains = ConfigManager.Instance.GetMapTerrainEntries().GroupBy(entry => entry.Terrain)
+            .ToDictionary(group => group.Key, group => group.Last());
         Debug.WriteLine($"[TerrainHelper] 纹理文件夹路径: {_textureFolderPath}");
         LoadTerrainConfig();
     }
@@ -42,7 +50,7 @@ public class TerrainHelper
         try
         {
             var jsonContent = File.ReadAllText(configPath);
-            var config = JsonDocument.Parse(jsonContent);
+            using var config = JsonDocument.Parse(jsonContent);
 
             if (config.RootElement.TryGetProperty("terrain_types", out var typesEl))
             {
@@ -81,6 +89,8 @@ public class TerrainHelper
 
     public SKImage? GetTerrainSkImage(int terrainId, int decorationType = 0)
     {
+        var projectImage = GetProjectTerrainImage(terrainId, decorationType);
+        if (projectImage != null) return projectImage;
         var terrainTypeName = GetTerrainTypeName(terrainId);
         if (string.IsNullOrEmpty(terrainTypeName))
             return GetDefaultSkImage();
@@ -135,6 +145,54 @@ public class TerrainHelper
         return skImage;
     }
 
+    private SKImage? GetProjectTerrainImage(int terrainId, int decorationType)
+    {
+        if (!_projectTerrains.TryGetValue(terrainId, out var terrain) || terrain.TileCount == 0 ||
+            !terrain.TileImages.TryGetValue(decorationType % terrain.TileCount, out string? name)) return null;
+        if (_atlasTiles.TryGetValue(name, out var cached))
+        {
+            _atlasTileOrder.Remove(name);
+            _atlasTileOrder.Add(name);
+            return cached;
+        }
+
+        foreach (string atlasName in TerrainAtlases)
+        {
+            var parser = HdAtlasParser.Get(atlasName);
+            var def = parser.GetImageDef(name);
+            if (def == null || parser.SurfaceData == null) continue;
+            try
+            {
+                if (!_atlasSurfaces.TryGetValue(atlasName, out var surface))
+                {
+                    surface = SKImage.FromEncodedData(parser.SurfaceData);
+                    _atlasSurfaces[atlasName] = surface;
+                }
+                if (surface == null || def.X < 0 || def.Y < 0 ||
+                    (long)def.X + def.Width > surface.Width || (long)def.Y + def.Height > surface.Height) continue;
+                var tile = surface.Subset(new SKRectI(def.X, def.Y, def.X + def.Width, def.Y + def.Height));
+                if (tile == null) continue;
+                // These images belong to this helper, independent of the bundled texture disk cache.
+                if (_atlasTiles.Count >= MaxSkImageCacheSize)
+                {
+                    string oldest = _atlasTileOrder[0];
+                    _atlasTileOrder.RemoveAt(0);
+                    _atlasTiles.Remove(oldest, out var expired);
+                    expired?.Dispose();
+                }
+                _atlasTiles[name] = tile;
+                _atlasTileOrder.Add(name);
+                return tile;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[TerrainHelper] 加载项目地形失败: {atlasName}/{name} - {ex.Message}");
+                _atlasSurfaces[atlasName] = null;
+            }
+        }
+        return null;
+    }
+
     private void AddToSkImageCache(string imageKey, SKImage skImage)
     {
         if (_skImageCache.Count >= MaxSkImageCacheSize)
@@ -156,6 +214,8 @@ public class TerrainHelper
 
     public int GetTerrainVariantCount(int terrainId)
     {
+        if (_projectTerrains.TryGetValue(terrainId, out var terrain) && terrain.TileCount > 0)
+            return terrain.TileCount;
         var terrainTypeName = GetTerrainTypeName(terrainId);
         if (string.IsNullOrEmpty(terrainTypeName)) return 16;
 
@@ -198,6 +258,11 @@ public class TerrainHelper
         var count = _skImageCache.Count;
         _skImageCache.Clear();
         _skImageAccessOrder.Clear();
+        foreach (var image in _atlasTiles.Values) image.Dispose();
+        _atlasTiles.Clear();
+        _atlasTileOrder.Clear();
+        foreach (var image in _atlasSurfaces.Values) image?.Dispose();
+        _atlasSurfaces.Clear();
         Debug.WriteLine($"[TerrainHelper] 内存缓存已清空，释放了 {count} 个纹理引用");
     }
 

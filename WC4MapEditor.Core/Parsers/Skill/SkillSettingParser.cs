@@ -34,6 +34,7 @@ public class SkillSettingParser
         }
     }
 
+    private readonly JsonTableFile<SkillSettingData> _skillsFile = new();
     private readonly AssetManager _manager = AssetManager.Default;
     private List<SkillSettingData> _skills = new();
     private StringTableParser? _stringTable;
@@ -93,6 +94,7 @@ public class SkillSettingParser
 
     public void LoadAll()
     {
+        _skillsFile.Invalidate();
         LoadSkills();
         _stringTable = new StringTableParser(StringTablePath);
     }
@@ -106,8 +108,7 @@ public class SkillSettingParser
                 Debug.WriteLine($"[SkillSettingParser] 文件不存在: {ConfigPath}");
                 return;
             }
-            var json = File.ReadAllText(ConfigPath);
-            var data = JsonSerializer.Deserialize<List<SkillSettingData>>(json, JsonOpts);
+            var data = _skillsFile.Read(ConfigPath, JsonOpts);
             if (data != null) _skills = data;
         }
         catch (Exception ex)
@@ -160,9 +161,8 @@ public class SkillSettingParser
     {
         try
         {
-            var json = JsonSerializer.Serialize(_skills, JsonOpts);
-            File.WriteAllText(ConfigPath, json);
-            _stringTable?.Save();
+            AtomicFile.WriteAllWithStringTable(_stringTable,
+                (ConfigPath, _skillsFile.Serialize(ConfigPath, _skills)));
             Debug.WriteLine($"[SkillSettingParser] 保存成功: {ConfigPath}");
             return true;
         }

@@ -45,4 +45,5 @@ public enum AssetKind
     Shader,
     /// <summary>字符串表 / ini 文本。</summary>
     StringTable,
+    World,
 }

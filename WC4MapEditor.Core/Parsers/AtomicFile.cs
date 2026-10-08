@@ -2,6 +2,14 @@ namespace WC4MapEditor.Core.Parsers;
 
 public static class AtomicFile
 {
+    public static void WriteAllWithStringTable(WC4MapEditor.Core.Config.StringTableParser? table, params (string Path, byte[] Bytes)[] files)
+    {
+        byte[]? strings = table?.SerializePending();
+        WriteAll(strings == null ? files : files.Append((table!.FilePath, strings)).ToArray());
+        if (strings != null) table!.AcceptSaved(strings);
+        WC4MapEditor.Core.Assets.AssetManager.Default.InvalidateData();
+    }
+
     public static void WriteAll(params (string Path, byte[] Bytes)[] files)
     {
         var staged = new List<(string Path, string Temporary, string Backup)>();

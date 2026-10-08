@@ -758,6 +758,9 @@ public sealed class ConfigManager
     /// </summary>
     public string GetStringTableFilePath()
     {
+        var manager = Assets.AssetManager.Default;
+        if (manager.IsLoaded) return IOPath.Combine(manager.AssetsRoot, "stringtable_tw.ini");
+
         // 优先使用AssetManager的路径（WC4DATA/assets），确保与游戏运行时一致
         string assetsPath = IOPath.Combine(ResourcePath, "WC4DATA", "assets", "stringtable_tw.ini");
         if (File.Exists(assetsPath)) return assetsPath;
@@ -795,6 +798,13 @@ public sealed class ConfigManager
         _settingData = null;
         _stringTableParser = null;
         _tacticalMapParser = null;
+        _mapTerrainEntries = null;
+        _buildingTypeIds = null;
+        _armyTypeIds = null;
+        _countryIds = null;
+        _armyLevels = null;
+        _rankIds = null;
+        _qualityIds = null;
         Core.Parsers.TacticalMapParser.ClearCache();
         Initialize();
     }

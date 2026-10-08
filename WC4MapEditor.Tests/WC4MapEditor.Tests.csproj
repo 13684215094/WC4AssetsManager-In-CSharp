@@ -6,6 +6,7 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../Services/RenderSceneManager.cs" Link="RenderSceneManager.cs" />
     <ProjectReference Include="../WC4MapEditor.Core/WC4MapEditor.Core.csproj" />
     <ProjectReference Include="../WC4MapEditor.Cli/WC4MapEditor.Cli.csproj" />
   </ItemGroup>

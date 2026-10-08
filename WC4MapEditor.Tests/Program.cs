@@ -115,11 +115,24 @@ TransformTests.Run(Test);
 CliTests.Run(Test);
 GeneralDataTests.Run(Test);
 AssetAuditTests.Run(Test);
+GameProjectTests.Run(Test);
+ProjectSceneTests.Run(Test);
+AuditRegressionTests.Run(Test);
+EditorDataAuditTests.Run(Test);
+bool rendering = args.Contains("--rendering");
+if (rendering)
+{
+    ProjectRenderingTests.Run(Test);
+    ImageEditorAuditTests.Run(Test);
+}
 
 int corpus = Array.IndexOf(args, "--corpus");
 if (corpus >= 0)
 {
     string root = Path.GetFullPath(args[corpus + 1]);
+    GameProjectTests.RunCorpus(Test, root);
+    EditorDataAuditTests.RunCorpus(Test, root);
+    if (rendering) ProjectRenderingTests.RunCorpus(Test, root);
     GeneralDataTests.RunCorpus(Test, root);
     Test("original BTL corpus lossless roundtrip", () =>
     {

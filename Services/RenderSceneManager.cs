@@ -1,8 +1,10 @@
 using System.Diagnostics;
 using System.IO;
 using WC4MapEditor.Core.Models;
+using WC4MapEditor.Core.Assets;
+using ScenePath = System.IO.Path;
 // 注意：本文件位于 WPF 项目内，隐式全局 using 会引入 System.Windows.Shapes（含 Path 类），
-// 与 System.IO.Path 冲突，因此统一使用 IOPath 别名（项目已全局定义）。
+// 与 System.IO.Path 冲突，因此统一使用 ScenePath 别名（使用独立别名以便测试项目复用）。
 using WC4MapEditor.Core.Parsers.Conquest;
 using WC4MapEditor.Core.Parsers.Stage;
 using WC4MapEditor.Core.Parsers.World;
@@ -28,6 +30,10 @@ public sealed class RenderSceneInfo
     public DateTime LastAccessTime { get; set; } = DateTime.Now;
     public bool IsCachedToDisk { get; set; }
     public string CacheFilePath { get; set; } = "";
+    public GameProjectWorkspace? Project { get; init; }
+    public ProjectMapDocument? ProjectMap { get; set; }
+    public bool IsModified { get; set; }
+    public string? CacheError { get; set; }
 }
 
 public sealed class SceneSwitchRequestEventArgs : EventArgs
@@ -77,11 +83,11 @@ public sealed class RenderSceneManager
 
     public static RenderSceneType GetSceneTypeByFilePath(string filePath)
     {
-        var ext = IOPath.GetExtension(filePath).ToLowerInvariant();
+        var ext = ScenePath.GetExtension(filePath).ToLowerInvariant();
         if (ext is ".bin" or ".dat") return RenderSceneType.Test;
         if (ext == ".btl")
         {
-            var name = IOPath.GetFileNameWithoutExtension(filePath).ToLowerInvariant();
+            var name = ScenePath.GetFileNameWithoutExtension(filePath).ToLowerInvariant();
             if (name.StartsWith("conquest")) return RenderSceneType.Conquest;
             return RenderSceneType.Stage;
         }
@@ -119,7 +125,7 @@ public sealed class RenderSceneManager
     private static string InitializeCacheDirectory()
     {
         var baseDir = AppDomain.CurrentDomain.BaseDirectory;
-        var cachePath = IOPath.Combine(baseDir, "Cache", "Scenes");
+        var cachePath = ScenePath.Combine(baseDir, "Cache", "Scenes");
         if (!Directory.Exists(cachePath))
         {
             Directory.CreateDirectory(cachePath);
@@ -136,7 +142,8 @@ public sealed class RenderSceneManager
 
             if (_currentSceneId >= 0 && _scenes.TryGetValue(_currentSceneId, out var currentScene))
             {
-                CacheSceneToDisk(_currentSceneId);
+                if (!CacheSceneToDisk(_currentSceneId))
+                    throw new InvalidOperationException(currentScene.CacheError ?? "无法缓存当前场景，请先保存或撤销修改。");
                 ReleaseSceneMemory(_currentSceneId);
             }
 
@@ -145,7 +152,8 @@ public sealed class RenderSceneManager
         }
     }
 
-    public int CreateScene(string sceneName, string mapFilePath, RenderSceneType sceneType = RenderSceneType.Test)
+    public int CreateScene(string sceneName, string mapFilePath, RenderSceneType sceneType = RenderSceneType.Test,
+        GameProjectWorkspace? project = null)
     {
         lock (_lock)
         {
@@ -156,7 +164,8 @@ public sealed class RenderSceneManager
                 SceneName = string.IsNullOrEmpty(sceneName) ? $"场景 {_sceneIdCounter}" : sceneName,
                 MapFilePath = mapFilePath,
                 SceneType = sceneType,
-                CacheFilePath = IOPath.Combine(_cacheDirectory, $"scene_{_sceneIdCounter}.cache")
+                Project = project,
+                CacheFilePath = ScenePath.Combine(_cacheDirectory, $"scene_{_sceneIdCounter}.cache")
             };
             _scenes[_sceneIdCounter] = scene;
             Debug.WriteLine($"[SceneManager] 创建场景 {scene.SceneId}: {scene.SceneName}");
@@ -165,13 +174,15 @@ public sealed class RenderSceneManager
         }
     }
 
-    public void SetSceneMapData(int sceneId, MapData mapData)
+    public void SetSceneMapData(int sceneId, MapData mapData, ProjectMapDocument? projectMap = null)
     {
         lock (_lock)
         {
             if (_scenes.TryGetValue(sceneId, out var scene))
             {
                 scene.MapData = mapData;
+                scene.ProjectMap = projectMap;
+                scene.IsModified = mapData.IsModified;
                 scene.LastAccessTime = DateTime.Now;
             }
         }
@@ -199,44 +210,68 @@ public sealed class RenderSceneManager
         }
     }
 
-    public void CacheSceneToDisk(int sceneId)
+    public bool CacheSceneToDisk(int sceneId)
     {
         lock (_lock)
         {
-            if (!_scenes.TryGetValue(sceneId, out var scene)) return;
+            if (!_scenes.TryGetValue(sceneId, out var scene)) return false;
 
             try
             {
-                var cacheDir = IOPath.GetDirectoryName(scene.CacheFilePath);
+                var cacheDir = ScenePath.GetDirectoryName(scene.CacheFilePath);
                 if (!string.IsNullOrEmpty(cacheDir) && !Directory.Exists(cacheDir))
                     Directory.CreateDirectory(cacheDir);
 
                 if (scene.MapData != null)
                 {
-                    bool saved = scene.SceneType switch
+                    scene.ProjectMap?.ValidateChanges();
+                    string originalPath = scene.MapData.FilePath;
+                    bool wasModified = scene.MapData.IsModified;
+                    bool saved;
+                    try
                     {
-                        RenderSceneType.Test => SaveWorldMapData(scene.MapData, scene.CacheFilePath),
-                        RenderSceneType.Stage => StageParser.SaveFromMapData(scene.MapData, scene.CacheFilePath),
-                        RenderSceneType.Conquest => ConquestParser.SaveFromMapData(scene.MapData, scene.CacheFilePath),
-                        RenderSceneType.Campaign => StageParser.SaveFromMapData(scene.MapData, scene.CacheFilePath),
-                        _ => SaveWorldMapData(scene.MapData, scene.CacheFilePath)
-                    };
+                        saved = scene.SceneType switch
+                        {
+                            RenderSceneType.Test => SaveWorldMapData(scene.MapData, scene.CacheFilePath),
+                            RenderSceneType.Stage => StageParser.SaveFromMapData(scene.MapData, scene.CacheFilePath),
+                            RenderSceneType.Conquest => ConquestParser.SaveFromMapData(scene.MapData, scene.CacheFilePath),
+                            RenderSceneType.Campaign => StageParser.SaveFromMapData(scene.MapData, scene.CacheFilePath),
+                            _ => SaveWorldMapData(scene.MapData, scene.CacheFilePath)
+                        };
+                    }
+                    finally
+                    {
+                        scene.MapData.FilePath = originalPath;
+                        scene.MapData.IsModified = wasModified;
+                    }
                     if (saved)
                     {
+                        scene.IsModified = wasModified;
+                        scene.CacheError = null;
                         scene.IsCachedToDisk = true;
                         Debug.WriteLine($"[SceneManager] 场景 {sceneId} 已缓存到磁盘: {scene.CacheFilePath}");
+                        return true;
                     }
+                    scene.CacheError = "无法缓存当前场景，请先保存或撤销修改。";
+                    return false;
                 }
+                else if (scene.IsCachedToDisk && File.Exists(scene.CacheFilePath)) return true;
                 else if (File.Exists(scene.MapFilePath))
                 {
                     File.Copy(scene.MapFilePath, scene.CacheFilePath, true);
+                    scene.IsModified = false;
+                    scene.CacheError = null;
                     scene.IsCachedToDisk = true;
                     Debug.WriteLine($"[SceneManager] 场景 {sceneId} 已缓存（复制原文件）");
+                    return true;
                 }
+                return false;
             }
             catch (Exception ex)
             {
+                scene.CacheError = ex.Message;
                 Debug.WriteLine($"[SceneManager] 缓存场景 {sceneId} 失败: {ex.Message}");
+                return false;
             }
         }
     }
@@ -246,6 +281,7 @@ public sealed class RenderSceneManager
         lock (_lock)
         {
             if (!_scenes.TryGetValue(sceneId, out var scene)) return null;
+            if (scene.MapData != null) return scene.MapData;
 
             // 优先从磁盘缓存恢复（可能含尚未落盘的编辑），其次才是原始文件
             var filePath = scene.IsCachedToDisk && File.Exists(scene.CacheFilePath)
@@ -272,6 +308,7 @@ public sealed class RenderSceneManager
                     //   2) 保存提示 / 标题里显示的文件名也变成缓存名。
                     // MapFilePath 为空 = 新建后从未保存过，此时保持为空，保存时照常弹对话框。
                     mapData.FilePath = scene.MapFilePath ?? string.Empty;
+                    mapData.IsModified = scene.IsModified;
 
                     scene.MapData = mapData;
                     scene.LastAccessTime = DateTime.Now;
@@ -314,16 +351,28 @@ public sealed class RenderSceneManager
         }
     }
 
+    public void MarkSceneSaved(int sceneId, string filePath)
+    {
+        lock (_lock)
+        {
+            if (!_scenes.TryGetValue(sceneId, out var scene)) return;
+            scene.MapFilePath = filePath;
+            scene.IsModified = false;
+            if (scene.MapData != null) { scene.MapData.FilePath = filePath; scene.MapData.IsModified = false; }
+            InvalidateSceneCache(sceneId);
+        }
+    }
+
     public void ReleaseSceneMemory(int sceneId)
     {
         lock (_lock)
         {
             if (!_scenes.TryGetValue(sceneId, out var scene)) return;
 
-            if (!scene.IsCachedToDisk)
-                CacheSceneToDisk(sceneId);
+            if (scene.MapData != null && !CacheSceneToDisk(sceneId)) return;
 
             scene.MapData = null;
+            scene.ProjectMap = null;
             Debug.WriteLine($"[SceneManager] 场景 {sceneId} 内存已释放");
         }
     }

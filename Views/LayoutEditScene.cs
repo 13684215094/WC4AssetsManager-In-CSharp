@@ -21,6 +21,7 @@ namespace WC4MapEditor.Views;
 public partial class LayoutEditScene : UserControl
 {
     private readonly MainWindow _window;
+    private readonly GameProjectWorkspace? _project;
     private readonly LayoutDocument _doc = new();
     private readonly LayoutEngine.Context _ctx = new();
 
@@ -92,6 +93,7 @@ public partial class LayoutEditScene : UserControl
     public LayoutEditScene(MainWindow window)
     {
         _window = window;
+        _project = window.Projects.Current;
         Background = new SolidColorBrush(Color.FromRgb(0x1E, 0x1E, 0x1E));
 
         _ctx.ImageSize = r =>
@@ -696,11 +698,13 @@ public partial class LayoutEditScene : UserControl
         {
             Filter = "布局 XML|*.xml",
             FileName = _doc.SourceName ?? "layout.xml",
-            Title = "导出布局 XML"
+            Title = "导出布局 XML",
+            InitialDirectory = _project?.AssetsRoot ?? Environment.CurrentDirectory
         };
         if (dlg.ShowDialog() != true) return;
         try
         {
+            _project?.ValidateOutputPath(dlg.FileName);
             File.WriteAllText(dlg.FileName, _doc.Dump(), new System.Text.UTF8Encoding(false));
             SetStatus($"已导出 {IOPath.GetFileName(dlg.FileName)}");
         }
@@ -721,6 +725,7 @@ public partial class LayoutEditScene : UserControl
         if (dlg.ShowDialog() != true) return;
         try
         {
+            _project?.ValidateOutputPath(dlg.FileName);
             int w = (int)Math.Max(1, Math.Round(_worldW));
             int h = (int)Math.Max(1, Math.Round(_worldH));
             var info = new SKImageInfo(w, h, SKColorType.Rgba8888, SKAlphaType.Premul);

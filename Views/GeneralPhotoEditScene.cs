@@ -737,16 +737,19 @@ public class GeneralPhotoEditScene : UserControl
 
         var circleCropped = _editorService.CropCircularRegion(_canvasImage, x0, y0, x1, y1);
 
-        string outputDir;
-        if (!string.IsNullOrEmpty(_baseName))
+        string outputDir = _window.Projects.Current != null ? _parser.GeneralPhotoDir
+            : !string.IsNullOrEmpty(_baseName) && Directory.Exists(_parser.GeneralPhotoDir) ? _parser.GeneralPhotoDir
+            : System.IO.Path.Combine(AppContext.BaseDirectory, "Output");
+        try
         {
-            outputDir = _parser.GeneralPhotoDir;
-            if (string.IsNullOrEmpty(outputDir) || !Directory.Exists(outputDir))
-                outputDir = System.IO.Path.Combine(AppContext.BaseDirectory, "Output");
+            foreach (string name in new[] { $"general_{_baseName}.png", $"general_circle_{_baseName}.png", $"head_{_baseName}.png" })
+                _window.Projects.Current?.ValidateOutputPath(System.IO.Path.Combine(outputDir, name));
         }
-        else
+        catch (Exception ex)
         {
-            outputDir = System.IO.Path.Combine(AppContext.BaseDirectory, "Output");
+            circleCropped?.Dispose();
+            MessageBox.Show(_window, ex.Message, "保存位置错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
         }
 
         var result = _editorService.SaveGeneralImages(_canvasImage, circleCropped, _baseName, outputDir, _resize1W, _resize1H, _resize2W, _resize2H);

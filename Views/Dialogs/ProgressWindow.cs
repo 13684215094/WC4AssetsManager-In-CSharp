@@ -18,10 +18,11 @@ public sealed class ProgressWindow : Window
     private bool _cancelled;
 
     public bool IsCancelled => _cancelled;
+    public event Action? CancellationRequested;
 
-    public ProgressWindow()
+    public ProgressWindow(string title = "地形识别进度")
     {
-        Title = "地形识别进度";
+        Title = title;
         Width = 420;
         Height = 180;
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
@@ -107,7 +108,7 @@ public sealed class ProgressWindow : Window
             Cursor = Cursors.Hand,
             Child = new TextBlock
             {
-                Text = "地形识别进度",
+                Text = Title,
                 FontSize = 13,
                 Foreground = new SolidColorBrush(Color.FromArgb(180, 255, 255, 255)),
                 HorizontalAlignment = HorizontalAlignment.Center,
@@ -166,6 +167,14 @@ public sealed class ProgressWindow : Window
         _cancelled = true;
         _cancelButton.IsEnabled = false;
         _cancelButton.Content = "正在取消...";
+        CancellationRequested?.Invoke();
+    }
+
+    public void UpdateStatus(string message, double percent)
+    {
+        if (_isClosing) return;
+        _progressBar.Value = Math.Clamp(percent, 0, 100);
+        _progressLabel.Text = message;
     }
 
     public void UpdateProgress(int current, int total, int row, int col, int percent)

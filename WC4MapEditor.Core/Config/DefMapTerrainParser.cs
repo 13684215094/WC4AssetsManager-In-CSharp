@@ -65,7 +65,8 @@ public static class DefMapTerrainParser
                     Terrain = terrain,
                     Type = type,
                     Name = node.Attributes["name"]?.Value ?? "",
-                    TileCount = node.SelectNodes("tile")?.Count ?? 0
+                    TileCount = node.SelectNodes("tile")?.Count ?? 0,
+                    TileImages = ReadTileImages(node)
                 });
             }
 
@@ -88,6 +89,15 @@ public static class DefMapTerrainParser
     /// </summary>
     public static HashSet<int> ToGroupIdSet(IEnumerable<MapTerrainEntry> entries)
         => entries.Select(e => e.Terrain).ToHashSet();
+
+    private static IReadOnlyDictionary<int, string> ReadTileImages(XmlNode terrain)
+    {
+        var images = new Dictionary<int, string>();
+        foreach (XmlNode tile in terrain.SelectNodes("tile")!)
+            if (int.TryParse(tile.Attributes?["idx"]?.Value, out int index) && tile.Attributes?["image"]?.Value is { Length: > 0 } image)
+                images[index] = image;
+        return images;
+    }
 }
 
 /// <summary>def_mapterrain.xml 中的一条地形定义</summary>
@@ -104,4 +114,5 @@ public sealed class MapTerrainEntry
 
     /// <summary>变体数量（子元素 tile 的个数），相当于 Java 版的 TERRAINIMGIDMAX</summary>
     public int TileCount { get; init; }
+    public IReadOnlyDictionary<int, string> TileImages { get; init; } = new Dictionary<int, string>();
 }

@@ -12,6 +12,8 @@ public sealed class StringTableParser
     private readonly Dictionary<string, string> _entries = new(StringComparer.OrdinalIgnoreCase);
     private readonly string _filePath;
     private bool _isDirty;
+    private readonly HashSet<string> _changedKeys = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _deletedKeys = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// 文件路径
@@ -64,6 +66,8 @@ public sealed class StringTableParser
             _entries[key] = value;
         }
         _isDirty = false;
+        _changedKeys.Clear();
+        _deletedKeys.Clear();
         Debug.WriteLine($"[StringTableParser] 已解析 {_entries.Count} 个条目");
     }
 
@@ -80,10 +84,14 @@ public sealed class StringTableParser
     /// </summary>
     public void SetValue(string key, string value)
     {
+        if (string.IsNullOrWhiteSpace(key) || key.IndexOfAny(['=', '\r', '\n']) >= 0 || value.IndexOfAny(['\r', '\n']) >= 0)
+            throw new ArgumentException("String table keys and values must fit on one line.");
         if (_entries.TryGetValue(key, out var existing) && existing == value)
             return;
 
         _entries[key] = value;
+        _changedKeys.Add(key);
+        _deletedKeys.Remove(key);
         _isDirty = true;
     }
 
@@ -94,6 +102,8 @@ public sealed class StringTableParser
     {
         if (_entries.Remove(key))
         {
+            _changedKeys.Remove(key);
+            _deletedKeys.Add(key);
             _isDirty = true;
             return true;
         }
@@ -196,72 +206,47 @@ public sealed class StringTableParser
     /// <summary>
     /// 保存到文件
     /// </summary>
-    public void Save()
+    public byte[]? SerializePending()
     {
-        if (!_isDirty) return;
-
+        if (!_isDirty) return null;
         var sb = new StringBuilder();
-
-        // 写入所有条目，保持原有顺序（如果有原始文件则保留注释和空行）
+        var processed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (File.Exists(_filePath))
         {
-            var lines = File.ReadAllLines(_filePath);
-            var processedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-            foreach (var rawLine in lines)
+            foreach (string raw in File.ReadAllLines(_filePath))
             {
-                string line = rawLine.Trim();
-
-                // 保留注释和空行
-                if (string.IsNullOrEmpty(line) || line.StartsWith(';') || line.StartsWith('#') || line.StartsWith('['))
+                string line = raw.Trim();
+                int equals = line.IndexOf('=');
+                if (equals < 0 || line.StartsWith(';') || line.StartsWith('#') || line.StartsWith('['))
                 {
-                    sb.AppendLine(rawLine);
+                    sb.AppendLine(raw);
                     continue;
                 }
-
-                int eqIdx = line.IndexOf('=');
-                if (eqIdx < 0)
+                string key = line[..equals].Trim();
+                if (_deletedKeys.Contains(key)) continue;
+                if (_changedKeys.Contains(key))
                 {
-                    sb.AppendLine(rawLine);
-                    continue;
+                    sb.AppendLine($"{key}={_entries[key]}");
+                    processed.Add(key);
                 }
-
-                string key = line.Substring(0, eqIdx).Trim();
-
-                // 如果该键在修改后的字典中存在，使用新值
-                if (_entries.TryGetValue(key, out var newValue))
-                {
-                    sb.AppendLine($"{key}={newValue}");
-                    processedKeys.Add(key);
-                }
-                else
-                {
-                    // 键已被删除，跳过
-                }
-            }
-
-            // 添加新增的条目
-            foreach (var kvp in _entries)
-            {
-                if (!processedKeys.Contains(kvp.Key))
-                {
-                    sb.AppendLine($"{kvp.Key}={kvp.Value}");
-                }
+                else sb.AppendLine(raw);
             }
         }
-        else
-        {
-            // 新文件，直接写入所有条目
-            foreach (var kvp in _entries)
-            {
-                sb.AppendLine($"{kvp.Key}={kvp.Value}");
-            }
-        }
+        foreach (string key in _changedKeys)
+            if (!processed.Contains(key)) sb.AppendLine($"{key}={_entries[key]}");
+        return Encoding.UTF8.GetBytes(sb.ToString());
+    }
 
-        File.WriteAllText(_filePath, sb.ToString(), Encoding.UTF8);
-        _isDirty = false;
+    public void AcceptSaved(byte[] bytes)
+        => Parse(Encoding.UTF8.GetString(bytes).TrimStart('\uFEFF').Replace("\r\n", "\n").Split('\n'));
 
-        Debug.WriteLine($"[StringTableParser] 已保存到 {_filePath}");
+    public void Save()
+    {
+        byte[]? bytes = SerializePending();
+        if (bytes == null) return;
+        WC4MapEditor.Core.Parsers.AtomicFile.Write(_filePath, bytes);
+        AcceptSaved(bytes);
+        WC4MapEditor.Core.Assets.AssetManager.Default.InvalidateData();
     }
 
     /// <summary>

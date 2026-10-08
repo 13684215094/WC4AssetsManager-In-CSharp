@@ -861,28 +861,8 @@ public sealed class ProvinceModifier : ModifierBase, IBrushTarget
 
     #region Helpers
 
-    private List<(int col, int row)> GetHexNeighbors(int col, int row)
-    {
-        int index = row * _mapData!.MapWidth + col;
-        if (index % 2 == 0)
-        {
-            return new List<(int, int)>
-            {
-                (col - 1, row), (col + 1, row),
-                (col, row - 1), (col, row + 1),
-                (col - 1, row - 1), (col + 1, row - 1)
-            };
-        }
-        else
-        {
-            return new List<(int, int)>
-            {
-                (col - 1, row), (col + 1, row),
-                (col, row - 1), (col, row + 1),
-                (col - 1, row + 1), (col + 1, row + 1)
-            };
-        }
-    }
+    private static List<(int col, int row)> GetHexNeighbors(int col, int row)
+        => new HexCoord(col, row).GetNeighbors().Select(cell => (cell.Col, cell.Row)).ToList();
 
     private bool IsSeaTerrain(int index)
     {
